@@ -1,0 +1,2 @@
+import { cn } from "@/lib/utils";
+export function Avatar({ name, size = "md" }: { name: string; size?: "sm" | "md" | "lg" }) { const initials = name.split(" ").map((part) => part[0]).slice(0, 2).join(""); return <div className={cn("grid shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-500 via-violet-500 to-teal-500 font-extrabold text-white", size === "sm" && "h-8 w-8 text-[10px]", size === "md" && "h-10 w-10 text-xs", size === "lg" && "h-14 w-14 text-base")}>{initials}</div>; }

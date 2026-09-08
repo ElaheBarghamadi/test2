@@ -1,0 +1,19 @@
+"use client";
+
+import Link from "next/link";
+import { Eye, EyeOff, KeyRound, LoaderCircle } from "lucide-react";
+import { useSearchParams, useRouter } from "next/navigation";
+import { useState, type FormEvent } from "react";
+import { authApi } from "@/lib/api/auth";
+import { apiErrorMessage } from "@/lib/api/client";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+
+export function ResetPasswordForm() {
+  const search = useSearchParams(); const router = useRouter(); const [password, setPassword] = useState(""); const [confirmation, setConfirmation] = useState(""); const [visible, setVisible] = useState(false); const [loading, setLoading] = useState(false); const [message, setMessage] = useState<string | null>(null); const [error, setError] = useState<string | null>(null);
+  const uid = search.get("uid") || ""; const token = search.get("token") || "";
+  const invalidLink = !uid || !token;
+  async function submit(event: FormEvent) { event.preventDefault(); setError(null); setMessage(null); if (invalidLink) return; if (password.length < 8) { setError("گذرواژه باید دست‌کم ۸ کاراکتر باشد."); return; } if (password !== confirmation) { setError("تکرار گذرواژه با گذرواژه جدید یکسان نیست."); return; } setLoading(true); try { await authApi.confirmPasswordReset(uid, token, password); setMessage("گذرواژه شما با موفقیت تغییر کرد. اکنون می‌توانید وارد شوید."); window.setTimeout(() => router.replace("/login"), 1200); } catch (reason) { setError(apiErrorMessage(reason, "پیوند بازیابی نامعتبر یا منقضی شده است.")); } finally { setLoading(false); } }
+  return <Card className="mx-auto w-full max-w-md p-6 sm:p-8"><p className="section-label">امنیت حساب</p><h1 className="mt-2 text-2xl font-black">ساخت گذرواژه جدید</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">یک گذرواژهٔ تازه و مطمئن برای حساب Examora انتخاب کنید.</p>{invalidLink ? <div className="mt-6 rounded-xl bg-destructive/10 p-4 text-sm leading-6 text-destructive">این پیوند کامل نیست یا اعتبار ندارد. از صفحهٔ بازیابی، پیوند جدید دریافت کنید.<Button asChild variant="outline" className="mt-4 w-full"><Link href="/forgot-password">دریافت پیوند جدید</Link></Button></div> : <form className="mt-7 space-y-4" onSubmit={submit}><label className="block text-sm font-bold">گذرواژهٔ جدید<div className="relative mt-2"><Input data-autofocus type={visible ? "text" : "password"} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} required className="pl-10"/><button type="button" className="absolute left-2 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-muted-foreground hover:bg-muted" onClick={() => setVisible(!visible)} aria-label={visible ? "پنهان کردن گذرواژه" : "نمایش گذرواژه"}>{visible ? <EyeOff className="h-4 w-4"/> : <Eye className="h-4 w-4"/>}</button></div></label><label className="block text-sm font-bold">تکرار گذرواژه<Input className="mt-2" type={visible ? "text" : "password"} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} minLength={8} required/></label>{error && <p role="alert" className="rounded-xl bg-destructive/10 p-3 text-xs font-bold text-destructive">{error}</p>}{message && <p role="status" className="rounded-xl bg-emerald-500/10 p-3 text-xs font-bold leading-6 text-emerald-800 dark:text-emerald-300">{message}</p>}<Button type="submit" size="lg" className="w-full" disabled={loading || !!message}>{loading && <LoaderCircle className="h-4 w-4 animate-spin"/>}<KeyRound className="h-4 w-4"/>ثبت گذرواژه جدید</Button></form>}<p className="mt-6 text-center text-xs text-muted-foreground"><Link className="font-bold text-primary hover:underline" href="/login">بازگشت به ورود</Link></p></Card>;
+}

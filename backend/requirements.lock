@@ -1,0 +1,13 @@
+# Resolved runtime dependency set for the Django backend foundation.
+# Regenerate intentionally after updating backend/pyproject.toml dependencies.
+asgiref==3.12.1
+Django==5.2.17
+dj-database-url==3.0.1
+django-cors-headers==4.7.0
+djangorestframework==3.16.1
+djangorestframework-simplejwt==5.5.1
+psycopg==3.3.5
+psycopg-binary==3.3.5
+PyJWT==2.13.0
+python-dotenv==1.1.1
+sqlparse==0.6.0

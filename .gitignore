@@ -1,0 +1,35 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+backend/.env
+
+# Python / Django
+__pycache__/
+*.egg-info/
+*.py[cod]
+*.sqlite3
+backend/.venv/
+.venv/
+backend/staticfiles/
+backend/media/
+
+# Next.js / Node
+node_modules/
+.next/
+out/
+coverage/
+
+# Tooling and OS
+.cache/
+.npm/
+.config/
+.pytest_cache/
+*.tsbuildinfo
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+.vscode/
+.idea/
+
+!.env.local.example

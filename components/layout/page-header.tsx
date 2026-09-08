@@ -1,0 +1,7 @@
+import Link from "next/link";
+import { ChevronLeft, Home } from "lucide-react";
+import { Button } from "@/components/ui/button";
+
+export interface Crumb { label: string; href?: string; }
+export function PageHeader({ eyebrow, title, description, breadcrumbs = [], action }: { eyebrow?: string; title: string; description?: string; breadcrumbs?: Crumb[]; action?: React.ReactNode }) { return <div className="mb-6 sm:mb-8"><nav className="mb-3 flex items-center gap-1.5 text-xs text-muted-foreground" aria-label="مسیر صفحه"><Link href="/" aria-label="خانه" className="rounded p-1 hover:bg-muted"><Home className="h-3.5 w-3.5" /></Link>{breadcrumbs.map((crumb, index) => <span key={`${crumb.label}-${index}`} className="flex items-center gap-1.5"><ChevronLeft className="h-3 w-3"/>{crumb.href ? <Link className="hover:text-foreground" href={crumb.href}>{crumb.label}</Link> : <span>{crumb.label}</span>}</span>)}</nav><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div>{eyebrow && <p className="section-label mb-2">{eyebrow}</p>}<h1 className="text-2xl font-black tracking-tight sm:text-3xl">{title}</h1>{description && <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">{description}</p>}</div>{action && <div className="shrink-0">{action}</div>}</div></div>; }
+export function PageContainer({ children }: { children: React.ReactNode }) { return <div className="mx-auto max-w-[1540px] p-4 sm:p-6 lg:p-8">{children}</div>; }
