@@ -15,6 +15,7 @@ backend/staticfiles/
 backend/media/
 
 # Next.js / Node
+.tools/
 node_modules/
 .next/
 out/

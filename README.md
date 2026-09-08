@@ -35,6 +35,45 @@ Validate a production build (do not run it concurrently with `npm run dev`):
 npm run build
 ```
 
+### اجرای پروژه روی Windows بدون نصب npm در سیستم
+
+برای اجرای فرانت‌اند نیازی به نصب سراسری Node.js یا npm و دسترسی Administrator نیست. اسکریپت پروژه، نسخهٔ portable و تأییدشدهٔ Node.js را داخل `.tools/` دانلود می‌کند و npm را فقط از همان پوشه اجرا می‌کند. `.tools/` و `node_modules/` عمداً در Git ثبت نمی‌شوند.
+
+1. در PowerShell، از ریشهٔ پروژه اجرا کنید:
+
+   ```powershell
+   Set-ExecutionPolicy -Scope Process Bypass
+   .\scripts\setup-local-node.ps1
+   ```
+
+   اسکریپت با توجه به معماری `x64` یا `arm64`، Node.js `22.14.0` را از `nodejs.org` دریافت، SHA-256 آن را بررسی، در `.tools\node-v...` استخراج و سپس `npm ci` را از `package-lock.json` اجرا می‌کند. PATH سیستم و نصب‌های global تغییر نمی‌کنند.
+
+2. فایل محیطی فرانت‌اند را بسازید:
+
+   ```powershell
+   Copy-Item .env.local.example .env.local
+   ```
+
+3. در یک پنجرهٔ PowerShell دوم، API Django را آماده و اجرا کنید (Python 3.12+ لازم است):
+
+   ```powershell
+   Copy-Item backend\.env.example backend\.env
+   py -3 -m venv backend\.venv
+   backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.lock
+   backend\.venv\Scripts\python.exe backend\manage.py migrate
+   backend\.venv\Scripts\python.exe backend\manage.py runserver 0.0.0.0:8000
+   ```
+
+   برای محیط اشتراکی/production مقدارهای `DJANGO_SECRET_KEY`، `DATABASE_URL` و تنظیمات ایمیل را در `backend\.env` وارد کنید. در توسعهٔ محلی، بدون `DATABASE_URL` از SQLite محلی استفاده می‌شود.
+
+4. در پنجرهٔ اول، سایت را با npm محلی اجرا کنید:
+
+   ```powershell
+   .\scripts\dev-local.cmd
+   ```
+
+   سپس `http://localhost:3000` را باز کنید. هر دستور npm دیگر نیز از همین مسیر اجرا می‌شود؛ برای نمونه: ` .\scripts\npm-local.cmd run build `. برای به‌روزرسانی یا نصب دوبارهٔ وابستگی‌ها، اسکریپت setup را دوباره اجرا کنید.
+
 ### Main frontend routes
 
 - `/` — product landing
