@@ -110,6 +110,27 @@ class TeacherExamApiTests(TestCase):
         exam.refresh_from_db()
         self.assertEqual(exam.status, Exam.Status.DRAFT)
 
+    def test_exam_settings_accept_the_frontend_pending_visibility_value(self) -> None:
+        self.authenticate(self.teacher)
+        response = self.create_exam_via_api(
+            settings={
+                "allow_previous_questions": True,
+                "randomize_questions": False,
+                "result_visibility": ExamSettings.ResultVisibility.PENDING,
+                "show_correct_answers": False,
+                "max_attempts": 1,
+            }
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["settings"]["result_visibility"], ExamSettings.ResultVisibility.PENDING)
+
+        invalid_legacy_value = self.client.patch(
+            f"/api/v1/exams/{response.data['id']}/",
+            {"settings": {"result_visibility": "manual"}},
+            format="json",
+        )
+        self.assertEqual(invalid_legacy_value.status_code, 400)
+
     def test_teacher_cannot_view_or_edit_another_teachers_exam(self) -> None:
         exam = self.create_exam()
         self.authenticate(self.other_teacher)

@@ -18,12 +18,19 @@ export const examAttemptService = {
     const questions = new Map(exam.questions.map((question) => [question.id, question]));
     const answerIds = attempt.pendingAnswerQuestionIds || [];
     const flagIds = attempt.pendingFlagQuestionIds || [];
+    const answerUpdates = answerIds.flatMap((questionId) => {
+      const question = questions.get(questionId); const answer = attempt.answers[questionId];
+      return question && answer ? [{ questionId, payload: toAnswerInput(question, answer.value) }] : [];
+    });
+    // Preserve the lightweight single-question request while using Django's atomic batch
+    // endpoint when one save cycle contains multiple changed answers.
+    const answerRequest = answerUpdates.length === 1
+      ? attemptsApi.saveAnswer(attempt.id, answerUpdates[0].questionId, answerUpdates[0].payload, signal)
+      : answerUpdates.length > 1
+        ? attemptsApi.saveAnswers(attempt.id, answerUpdates.map(({ questionId, payload }) => ({ question_id: questionId, ...payload })), signal)
+        : Promise.resolve();
     await Promise.all([
-      ...answerIds.map((questionId) => {
-        const question = questions.get(questionId); const answer = attempt.answers[questionId];
-        if (!question || !answer) return Promise.resolve();
-        return attemptsApi.saveAnswer(attempt.id, questionId, toAnswerInput(question, answer.value), signal);
-      }),
+      answerRequest,
       ...flagIds.map((questionId) => {
         const answer = attempt.answers[questionId];
         return answer ? attemptsApi.setFlag(attempt.id, questionId, answer.flagged, signal) : Promise.resolve();

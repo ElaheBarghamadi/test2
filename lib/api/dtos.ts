@@ -30,10 +30,16 @@ export interface ApiQuestionDto {
   created_at?: string; updated_at?: string;
 }
 
+/** The student attempt serializer omits the parent exam and all answer-key fields. */
+export interface ApiStudentQuestionDto {
+  id: string; type: ApiQuestionType; text: string; instructions: string;
+  marks: number | string; order: number; options: ApiOptionDto[];
+}
+
 export interface ApiExamSettingsDto {
   allow_previous_questions: boolean;
   randomize_questions: boolean;
-  result_visibility: "immediate" | "manual" | "hidden";
+  result_visibility: "immediate" | "pending" | "hidden";
   show_correct_answers: boolean;
   max_attempts: number;
 }
@@ -71,7 +77,7 @@ export interface ApiStudentAttemptExamDto {
 export interface ApiAttemptDto {
   id: string; attempt_number: number; status: ApiAttemptStatus; started_at: string;
   submitted_at: string | null; last_activity_at: string; server_time: string; expires_at: string;
-  remaining_seconds: number; exam: ApiStudentAttemptExamDto; questions: ApiQuestionDto[];
+  remaining_seconds: number; exam: ApiStudentAttemptExamDto; questions: ApiStudentQuestionDto[];
   answers: ApiStudentAnswerDto[];
 }
 export interface ApiAvailableExamDto {
@@ -81,7 +87,7 @@ export interface ApiAvailableExamDto {
   attempt: { id: string; status: ApiAttemptStatus; started_at: string; submitted_at: string | null } | null;
 }
 export interface ApiStudentResultDto {
-  id: string; status: "pending" | "graded" | "published"; score: number | string;
+  id: string; status: "pending" | "hidden" | "published"; score: number | string;
   percentage: number | string | null; correct_count: number; incorrect_count: number;
   unanswered_count: number; pending_manual_grading_count: number; is_final: boolean;
   feedback: string; published_at: string | null;
@@ -89,6 +95,15 @@ export interface ApiStudentResultDto {
 export interface ApiSubmitAttemptDto {
   attempt: { id: string; status: ApiAttemptStatus; submitted_at: string | null };
   result_available: boolean; result?: ApiStudentResultDto;
+}
+
+/** Teacher result serializers include management context and may contain null scores while grading. */
+export interface ApiTeacherResultDto {
+  id: string; attempt: string; student_name: string; exam_title: string;
+  status: "pending" | "hidden" | "published"; score: number | string | null;
+  percentage: number | string | null; correct_count: number; incorrect_count: number;
+  unanswered_count: number; pending_manual_grading_count: number; feedback: string;
+  computed_at: string | null; published_at: string | null;
 }
 
 export interface ApiTeacherOverviewDto {
@@ -117,7 +132,7 @@ export interface ApiTeacherAttemptDetailDto {
   student: { id: string; full_name: string; email: string; grade: string; class_name: string };
   status: ApiAttemptStatus; started_at: string | null; submitted_at: string | null;
   answers: ApiTeacherAttemptAnswerDto[];
-  result: ApiStudentResultDto | null;
+  result: ApiTeacherResultDto | null;
 }
 export interface ApiTeacherStudentOverviewDto {
   id: string; full_name: string; email: string; grade: string; class_name: string;
@@ -126,7 +141,7 @@ export interface ApiTeacherStudentOverviewDto {
 }
 export interface ApiManualGradeResponseDto {
   answer: ApiTeacherAttemptAnswerDto;
-  result: ApiStudentResultDto;
+  result: ApiTeacherResultDto;
 }
 
 export interface ApiSchoolDto {

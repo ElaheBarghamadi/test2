@@ -4,6 +4,7 @@ import type {
   ApiExamSettingsDto,
   ApiExamWritePayload,
   ApiQuestionDto,
+  ApiStudentQuestionDto,
   ApiQuestionWritePayload,
   ApiRole,
   ApiStudentResultDto,
@@ -23,10 +24,10 @@ export function toUser(dto: ApiUserDto): User {
 }
 
 function frontendVisibility(value: ApiExamSettingsDto["result_visibility"]): Exam["settings"]["resultVisibility"] {
-  return value === "manual" ? "pending" : value;
+  return value;
 }
 function apiVisibility(value: Exam["settings"]["resultVisibility"]): ApiExamSettingsDto["result_visibility"] {
-  return value === "pending" ? "manual" : value;
+  return value;
 }
 
 /** Teacher mapper may include correct answers because it is used only in teacher-owned views. */
@@ -49,7 +50,7 @@ export function toTeacherQuestion(dto: ApiQuestionDto): Question {
 }
 
 /** Student mapper intentionally reads only fields returned by the student-safe serializer. */
-export function toStudentQuestion(dto: ApiQuestionDto): Question {
+export function toStudentQuestion(dto: ApiStudentQuestionDto): Question {
   const base = { id: dto.id, order: dto.order, stem: dto.text, helpText: dto.instructions || undefined, points: number(dto.marks) };
   const options = (dto.options || []).map((option) => ({ id: option.id, label: option.text, value: option.id }));
   switch (dto.type) {
