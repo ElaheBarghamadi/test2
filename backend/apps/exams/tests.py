@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 
 from django.test import TestCase
 from django.utils import timezone
@@ -344,3 +345,197 @@ class TeacherExamApiTests(TestCase):
     def test_exam_settings_are_provisioned_for_each_exam(self) -> None:
         exam = self.create_exam()
         self.assertTrue(ExamSettings.objects.filter(exam=exam).exists())
+
+
+class TeacherExamSchedulingAndSettingsApiTests(TeacherExamApiTests):
+    """Coverage for the teaching-workflow additions: pass mark, live counts, start/extend."""
+
+    def test_passing_percentage_round_trips_and_is_validated(self) -> None:
+        self.authenticate(self.teacher)
+        created = self.create_exam_via_api(settings={"passing_percentage": "60.00", "max_attempts": 2})
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.data["settings"]["passing_percentage"], "60.00")
+
+        exam_id = created.data["id"]
+        updated = self.client.patch(
+            f"/api/v1/exams/{exam_id}/",
+            {"settings": {"passing_percentage": "75.50"}},
+            format="json",
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.data["settings"]["passing_percentage"], "75.50")
+
+        invalid = self.client.patch(
+            f"/api/v1/exams/{exam_id}/",
+            {"settings": {"passing_percentage": "140"}},
+            format="json",
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("passing_percentage", invalid.data["detail"]["settings"])
+
+    def test_default_passing_percentage_disables_the_pass_verdict(self) -> None:
+        self.authenticate(self.teacher)
+        created = self.create_exam_via_api()
+        self.assertEqual(created.data["settings"]["passing_percentage"], "0.00")
+
+    def test_duplicate_carries_the_passing_percentage(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.create_exam()
+        exam.settings.passing_percentage = Decimal("45.00")
+        exam.settings.save()
+        self.add_valid_multiple_choice(exam)
+        exam.status = Exam.Status.ACTIVE
+        exam.save()
+
+        response = self.client.post(f"/api/v1/exams/{exam.id}/duplicate/", format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["settings"]["passing_percentage"], "45.00")
+
+    def test_teacher_exam_payload_reports_owner_name_and_participation(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.create_exam()
+        self.add_valid_multiple_choice(exam)
+
+        listed = self.client.get("/api/v1/exams/")
+        self.assertEqual(listed.status_code, 200)
+        row = next(item for item in listed.data if item["id"] == str(exam.id))
+        self.assertEqual(row["teacher_name"], self.teacher.get_full_name())
+        self.assertEqual(row["question_count"], 1)
+        self.assertEqual(row["attempt_count"], 0)
+        self.assertEqual(row["participant_count"], 0)
+
+        detail = self.client.get(f"/api/v1/exams/{exam.id}/")
+        self.assertEqual(detail.data["teacher_name"], self.teacher.get_full_name())
+        self.assertEqual(detail.data["question_count"], 1)
+        self.assertEqual(detail.data["participant_count"], 0)
+
+    def test_start_action_opens_a_scheduled_exam_early(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.create_exam(start_at=timezone.now() + timedelta(days=1))
+        self.add_valid_multiple_choice(exam)
+        exam.status = Exam.Status.SCHEDULED
+        exam.start_at = timezone.now() + timedelta(days=1)
+        exam.save()
+
+        response = self.client.post(f"/api/v1/exams/{exam.id}/start/", format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], Exam.Status.ACTIVE)
+
+        exam.refresh_from_db()
+        self.assertEqual(exam.status, Exam.Status.ACTIVE)
+        self.assertLessEqual(exam.start_at, timezone.now())
+
+    def test_start_action_rejects_an_exam_without_questions(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.create_exam()
+        response = self.client.post(f"/api/v1/exams/{exam.id}/start/", format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("questions", response.data["detail"])
+
+    def test_extend_action_widens_time_only_for_active_exams(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.create_exam(duration_minutes=45)
+        draft = self.client.post(f"/api/v1/exams/{exam.id}/extend/", {"extra_minutes": 15}, format="json")
+        self.assertEqual(draft.status_code, 400)
+
+        exam.status = Exam.Status.ACTIVE
+        exam.end_at = timezone.now() + timedelta(minutes=60)
+        exam.save()
+        original_end = exam.end_at
+
+        extended = self.client.post(f"/api/v1/exams/{exam.id}/extend/", {"extra_minutes": 15}, format="json")
+        self.assertEqual(extended.status_code, 200)
+        exam.refresh_from_db()
+        self.assertEqual(exam.duration_minutes, 60)
+        self.assertGreater(exam.end_at, original_end)
+
+        invalid = self.client.post(f"/api/v1/exams/{exam.id}/extend/", {"extra_minutes": 0}, format="json")
+        self.assertEqual(invalid.status_code, 400)
+
+
+class QuestionOptionIdentityApiTests(TeacherExamApiTests):
+    """Option primary keys are referenced by saved student answers, so edits must not churn them."""
+
+    def test_option_ids_survive_a_renumbering_edit(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.create_exam()
+        created = self.add_valid_multiple_choice(exam)
+        original = {option["id"]: option["text"] for option in created.data["options"]}
+
+        reordered = self.client.patch(
+            f"/api/v1/questions/{created.data['id']}/",
+            {
+                "options": [
+                    {"id": list(original)[1], "text": "Incorrect", "is_correct": False},
+                    {"id": list(original)[0], "text": "Still correct", "is_correct": True},
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(reordered.status_code, 200)
+        self.assertEqual([option["text"] for option in reordered.data["options"]], ["Incorrect", "Still correct"])
+        self.assertEqual({option["id"] for option in reordered.data["options"]}, set(original))
+        self.assertTrue(reordered.data["options"][1]["is_correct"])
+
+    def test_new_options_are_created_and_unanswered_ones_removed(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.create_exam()
+        created = self.add_valid_multiple_choice(exam)
+        keep = created.data["options"][0]["id"]
+
+        updated = self.client.patch(
+            f"/api/v1/questions/{created.data['id']}/",
+            {
+                "options": [
+                    {"id": str(keep), "text": "Correct", "is_correct": True},
+                    {"text": "Rejected", "is_correct": False},
+                    {"text": "Also incorrect", "is_correct": False},
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(len(updated.data["options"]), 3)
+        self.assertEqual(updated.data["options"][0]["id"], str(keep))
+        self.assertEqual(QuestionOption.objects.filter(question_id=created.data["id"]).count(), 3)
+
+    def test_option_selected_by_a_student_answer_cannot_be_removed(self) -> None:
+        from apps.attempts.models import ExamAttempt, StudentAnswer
+
+        self.authenticate(self.teacher)
+        exam = self.create_exam()
+        exam.status = Exam.Status.ACTIVE
+        exam.save()
+        created = self.add_valid_multiple_choice(exam)
+        question = Question.objects.get(pk=created.data["id"])
+        correct, incorrect = question.options.order_by("order")
+
+        attempt = ExamAttempt.objects.create(exam=exam, student=self.student, status=ExamAttempt.Status.SUBMITTED)
+        answer = StudentAnswer.objects.create(attempt=attempt, question=question, answer_data={})
+        answer.selected_options.add(incorrect)
+
+        blocked = self.client.patch(
+            f"/api/v1/questions/{question.id}/",
+            {"options": [{"id": str(correct.id), "text": "Correct", "is_correct": True}]},
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn("options", blocked.data["detail"])
+        self.assertEqual(QuestionOption.objects.filter(question=question).count(), 2)
+
+    def test_stale_option_id_is_rejected_with_a_recoverable_message(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.create_exam()
+        created = self.add_valid_multiple_choice(exam)
+        stale = self.client.patch(
+            f"/api/v1/questions/{created.data['id']}/",
+            {
+                "options": [
+                    {"id": "11111111-1111-1111-1111-111111111111", "text": "Correct", "is_correct": True},
+                    {"text": "Incorrect", "is_correct": False},
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(stale.status_code, 400)
+        self.assertIn("options", stale.data["detail"])

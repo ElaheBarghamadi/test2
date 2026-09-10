@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from datetime import timedelta
 from typing import Any
 
 from django.core.exceptions import ValidationError
@@ -201,6 +202,49 @@ def complete_exam(exam_id) -> Exam:
         return exam
 
 
+def start_exam_now(exam_id) -> Exam:
+    """Bring forward a scheduled exam: validate it once, then open it immediately.
+
+    Teachers use this when a class is sitting in the room and the scheduled start time no longer
+    reflects reality. The publish gate is reused so an exam can never be opened with broken content.
+    """
+    with transaction.atomic():
+        exam = _locked_exam(exam_id)
+        if exam.status not in {Exam.Status.DRAFT, Exam.Status.SCHEDULED}:
+            raise ValidationError({"status": ["Only draft or scheduled exams can be started now."]})
+        validate_exam_for_publication(exam)
+
+        now = timezone.now()
+        if exam.end_at and exam.end_at <= now:
+            raise ValidationError({"schedule": ["An exam whose end time has passed cannot be started."]})
+        if exam.start_at and exam.start_at > now:
+            exam.start_at = now
+        refresh_total_marks(exam)
+        exam.status = Exam.Status.ACTIVE
+        exam.status_before_archive = None
+        exam.save(update_fields=("status", "status_before_archive", "start_at", "total_marks", "updated_at"))
+        return exam
+
+
+def extend_exam_time(exam_id, extra_minutes: int) -> Exam:
+    """Grant extra minutes to an active exam without touching already submitted attempts.
+
+    Attempt expiry is derived from `duration_minutes`, so raising it widens the window for every
+    attempt that is still in progress; the end-of-access window moves by the same amount.
+    """
+    with transaction.atomic():
+        exam = _locked_exam(exam_id)
+        if exam.status != Exam.Status.ACTIVE:
+            raise ValidationError({"status": ["Only active exams can be extended."]})
+        if extra_minutes < 1:
+            raise ValidationError({"extra_minutes": ["Extension must be at least one minute."]})
+        exam.duration_minutes = exam.duration_minutes + extra_minutes
+        if exam.end_at:
+            exam.end_at = max(exam.end_at, timezone.now()) + timedelta(minutes=extra_minutes)
+        exam.save(update_fields=("duration_minutes", "end_at", "updated_at"))
+        return exam
+
+
 def duplicate_exam(exam_id, owner) -> Exam:
     """Create a complete draft copy in one transaction without mutating the source exam."""
     with transaction.atomic():
@@ -240,6 +284,7 @@ def duplicate_exam(exam_id, owner) -> Exam:
             "result_visibility",
             "show_correct_answers",
             "max_attempts",
+            "passing_percentage",
         ):
             setattr(duplicate_settings, field, getattr(source_settings, field))
         duplicate_settings.full_clean()

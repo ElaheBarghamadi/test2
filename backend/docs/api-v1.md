@@ -97,6 +97,8 @@ All routes in this section require a teacher or administrator. A teacher only se
 | `GET` | `/exams/{exam_id}/` | Read a teacher-management exam detail, including answer keys. |
 | `PATCH` | `/exams/{exam_id}/` | Partially update permitted exam metadata/settings. |
 | `POST` | `/exams/{exam_id}/publish/` | Validate then move draft/scheduled exam to `scheduled` or `active`. |
+| `POST` | `/exams/{exam_id}/start/` | Open a published exam for students immediately (early start). |
+| `POST` | `/exams/{exam_id}/extend/` | Add minutes to an `active` exam and shift its `end_at`. |
 | `POST` | `/exams/{exam_id}/complete/` | Move an `active` exam to `completed`. |
 | `POST` | `/exams/{exam_id}/archive/` | Archive without deleting the row. |
 | `POST` | `/exams/{exam_id}/restore/` | Restore an archived exam to its previous appropriate state. |
@@ -130,12 +132,44 @@ Invalid values return a validation error rather than being silently interpreted.
     "randomize_questions": false,
     "result_visibility": "pending",
     "show_correct_answers": false,
-    "max_attempts": 1
+    "max_attempts": 1,
+    "passing_percentage": 50
   }
 }
 ```
 
-`settings` may be omitted or partially supplied on `PATCH`. Durations must be positive; an end time requires a start time and must follow it. `teacher`, `status`, `status_before_archive`, and `total_marks` are server-controlled and rejected in normal create/update payloads.
+`settings` may be omitted or partially supplied on `PATCH`. `passing_percentage` is a percentage of the
+exam total (`0`–`100`, two decimals, `0` meaning "no pass verdict"); it drives `passed` on every student
+result and is copied by `duplicate`. Durations must be positive; an end time requires a start time and must follow it. `teacher`, `status`, `status_before_archive`, and `total_marks` are server-controlled and rejected in normal create/update payloads.
+
+### Response metadata
+
+Both `GET /exams/` and `GET /exams/{exam_id}/` annotate each row with the counters the teacher panel
+shows, so no second request is needed:
+
+- `teacher_name`: the owning teacher's full name
+- `question_count`: number of questions (list rows carry the count, detail rows carry the bodies)
+- `attempt_count`: student attempts recorded for the exam
+- `participant_count`: distinct students with at least one attempt
+
+### Start and extend
+
+`POST /exams/{exam_id}/start/` is the "start now" control for a scheduled or draft exam whose content is
+already valid. It answers `200` with the updated exam detail and refuses (`400`) when the exam is already
+`active`/`completed`/`archived`, when `end_at` has passed, or when no valid question exists yet. Publishing
+is not required first: starting implies the exam passed the same validation `publish` performs. A future
+`start_at` is pulled back to now, and `total_marks` is refreshed before the exam opens.
+
+```json
+{"extra_minutes": 15}
+```
+
+`POST /exams/{exam_id}/extend/` accepts one integer between `1` and `180` and only works on an `active` exam;
+any other field is rejected. It raises `Exam.duration_minutes` and moves `end_at` forward by the same amount.
+Because attempt expiry is derived from `started_at + exam.duration_minutes` (capped by `end_at`) at read time,
+students who are writing right now gain the same minutes on their next request — the web client re-reads the
+deadline every 60 seconds and whenever the tab regains focus, so the extra time appears without a reload. An
+attempt that had already been finalized is never revived.
 
 ### Status workflow
 
@@ -184,6 +218,31 @@ Question routes require the same teacher/admin and ownership rules as the parent
 
 The server appends new questions and owns `order`; use reorder rather than sending an `order` field. An option array replaces the full option set on question `PATCH`, and response options are numbered in the received order.
 
+### Option identity and answered-option protection
+
+Each entry in `options` may carry the `id` of an existing option:
+
+```json
+{
+  "type": "multiple_answer",
+  "text": "Which units are SI?",
+  "marks": "2.00",
+  "configuration": {},
+  "options": [
+    {"id": "option-uuid-1", "text": "Newton", "is_correct": true},
+    {"id": "option-uuid-2", "text": "Watt", "is_correct": true},
+    {"text": "Pound", "is_correct": false}
+  ]
+}
+```
+
+- With an `id`, the row is updated in place, so its primary key — and therefore every `StudentAnswer.selected_options` link to it — survives an edit.
+- Without an `id`, a new option is created. Options of the question that are absent from the payload are deleted.
+- An `id` that is not an option of this question (foreign, or already deleted) is rejected with "One or more option IDs no longer exist on this question. Reload it and try again." Repeating one `id` twice in a single payload is rejected with "Option IDs must not repeat in one request."
+- Removing an option that a student has already selected is refused with "Options 1, 3 are already part of a student answer and cannot be removed. Keep them in the list or duplicate the exam for a fresh structure." Re-wording that option, or changing which option is the key, remains allowed, so an exam in progress can be corrected without destroying submitted work.
+
+A client that has no server identity for an option (a row the teacher just added in the builder) must omit `id` rather than invent one; any non-UUID placeholder is treated as a new option by the web client for that reason.
+
 Validation by question type:
 
 - `multiple_choice`: at least two options and exactly one correct option.
@@ -192,7 +251,7 @@ Validation by question type:
 - `short_answer`: no options; structured metadata may include non-empty `expected_answers`, boolean `case_sensitive`, positive `max_length`, and `placeholder`.
 - `written`: no options; metadata may include positive `max_length`, `placeholder`, and `grading_note`.
 
-Unsupported configuration keys and malformed values are rejected. Student-side automatic grading is documented below; teacher manual grading remains deferred.
+Unsupported configuration keys and malformed values are rejected. Student-side automatic grading is documented below; written answers and short answers with no expected-answer rule are left for teacher manual grading (`/results/teacher/attempts/{attempt_id}/answers/{question_id}/grade/`).
 
 ### Reorder payload
 
@@ -226,13 +285,49 @@ All routes in this section require an authenticated `student`. Teachers and admi
 
 The API filters out drafts, archives, expired schedule windows, and exams that do not match the student's current profile grade/class. If an exam owner belongs to a school, only students with the same active school membership can see or start it; legacy teachers with no school membership retain the pre-existing grade/class behavior. A scheduled exam is shown as `upcoming` before `start_at`; once its window opens it is startable even if no external scheduler has yet changed its teacher-facing status. Completed exams appear only when the caller has an existing attempt.
 
+### Dashboard item fields
+
+Each item of `GET /student/exams/` carries the facts the student space needs without a second request:
+
+```json
+{
+  "id": "exam-uuid",
+  "title": "Cell biology assessment",
+  "duration_minutes": 45,
+  "total_marks": "12.00",
+  "question_count": 6,
+  "max_attempts": 2,
+  "attempts_used": 1,
+  "passing_percentage": 50.0,
+  "result_visibility": "pending",
+  "availability": "in_progress",
+  "attempt": {
+    "id": "attempt-uuid",
+    "status": "in_progress",
+    "attempt_number": 1,
+    "remaining_seconds": 1234,
+    "result": null
+  }
+}
+```
+
+`availability` is one of `available`, `upcoming`, `in_progress`, `completed`. `attempt` is the caller's own
+most recent attempt and is `null` when there is none; `remaining_seconds` is recomputed from the server clock
+so a resumed session shows the time that is actually left. `passing_percentage` and `result_visibility` come
+from the exam settings, which lets the start screen state the pass mark and the release policy before the
+first attempt. `attempt.result` is emitted **only once the teacher has published the result** and contains
+`score`, `percentage`, `maximum_score`, `passing_percentage`, `passed`, and `is_final`; `passed` is `null`
+while the score is not final or when the teacher left `passing_percentage` at `0`, and `is_final` is `false`
+while any response awaits manual grading. Nothing else about the attempt — answers, flags, or keys — is
+included.
+
 Start runs in a transaction. It validates the role, audience, state/window, questions, and attempt limit. A second start request reuses the valid in-progress attempt (`200`) rather than creating a parallel attempt; the first creation returns `201`.
 
 At start, question UUID order is generated by the backend and persisted in `ExamAttempt.question_order`. With `randomize_questions=true`, this order uses server-side randomness once and remains stable for that attempt. Option randomization is intentionally not implemented because there is no current structured option-randomization setting or snapshot field.
 
 ### Attempt detail and timer
 
-Attempt detail returns the attempt state, safe exam content, navigation-only settings (`allow_previous_questions`, `randomize_questions`), questions/options, the student's own answers/flags, plus `server_time`, `expires_at`, and `remaining_seconds`. The deadline is server-calculated as the earlier of `started_at + duration_minutes` and exam `end_at` when one exists.
+Attempt detail returns the attempt state, safe exam content, navigation-only settings (`allow_previous_questions`, `randomize_questions`), questions/options, the student's own answers/flags, plus `server_time`, `expires_at`, `remaining_seconds`, `attempt_number`, and `attempt_limit`. Its `exam` block also carries `total_marks`, `question_count`, `passing_percentage`, and `result_visibility` so the review screen can state the pass mark and when the result will appear; `show_correct_answers`, `max_attempts`, and every answer-key field stay out of it on purpose. The deadline is server-calculated as the earlier of `started_at + duration_minutes` and exam `end_at` when one exists.
 
 Any request that reads or changes an in-progress attempt independently checks the deadline. On expiry, saved work is retained, the attempt is set to `expired`, `submitted_at` is recorded, automatic grading runs, and later modifications are rejected. Submitting an already-expired attempt returns its existing finalized state safely; work is never discarded.
 
@@ -265,7 +360,7 @@ For batch autosave, each item has a question ID plus one of the shapes above. Al
 
 Submission is idempotent: repeated requests do not create a second result or change an already final state. Multiple choice, multiple answer, and true/false use exact selection matching. Multiple-answer is deliberately **full-credit only**: the selected option set must exactly equal the correct set. Short answers are automatically graded only when the existing structured `expected_answers` configuration is present, using trimmed exact matching and optional case sensitivity. Written answers, and short answers without expected answers, are counted as pending manual grading rather than incorrect.
 
-The persisted snapshot reports automatic `score`, aggregate correct/incorrect/unanswered counts, pending manual count, and percentage only when no manual grading remains. It never returns question answer keys. `result_visibility` is enforced as follows:
+The persisted snapshot reports automatic `score`, aggregate correct/incorrect/unanswered counts, pending manual count, and percentage only when no manual grading remains. It also reports `maximum_score`, `attempt_number`, `submitted_at`, `passing_percentage`, and the derived `passed` verdict (`null` when the percentage is not final or no pass mark is configured). It never returns question answer keys. `result_visibility` is enforced as follows:
 
 - `immediate` → safe result is published and returned.
 - `pending` → result is stored as pending and not visible to the student.
@@ -314,4 +409,4 @@ An `admin/users` create request uses `email`, `password` (minimum 8 characters),
 
 ## Intentionally absent
 
-Live WebSocket updates, Redis/Celery processing, advanced anti-cheating, AI monitoring, screen recording, and advanced analytics remain outside this API. The platform provides authenticated exam delivery, autosave, result retrieval, manual text grading, controlled publication, school management, user management, and CSV export.
+Live WebSocket updates, Redis/Celery processing, advanced anti-cheating, AI monitoring, screen recording, and advanced analytics remain outside this API. There is also no post-submission answer-review endpoint: after `submit`, a student sees aggregated marks and the pass verdict, never per-question correctness or the answer key. `show_correct_answers` remains a stored, teacher-editable setting that no student route reads yet. The platform provides authenticated exam delivery, autosave, result retrieval, manual text grading, controlled publication, school management, user management, and CSV export.

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from django.db import transaction
-from django.db.models import Max
+from django.db.models import F, Max
 from rest_framework import serializers
 
 from .models import Exam, ExamSettings, Question, QuestionOption
@@ -53,6 +55,13 @@ class TeacherQuestionSerializer(serializers.ModelSerializer):
 
 
 class QuestionOptionWriteSerializer(serializers.Serializer):
+    """Option input. `id` is optional and only used to keep an existing option's identity stable.
+
+    Reusing the primary key matters because saved student answers reference option IDs: a teacher
+    who edits one option's wording must not silently invalidate an in-flight attempt.
+    """
+
+    id = serializers.UUIDField(required=False, allow_null=True)
     text = serializers.CharField(max_length=1000, trim_whitespace=True)
     is_correct = serializers.BooleanField()
 
@@ -77,12 +86,19 @@ class ExamSettingsSerializer(serializers.ModelSerializer):
             "result_visibility",
             "show_correct_answers",
             "max_attempts",
+            "passing_percentage",
         )
 
     def validate_max_attempts(self, value: int) -> int:
         if value < 1:
             raise serializers.ValidationError("At least one attempt must be allowed.")
         return value
+
+    def validate_passing_percentage(self, value) -> Decimal:
+        percentage = Decimal(str(value)).quantize(Decimal("0.01"))
+        if percentage < 0 or percentage > 100:
+            raise serializers.ValidationError("Passing percentage must be between 0 and 100.")
+        return percentage
 
     def to_internal_value(self, data: dict) -> dict:
         unexpected = set(data).difference(self.fields)
@@ -94,6 +110,9 @@ class ExamSettingsSerializer(serializers.ModelSerializer):
 class TeacherExamListSerializer(serializers.ModelSerializer):
     settings = ExamSettingsSerializer(read_only=True)
     question_count = serializers.IntegerField(read_only=True)
+    attempt_count = serializers.IntegerField(read_only=True)
+    participant_count = serializers.IntegerField(read_only=True)
+    teacher_name = serializers.CharField(source="teacher.get_full_name", read_only=True)
 
     class Meta:
         model = Exam
@@ -104,6 +123,7 @@ class TeacherExamListSerializer(serializers.ModelSerializer):
             "grade",
             "class_name",
             "teacher",
+            "teacher_name",
             "status",
             "duration_minutes",
             "total_marks",
@@ -111,6 +131,8 @@ class TeacherExamListSerializer(serializers.ModelSerializer):
             "end_at",
             "settings",
             "question_count",
+            "attempt_count",
+            "participant_count",
             "created_at",
             "updated_at",
         )
@@ -120,6 +142,10 @@ class TeacherExamListSerializer(serializers.ModelSerializer):
 class TeacherExamSerializer(serializers.ModelSerializer):
     settings = ExamSettingsSerializer(read_only=True)
     questions = TeacherQuestionSerializer(many=True, read_only=True)
+    question_count = serializers.IntegerField(read_only=True)
+    attempt_count = serializers.IntegerField(read_only=True)
+    participant_count = serializers.IntegerField(read_only=True)
+    teacher_name = serializers.CharField(source="teacher.get_full_name", read_only=True)
 
     class Meta:
         model = Exam
@@ -139,6 +165,10 @@ class TeacherExamSerializer(serializers.ModelSerializer):
             "end_at",
             "settings",
             "questions",
+            "question_count",
+            "attempt_count",
+            "participant_count",
+            "teacher_name",
             "created_at",
             "updated_at",
         )
@@ -279,17 +309,51 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
         return attrs
 
     @staticmethod
-    def _replace_options(question: Question, options_data: list[dict]) -> None:
-        question.options.all().delete()
-        QuestionOption.objects.bulk_create([
-            QuestionOption(
-                question=question,
-                text=option["text"],
-                is_correct=option["is_correct"],
-                order=index,
+    def _sync_options(question: Question, options_data: list[dict]) -> None:
+        """Apply option edits in place so existing IDs survive, and protect answered options.
+
+        A naive delete-and-recreate would move every option primary key, which silently drops the
+        `StudentAnswer.selected_options` links of attempts that are already in progress. Matching on
+        the supplied `id` keeps wording/grading edits non-destructive, while removal is refused once
+        students have selected that option.
+        """
+        existing = {str(option.id): option for option in question.options.all()}
+        supplied_ids = [str(option["id"]) for option in options_data if option.get("id")]
+        if len(supplied_ids) != len(set(supplied_ids)):
+            raise serializers.ValidationError({"options": "Option IDs must not repeat in one request."})
+        if any(option_id not in existing for option_id in supplied_ids):
+            raise serializers.ValidationError(
+                {"options": "One or more option IDs no longer exist on this question. Reload it and try again."}
             )
-            for index, option in enumerate(options_data, start=1)
-        ])
+
+        # Option order is unique per question, so shift everything away before renumbering.
+        QuestionOption.objects.filter(question=question).update(order=F("order") + len(existing) + len(options_data) + 1)
+
+        claimed: set[str] = set()
+        for index, option in enumerate(options_data, start=1):
+            option_id = str(option["id"]) if option.get("id") else None
+            if option_id is not None:
+                instance = existing[option_id]
+                instance.text = option["text"]
+                instance.is_correct = option["is_correct"]
+                instance.order = index
+                instance.full_clean()
+                instance.save(update_fields=("text", "is_correct", "order", "updated_at"))
+                claimed.add(option_id)
+                continue
+            QuestionOption(question=question, text=option["text"], is_correct=option["is_correct"], order=index).save()
+
+        removed = [option for option_id, option in existing.items() if option_id not in claimed]
+        blocked = [str(option.order) for option in removed if option.selected_by_answers.exists()]
+        if blocked:
+            raise serializers.ValidationError({
+                "options": (
+                    "Options " + ", ".join(sorted(blocked, key=int)) + " are already part of a student answer and cannot be "
+                    "removed. Keep them in the list or duplicate the exam for a fresh structure."
+                )
+            })
+        for option in removed:
+            option.delete()
 
     def create(self, validated_data: dict) -> Question:
         options_data = validated_data.pop("options", [])
@@ -301,7 +365,7 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             question = Question(exam=exam, order=next_order, **validated_data)
             question.full_clean()
             question.save()
-            self._replace_options(question, options_data)
+            self._sync_options(question, options_data)
             refresh_total_marks(exam)
             return question
 
@@ -314,7 +378,7 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             question.full_clean()
             question.save()
             if options_data is not None:
-                self._replace_options(question, options_data)
+                self._sync_options(question, options_data)
             refresh_total_marks(question.exam)
             return question
 

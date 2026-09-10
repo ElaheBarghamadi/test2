@@ -70,13 +70,20 @@ class ExamSettings(TimeStampedUUIDModel):
     result_visibility = models.CharField(max_length=20, choices=ResultVisibility.choices, default=ResultVisibility.PENDING)
     show_correct_answers = models.BooleanField(default=False)
     max_attempts = models.PositiveSmallIntegerField(default=1)
+    # Pass mark as a percentage of the exam total; 0 disables the pass/fail verdict everywhere.
+    passing_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
 
     class Meta:
         verbose_name_plural = "Exam settings"
 
     def clean(self) -> None:
+        errors: dict[str, str] = {}
         if self.max_attempts < 1:
-            raise ValidationError({"max_attempts": "At least one attempt must be allowed."})
+            errors["max_attempts"] = "At least one attempt must be allowed."
+        if self.passing_percentage < 0 or self.passing_percentage > 100:
+            errors["passing_percentage"] = "Passing percentage must be between 0 and 100."
+        if errors:
+            raise ValidationError(errors)
 
     def __str__(self) -> str:
         return f"Settings: {self.exam.title}"

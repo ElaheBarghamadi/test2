@@ -10,20 +10,32 @@ from .models import ExamResult
 
 
 class StudentResultSerializer(serializers.ModelSerializer):
+    """Published result plus the exam context a student needs to read it (marks, pass verdict)."""
+
     is_final = serializers.SerializerMethodField()
+    maximum_score = serializers.SerializerMethodField()
+    attempt_number = serializers.SerializerMethodField()
+    submitted_at = serializers.SerializerMethodField()
+    passing_percentage = serializers.SerializerMethodField()
+    passed = serializers.SerializerMethodField()
 
     class Meta:
         model = ExamResult
-        # No question-level correctness, answer keys, or teacher feedback/configuration is exposed here.
+        # No question-level correctness, answer keys, or teacher configuration is exposed here.
         fields = (
             "id",
             "status",
             "score",
             "percentage",
+            "maximum_score",
             "correct_count",
             "incorrect_count",
             "unanswered_count",
             "pending_manual_grading_count",
+            "passing_percentage",
+            "passed",
+            "attempt_number",
+            "submitted_at",
             "is_final",
             "feedback",
             "published_at",
@@ -32,6 +44,25 @@ class StudentResultSerializer(serializers.ModelSerializer):
 
     def get_is_final(self, result: ExamResult) -> bool:
         return result.pending_manual_grading_count == 0
+
+    def get_maximum_score(self, result: ExamResult) -> float:
+        return float(result.attempt.exam.total_marks)
+
+    def get_attempt_number(self, result: ExamResult) -> int:
+        return result.attempt.attempt_number
+
+    def get_submitted_at(self, result: ExamResult):  # type: ignore[no-untyped-def]
+        return result.attempt.submitted_at
+
+    def get_passing_percentage(self, result: ExamResult) -> float:
+        return float(result.attempt.exam.settings.passing_percentage)
+
+    def get_passed(self, result: ExamResult) -> bool | None:
+        """None while the score is not final or the teacher left the pass mark unset (0)."""
+        passing = float(result.attempt.exam.settings.passing_percentage)
+        if result.percentage is None or passing <= 0:
+            return None
+        return float(result.percentage) >= passing
 
 
 class TeacherResultSerializer(serializers.ModelSerializer):

@@ -24,11 +24,13 @@ from .services import (
     archive_exam,
     complete_exam,
     duplicate_exam,
+    extend_exam_time,
     publish_exam,
     refresh_total_marks,
     reorder_questions,
     resequence_questions,
     restore_exam,
+    start_exam_now,
 )
 
 
@@ -42,6 +44,18 @@ class ExamListQuerySerializer(serializers.Serializer):
     )
 
 
+class ExamExtendSerializer(serializers.Serializer):
+    """Body for the time-extension action; every other exam action is parameterless."""
+
+    extra_minutes = serializers.IntegerField(min_value=1, max_value=180)
+
+    def to_internal_value(self, data: dict) -> dict:
+        unexpected = set(data).difference(self.fields)
+        if unexpected:
+            raise serializers.ValidationError({field: "This is not a supported extension field." for field in unexpected})
+        return super().to_internal_value(data)
+
+
 def _drf_validation_error(exc: DjangoValidationError) -> serializers.ValidationError:
     if hasattr(exc, "message_dict"):
         return serializers.ValidationError(exc.message_dict)
@@ -52,7 +66,12 @@ class TeacherExamAccessMixin:
     permission_classes = (IsTeacherOrAdministrator, IsExamOwnerOrAdministrator)
 
     def get_exam_queryset(self, *, include_questions: bool = False):  # type: ignore[no-untyped-def]
-        queryset = Exam.objects.select_related("teacher", "settings")
+        queryset = Exam.objects.select_related("teacher", "settings").annotate(
+            # Distinct counts keep the question and attempt joins from multiplying each other.
+            question_count=Count("questions", distinct=True),
+            attempt_count=Count("attempts", distinct=True),
+            participant_count=Count("attempts__student", distinct=True),
+        )
         if include_questions:
             queryset = queryset.prefetch_related(
                 Prefetch(
@@ -122,6 +141,12 @@ class ExamActionView(TeacherExamAccessMixin, APIView):
         try:
             if self.action == "publish":
                 result = publish_exam(exam.pk)
+            elif self.action == "start":
+                result = start_exam_now(exam.pk)
+            elif self.action == "extend":
+                minutes = ExamExtendSerializer(data=request.data)
+                minutes.is_valid(raise_exception=True)
+                result = extend_exam_time(exam.pk, minutes.validated_data["extra_minutes"])
             elif self.action == "archive":
                 result = archive_exam(exam.pk)
             elif self.action == "restore":
@@ -136,6 +161,7 @@ class ExamActionView(TeacherExamAccessMixin, APIView):
             raise _drf_validation_error(exc) from exc
         response_status = status.HTTP_201_CREATED if self.action == "duplicate" else status.HTTP_200_OK
         return self.detail_response(result, response_status=response_status)
+
 
 
 class QuestionAccessMixin(TeacherExamAccessMixin):

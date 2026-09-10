@@ -10,17 +10,53 @@ from .models import ExamAttempt, StudentAnswer
 
 
 class StudentAvailableAttemptSerializer(serializers.ModelSerializer):
+    """Attempt summary for the student dashboard.
+
+    `remaining_seconds` keeps a resumable attempt honest across reloads, and the result summary is
+    emitted only once the teacher has published it so an ungraded attempt cannot leak anything.
+    """
+
+    remaining_seconds = serializers.SerializerMethodField()
+    result = serializers.SerializerMethodField()
+
     class Meta:
         model = ExamAttempt
-        fields = ("id", "status", "started_at", "submitted_at")
+        fields = ("id", "status", "started_at", "submitted_at", "attempt_number", "remaining_seconds", "result")
         read_only_fields = fields
+
+    def get_remaining_seconds(self, attempt: ExamAttempt) -> int | None:
+        value = getattr(attempt, "student_remaining_seconds", None)
+        return int(value) if value is not None else None
+
+    def get_result(self, attempt: ExamAttempt) -> dict | None:
+        from apps.results.models import ExamResult
+
+        result = getattr(attempt, "result", None)
+        if result is None or result.status != ExamResult.Status.PUBLISHED:
+            return None
+        settings = attempt.exam.settings
+        percentage = float(result.percentage) if result.percentage is not None else None
+        passing = float(settings.passing_percentage)
+        return {
+            "score": float(result.score) if result.score is not None else None,
+            "percentage": percentage,
+            "maximum_score": float(attempt.exam.total_marks),
+            "passing_percentage": passing,
+            "passed": None if percentage is None or passing <= 0 else percentage >= passing,
+            "is_final": result.pending_manual_grading_count == 0,
+        }
 
 
 class StudentAvailableExamSerializer(serializers.ModelSerializer):
-    """Dashboard-safe exam shape: it intentionally excludes teacher and full settings data."""
+    """Dashboard-safe exam shape: it intentionally excludes teacher and answer-key data."""
 
     availability = serializers.CharField(source="student_availability", read_only=True)
     attempt = StudentAvailableAttemptSerializer(source="student_attempt", read_only=True, allow_null=True)
+    max_attempts = serializers.SerializerMethodField()
+    attempts_used = serializers.SerializerMethodField()
+    passing_percentage = serializers.SerializerMethodField()
+    result_visibility = serializers.SerializerMethodField()
+    question_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Exam
@@ -32,12 +68,31 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
             "grade",
             "class_name",
             "duration_minutes",
+            "total_marks",
             "start_at",
             "end_at",
             "availability",
+            "question_count",
+            "max_attempts",
+            "attempts_used",
+            "passing_percentage",
+            "result_visibility",
             "attempt",
         )
         read_only_fields = fields
+
+    def get_max_attempts(self, exam: Exam) -> int:
+        return exam.settings.max_attempts
+
+    def get_attempts_used(self, exam: Exam) -> int:
+        return len(getattr(exam, "student_attempts", []) or [])
+
+    def get_passing_percentage(self, exam: Exam) -> float:
+        return float(exam.settings.passing_percentage)
+
+    def get_result_visibility(self, exam: Exam) -> str:
+        # The policy itself is public; whether a score is released is a separate question.
+        return exam.settings.result_visibility
 
 
 class StudentAttemptOptionSerializer(serializers.ModelSerializer):
@@ -89,6 +144,10 @@ class StudentNavigationSettingsSerializer(serializers.ModelSerializer):
 
 class StudentAttemptExamSerializer(serializers.ModelSerializer):
     navigation = StudentNavigationSettingsSerializer(source="settings", read_only=True)
+    total_marks = serializers.SerializerMethodField()
+    question_count = serializers.SerializerMethodField()
+    passing_percentage = serializers.SerializerMethodField()
+    result_visibility = serializers.SerializerMethodField()
 
     class Meta:
         model = Exam
@@ -103,9 +162,25 @@ class StudentAttemptExamSerializer(serializers.ModelSerializer):
             "duration_minutes",
             "start_at",
             "end_at",
+            "total_marks",
+            "question_count",
+            "passing_percentage",
+            "result_visibility",
             "navigation",
         )
         read_only_fields = fields
+
+    def get_total_marks(self, exam: Exam) -> float:
+        return float(exam.total_marks)
+
+    def get_question_count(self, exam: Exam) -> int:
+        return exam.questions.count()
+
+    def get_passing_percentage(self, exam: Exam) -> float:
+        return float(exam.settings.passing_percentage)
+
+    def get_result_visibility(self, exam: Exam) -> str:
+        return exam.settings.result_visibility
 
 
 class StudentAttemptDetailSerializer(serializers.ModelSerializer):
@@ -115,12 +190,14 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
     server_time = serializers.SerializerMethodField()
     expires_at = serializers.SerializerMethodField()
     remaining_seconds = serializers.SerializerMethodField()
+    attempt_limit = serializers.SerializerMethodField()
 
     class Meta:
         model = ExamAttempt
         fields = (
             "id",
             "attempt_number",
+            "attempt_limit",
             "status",
             "started_at",
             "submitted_at",
@@ -154,6 +231,10 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
 
     def get_remaining_seconds(self, attempt: ExamAttempt):  # type: ignore[no-untyped-def]
         return self._timing_value(attempt, "remaining_seconds")
+
+    def get_attempt_limit(self, attempt: ExamAttempt) -> int:
+        return attempt.exam.settings.max_attempts
+
 
 
 class StudentAnswerInputSerializer(serializers.Serializer):

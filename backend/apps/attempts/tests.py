@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 from django.test import TestCase
@@ -187,10 +188,13 @@ class StudentExamApiTests(TestCase):
             "explanation",
             "teacher",
             "show_correct_answers",
-            "result_visibility",
             "max_attempts",
         }
         self.assertTrue(blocked_keys.isdisjoint(self.response_keys(detail.data)))
+        # ``result_visibility`` is deliberately allowed: a student has to know when their own result
+        # appears, and the same value is already public on the dashboard listing for this exam.
+        self.assertEqual(detail.data["exam"]["result_visibility"], ExamSettings.ResultVisibility.IMMEDIATE)
+        self.assertEqual(detail.data["exam"]["question_count"], 3)
 
         self.client.force_authenticate(self.other_student)
         self.assertEqual(self.client.get(f"/api/v1/student/attempts/{attempt_id}/").status_code, 404)
@@ -541,3 +545,126 @@ class TeacherResultsApiTests(TestCase):
             format="json",
         )
         self.assertEqual(blocked.status_code, 400)
+
+
+class StudentExamConductingApiTests(StudentExamApiTests):
+    """Dashboard progress, resumable timing, and the published pass verdict."""
+
+    def test_available_and_attempt_payloads_carry_the_pass_mark(self) -> None:
+        """The student must be able to see the pass mark before and during the exam, not only after."""
+        exam = self.make_exam(result_visibility=ExamSettings.ResultVisibility.PENDING)
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE, marks=2)
+        exam.total_marks = Decimal("2.00")
+        exam.save()
+        exam.settings.passing_percentage = Decimal("60.00")
+        exam.settings.show_correct_answers = True
+        exam.settings.save()
+
+        item = next(entry for entry in self.client.get("/api/v1/student/exams/").data if entry["id"] == str(exam.id))
+        self.assertEqual(item["passing_percentage"], 60.0)
+        self.assertEqual(item["result_visibility"], "pending")
+        self.assertNotIn("show_correct_answers", item)
+
+        attempt_id = self.start(exam).data["id"]
+        detail = self.client.get(f"/api/v1/student/attempts/{attempt_id}/")
+        self.assertEqual(detail.data["exam"]["passing_percentage"], 60.0)
+        self.assertEqual(detail.data["exam"]["total_marks"], 2.0)
+        self.assertEqual(detail.data["exam"]["question_count"], 1)
+
+    def test_dashboard_reports_progress_limits_and_live_remaining_time(self) -> None:
+        exam = self.make_exam(max_attempts=2)
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE, marks=2)
+        self.add_choice_question(exam, Question.Type.TRUE_FALSE, marks=1)
+        exam.total_marks = Decimal("3.00")
+        exam.save()
+
+        started = self.start(exam)
+        self.assertEqual(started.status_code, 201)
+
+        response = self.client.get("/api/v1/student/exams/")
+        item = next(entry for entry in response.data if entry["id"] == str(exam.id))
+        self.assertEqual(item["availability"], "in_progress")
+        self.assertEqual(item["question_count"], 2)
+        self.assertEqual(item["max_attempts"], 2)
+        self.assertEqual(item["attempts_used"], 1)
+        self.assertEqual(item["total_marks"], "3.00")
+        self.assertEqual(item["attempt"]["attempt_number"], 1)
+        self.assertIsNone(item["attempt"]["result"])
+        self.assertGreater(item["attempt"]["remaining_seconds"], 2600)
+        self.assertLessEqual(item["attempt"]["remaining_seconds"], 45 * 60)
+
+    def test_second_attempt_number_increments_and_limit_still_applies(self) -> None:
+        exam = self.make_exam(max_attempts=2)
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+
+        second = self.start(exam)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(second.data["attempt_number"], 2)
+        # Restarting while an attempt is still open reuses it instead of consuming a new try.
+        reused = self.start(exam)
+        self.assertEqual(reused.data["id"], second.data["id"])
+        self.client.post(f"/api/v1/student/attempts/{second.data['id']}/submit/")
+
+        third = self.client.post(f"/api/v1/student/exams/{exam.id}/start/")
+        self.assertEqual(third.status_code, 400)
+        self.assertIn("exam", third.data["detail"])
+
+        item = next(entry for entry in self.client.get("/api/v1/student/exams/").data if entry["id"] == str(exam.id))
+        self.assertEqual(item["attempts_used"], 2)
+        self.assertEqual(item["availability"], "completed")
+
+    def test_published_result_carries_marks_and_a_pass_verdict(self) -> None:
+        exam = self.make_exam()
+        exam.settings.passing_percentage = Decimal("50.00")
+        exam.settings.save()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE, marks=2)
+        exam.total_marks = Decimal("2.00")
+        exam.save()
+
+        attempt_id = self.start(exam).data["id"]
+        # Deliberately wrong: the student picks the second option.
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [str(question.options.get(order=2).id)]},
+            format="json",
+        )
+        submitted = self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+        self.assertEqual(submitted.data["result"]["percentage"], "0.00")
+
+        result = self.client.get(f"/api/v1/student/results/{attempt_id}/")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.data["maximum_score"], 2.0)
+        self.assertEqual(result.data["passing_percentage"], 50.0)
+        self.assertIs(result.data["passed"], False)
+        self.assertEqual(result.data["attempt_number"], 1)
+        self.assertIsNotNone(result.data["submitted_at"])
+        forbidden = {"is_correct", "configuration", "expected_answers", "explanation", "selected_option_ids"}
+        self.assertTrue(forbidden.isdisjoint(self.response_keys(result.data)))
+
+    def test_pass_verdict_is_absent_without_a_pass_mark(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE, marks=1)
+        exam.total_marks = Decimal("1.00")
+        exam.save()
+
+        attempt_id = self.start(exam).data["id"]
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+        result = self.client.get(f"/api/v1/student/results/{attempt_id}/")
+        self.assertEqual(result.data["passing_percentage"], 0.0)
+        self.assertIsNone(result.data["passed"])
+
+    def test_dashboard_result_summary_stays_hidden_until_publication(self) -> None:
+        exam = self.make_exam(result_visibility=ExamSettings.ResultVisibility.HIDDEN)
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE, marks=1)
+        exam.total_marks = Decimal("1.00")
+        exam.save()
+
+        attempt_id = self.start(exam).data["id"]
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+
+        item = next(entry for entry in self.client.get("/api/v1/student/exams/").data if entry["id"] == str(exam.id))
+        self.assertIsNone(item["attempt"]["result"])
+        blocked = self.client.get(f"/api/v1/student/results/{attempt_id}/")
+        self.assertEqual(blocked.status_code, 403)

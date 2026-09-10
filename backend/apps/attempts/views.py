@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Prefetch
+from django.db.models import Count, Prefetch
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied
@@ -86,10 +86,13 @@ class StudentAvailableExamView(APIView):
         candidate_exams = (
             Exam.objects.filter(status__in=(Exam.Status.SCHEDULED, Exam.Status.ACTIVE, Exam.Status.COMPLETED))
             .select_related("settings")
+            .annotate(question_count=Count("questions", distinct=True))
             .prefetch_related(
                 Prefetch(
                     "attempts",
-                    queryset=ExamAttempt.objects.filter(student=request.user).order_by("-attempt_number", "-created_at"),
+                    queryset=ExamAttempt.objects.filter(student=request.user)
+                    .select_related("result")
+                    .order_by("-attempt_number", "-created_at"),
                     to_attr="student_attempts",
                 )
             )
@@ -111,6 +114,11 @@ class StudentAvailableExamView(APIView):
                 availability = "completed"
             exam.student_availability = availability
             exam.student_attempt = latest_attempt
+            if latest_attempt is not None:
+                # Reuse the already loaded exam so timing and result summaries add no queries.
+                latest_attempt.exam = exam
+                if latest_attempt.status == ExamAttempt.Status.IN_PROGRESS:
+                    latest_attempt.student_remaining_seconds = attempt_timing(latest_attempt)["remaining_seconds"]
             visible_exams.append(exam)
         return Response(StudentAvailableExamSerializer(visible_exams, many=True).data)
 
@@ -267,7 +275,9 @@ class StudentResultView(StudentAttemptAccessMixin, APIView):
         attempt = self.get_attempt(attempt_id)
         if attempt.status not in {ExamAttempt.Status.SUBMITTED, ExamAttempt.Status.EXPIRED}:
             raise serializers.ValidationError({"attempt": ["A result is available after the exam is finalized."]})
-        result = get_object_or_404(ExamResult, attempt=attempt)
+        result = get_object_or_404(
+            ExamResult.objects.select_related("attempt__exam__settings", "attempt__student"), attempt=attempt
+        )
         if result.status != ExamResult.Status.PUBLISHED:
             raise PermissionDenied("This result is not available.")
         return Response(StudentResultSerializer(result).data)

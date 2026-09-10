@@ -13,6 +13,8 @@ urlpatterns = [
     path("", TeacherExamListCreateView.as_view(), name="exam-list-create"),
     path("<uuid:exam_id>/", TeacherExamDetailView.as_view(), name="exam-detail"),
     path("<uuid:exam_id>/publish/", ExamActionView.as_view(action="publish"), name="exam-publish"),
+    path("<uuid:exam_id>/start/", ExamActionView.as_view(action="start"), name="exam-start"),
+    path("<uuid:exam_id>/extend/", ExamActionView.as_view(action="extend"), name="exam-extend"),
     path("<uuid:exam_id>/archive/", ExamActionView.as_view(action="archive"), name="exam-archive"),
     path("<uuid:exam_id>/restore/", ExamActionView.as_view(action="restore"), name="exam-restore"),
     path("<uuid:exam_id>/complete/", ExamActionView.as_view(action="complete"), name="exam-complete"),
