@@ -7,6 +7,10 @@ export const examsApi = {
   create: (payload: ApiExamWritePayload) => apiRequest<ApiTeacherExamDto>("/exams/", { method: "POST", body: payload }),
   update: (examId: string, payload: ApiExamWritePayload) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/`, { method: "PATCH", body: payload }),
   publish: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/publish/`, { method: "POST" }),
+  /** Opens a scheduled exam immediately; used when the class is already sitting in the room. */
+  start: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/start/`, { method: "POST" }),
+  /** Grants extra minutes to a live exam. In-flight attempts inherit the new duration from the server. */
+  extend: (examId: string, extraMinutes: number) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/extend/`, { method: "POST", body: { extra_minutes: extraMinutes } }),
   complete: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/complete/`, { method: "POST" }),
   archive: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/archive/`, { method: "POST" }),
   restore: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/restore/`, { method: "POST" }),

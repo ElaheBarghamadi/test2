@@ -41,6 +41,8 @@ export const teacherExamService = {
     return this.getExam(examId);
   },
   async duplicateExam(examId: string): Promise<Exam> { return toTeacherExam(await examsApi.duplicate(examId)); },
+  async startExam(examId: string): Promise<Exam> { return toTeacherExam(await examsApi.start(examId)); },
+  async extendExam(examId: string, extraMinutes: number): Promise<Exam> { return toTeacherExam(await examsApi.extend(examId, extraMinutes)); },
   async completeExam(examId: string): Promise<Exam> { return toTeacherExam(await examsApi.complete(examId)); },
   async archiveExam(examId: string): Promise<Exam> { return toTeacherExam(await examsApi.archive(examId)); },
   async restoreExam(examId: string): Promise<Exam> { return toTeacherExam(await examsApi.restore(examId)); },

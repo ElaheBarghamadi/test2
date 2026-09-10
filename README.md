@@ -115,11 +115,12 @@ The backend loads `backend/.env` and, if needed, a monorepo-root `.env`. Copy `b
 - PostgreSQL-ready configuration, timezone-aware datetimes (`Asia/Tehran`), environment-configured hosts, and explicitly allowlisted CORS origins. Wildcard CORS is disabled.
 - JWT register, login, refresh, logout/refresh-token blacklisting, and safe current-user responses under `/api/v1/auth/`.
 - Password-reset email/request-confirmation endpoints, authenticated password changes, and self-profile read/update at `/api/v1/users/me/`, with role-specific editable profile fields and protected privilege fields.
-- Owner-scoped teacher/admin APIs for exam list/create/detail/update, archive/restore, publish/complete workflow, atomic duplication, question create/read/update/delete, and atomic question reordering.
+- Owner-scoped teacher/admin APIs for exam list/create/detail/update, archive/restore, publish/complete workflow, early `start`, timed `extend`, atomic duplication, question create/read/update/delete, and atomic question reordering. List and detail rows carry `question_count`, `attempt_count`, `participant_count`, and `teacher_name`, so the teacher panel needs no extra round-trips.
+- Question option edits are applied in place: an option that arrives with its `id` keeps it (so student selections stay linked), a new option is created, and removing an option a student already answered is refused rather than silently deleting their work.
 - Structured settings and question-type validation, server-controlled ownership/status fields, targeted query optimization, and separate teacher-only answer-key serializers.
-- Student APIs under `/api/v1/student/` for safe availability, idempotent start/reuse, persistent randomized question order, server-authoritative timing, single/batch autosave, review flags, submission, automatic grading where deterministic, and result visibility enforcement.
+- Student APIs under `/api/v1/student/` for safe availability, idempotent start/reuse, persistent randomized question order, server-authoritative timing (including the extended window while an attempt is open), attempt number/limit, single/batch autosave, review flags, submission, automatic grading where deterministic, and result visibility enforcement.
 - Safe result access only for immediate visibility or explicit teacher publication; answer keys, expected answers, explanations, teacher identity, grading configuration, and teacher-only settings are never emitted through student endpoints.
-- Teacher reporting endpoints under `/api/v1/results/teacher/` for owned exam rows, actual-participant lists, submitted answer review, manual text grading, feedback, and controlled result publication.
+- Teacher reporting endpoints under `/api/v1/results/teacher/` for owned exam rows, actual-participant lists, submitted answer review, manual text grading, feedback, and controlled result publication. Results carry `passing_percentage` and a derived `passed` verdict for both teacher rows and the student result view.
 - School/membership models, public active-school code onboarding, admin-only school/user management and network monitoring APIs, professional Django Admin registration for all domain models, a safe liveness endpoint at `GET /health/`, and a predictable DRF error envelope.
 
 Read [`backend/docs/api-v1.md`](backend/docs/api-v1.md) for the actual endpoints and payloads, then [`backend/docs/architecture.md`](backend/docs/architecture.md) before implementing the next API slice.
@@ -133,4 +134,19 @@ Read [`backend/docs/api-v1.md`](backend/docs/api-v1.md) for the actual endpoints
 
 ## Teacher workflow
 
-The teacher workspace supports server-backed search/filter/sort, duplication/archive/restore, a five-step exam builder, typed question editing, scheduling, draft save/publish, participant reporting, manual text grading, controlled result publication, and CSV export. It keeps the Persian/RTL design system and discriminated `Question` union intact.
+The teacher workspace supports server-backed search/filter/sort, duplication/archive/restore, a five-step exam builder, typed question editing, scheduling, draft save/publish, participant reporting, manual text grading, controlled result publication, and CSV export. Question authoring is full CRUD: options can be added, re-worded, duplicated, reordered, and removed (the builder offers between two and ten rows, matching the server's minimum of two), each type marks its own answer key, short answers keep a list of accepted responses with case sensitivity, and every rule the publish gate enforces is previewed inline before saving. `start now` and `extend time` live on the exam detail screen and refuse themselves with the server's reason when the status or the clock does not allow it, and the detail screen states plainly when an exam is live and how many attempts are already recorded. It keeps the Persian/RTL design system and discriminated `Question` union intact.
+
+## Student exam workflow
+
+The student space is driven by server state end to end: the dashboard groups exams into ready/upcoming/in-progress/completed with the real remaining time, the start screen states the marks, the pass mark, the attempt budget, and the release policy before the clock begins, and the session itself autosaves each answer, keeps flags, survives a dropped connection by queueing writes, and re-reads the deadline from the server every minute and on tab focus so a teacher extension cannot be missed. When the countdown reaches zero the session confirms the deadline with the server, flushes queued answers, and submits itself; leaving mid-exam asks for confirmation first. Results show the published score, the pass verdict, and whether any answer still awaits manual grading.
+
+## Tests
+
+```bash
+npm test          # Vitest + React Testing Library (jsdom) for the frontend
+```
+
+```bash
+cd backend
+./.venv/bin/python manage.py test        # needs DJANGO_SECRET_KEY in the environment
+```

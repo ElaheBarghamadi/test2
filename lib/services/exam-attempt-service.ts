@@ -1,5 +1,6 @@
 import { attemptsApi, type ApiAnswerInput } from "@/lib/api/attempts";
 import { apiErrorMessage } from "@/lib/api/client";
+import { toStudentAttempt } from "@/lib/api/mappers";
 import type { AnswerValue, Exam, ExamAttempt, Question } from "@/lib/types/domain";
 
 export interface SaveAttemptRequest { attempt: ExamAttempt; exam: Exam; revision: number; signal?: AbortSignal; }
@@ -36,6 +37,14 @@ export const examAttemptService = {
         return answer ? attemptsApi.setFlag(attempt.id, questionId, answer.flagged, signal) : Promise.resolve();
       }),
     ]);
+  },
+  /**
+   * Re-reads just the deadline and status. The timer counts down locally, so this is what proves
+   * whether time really ran out — or whether the teacher extended the exam while the student wrote.
+   */
+  async syncClock(attemptId: string): Promise<{ status: ExamAttempt["status"]; remainingSeconds: number }> {
+    const { attempt } = toStudentAttempt(await attemptsApi.detail(attemptId));
+    return { status: attempt.status, remainingSeconds: attempt.remainingSeconds };
   },
   async submitAttempt(attempt: ExamAttempt) {
     if (attempt.connectionStatus === "offline") throw new Error("برای ارسال نهایی، اتصال اینترنت را بررسی و دوباره تلاش کنید.");

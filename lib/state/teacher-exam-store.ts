@@ -15,6 +15,8 @@ interface TeacherExamState {
   loadExam: (id: string) => Promise<Exam | undefined>;
   saveExam: (draft: ExamDraft, status: "draft" | "scheduled") => Promise<Exam>;
   duplicateExam: (id: string) => Promise<Exam | undefined>;
+  startExam: (id: string) => Promise<Exam | undefined>;
+  extendExam: (id: string, extraMinutes: number) => Promise<Exam | undefined>;
   completeExam: (id: string) => Promise<void>;
   archiveExam: (id: string) => Promise<void>;
   restoreExam: (id: string) => Promise<void>;
@@ -61,6 +63,16 @@ export const useTeacherExamStore = create<TeacherExamState>((set, get) => ({
     set({ loading: true, error: null });
     try { const copy = await teacherExamService.duplicateExam(id); set((state) => ({ exams: [copy, ...state.exams], loading: false })); return copy; }
     catch (error) { set({ loading: false, error: apiErrorMessage(error, "ساخت کپی آزمون انجام نشد.") }); return undefined; }
+  },
+  startExam: async (id) => {
+    set({ loading: true, error: null });
+    try { const exam = await teacherExamService.startExam(id); set((state) => ({ exams: mergeExam(state.exams, exam), loading: false })); return exam; }
+    catch (error) { set({ loading: false, error: apiErrorMessage(error, "شروع آزمون انجام نشد. لطفاً دوباره تلاش کنید.") }); return undefined; }
+  },
+  extendExam: async (id, extraMinutes) => {
+    set({ loading: true, error: null });
+    try { const exam = await teacherExamService.extendExam(id, extraMinutes); set((state) => ({ exams: mergeExam(state.exams, exam), loading: false })); return exam; }
+    catch (error) { set({ loading: false, error: apiErrorMessage(error, "تمدید زمان آزمون انجام نشد. لطفاً دوباره تلاش کنید.") }); return undefined; }
   },
   completeExam: async (id) => {
     set({ loading: true, error: null });

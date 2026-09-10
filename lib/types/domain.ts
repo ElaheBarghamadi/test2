@@ -52,7 +52,9 @@ export interface TrueFalseQuestion extends BaseQuestion {
 export interface ShortAnswerQuestion extends BaseQuestion {
   type: "short_answer";
   placeholder?: string;
-  expectedAnswer?: string;
+  /** Any accepted answer earns full credit; the server grades against the whole list. */
+  expectedAnswers?: string[];
+  caseSensitive?: boolean;
   maxLength?: number;
 }
 
@@ -81,7 +83,18 @@ export interface ExamSettings {
   resultVisibility: ResultVisibility;
   showCorrectAnswers: boolean;
   attemptLimit: number;
-  passingScore: number;
+  /** Pass mark as a percentage of the exam total; 0 disables the pass/fail verdict. */
+  passingPercentage: number;
+}
+
+/** Published-result summary a student may see before opening the full result page. */
+export interface StudentResultSummary {
+  score: number;
+  percentage: number | null;
+  maximumScore: number;
+  passingPercentage: number;
+  passed: boolean | null;
+  isFinal: boolean;
 }
 
 export interface Exam {
@@ -98,6 +111,8 @@ export interface Exam {
   schedule: ExamSchedule;
   questionCount: number;
   participantCount: number;
+  /** Teacher view only: total attempts recorded across all students. */
+  attemptCount?: number;
   settings: ExamSettings;
   questions: Question[];
   teacherName: string;
@@ -105,6 +120,13 @@ export interface Exam {
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
+  /** Student dashboard context. Absent on teacher/admin views. */
+  availability?: "available" | "upcoming" | "in_progress" | "completed";
+  attemptsUsed?: number;
+  attemptNumber?: number;
+  attemptId?: string;
+  remainingSeconds?: number | null;
+  resultSummary?: StudentResultSummary | null;
 }
 
 export interface ExamDraft {
@@ -146,6 +168,9 @@ export interface ExamAttempt {
   answerRevision: number;
   connectionStatus: "online" | "offline";
   submissionError?: string;
+  /** Attempt 1-based index and the exam's allowed total, shown in the session header. */
+  attemptNumber?: number;
+  attemptLimit?: number;
   /** Dirty fields are client transport metadata, never displayed as exam content. */
   pendingAnswerQuestionIds?: string[];
   pendingFlagQuestionIds?: string[];
@@ -161,6 +186,11 @@ export interface ExamResult {
   correct: number;
   incorrect: number;
   unanswered: number;
+  pendingManualGrading: number;
+  passingPercentage: number;
+  /** null while the score is not final or when the teacher left the pass mark unset. */
+  passed: boolean | null;
+  attemptNumber: number;
   submittedAt: string;
   feedback: string;
 }

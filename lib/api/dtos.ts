@@ -42,15 +42,18 @@ export interface ApiExamSettingsDto {
   result_visibility: "immediate" | "pending" | "hidden";
   show_correct_answers: boolean;
   max_attempts: number;
+  passing_percentage: number | string;
 }
 
 export interface ApiTeacherExamListDto {
   id: string; title: string; subject: string; grade: string; class_name: string;
-  teacher: string; status: ApiExamStatus; duration_minutes: number; total_marks: number | string;
-  start_at: string | null; end_at: string | null; settings: ApiExamSettingsDto;
-  question_count: number; created_at: string; updated_at: string;
+  teacher: string; teacher_name: string; status: ApiExamStatus; duration_minutes: number;
+  /** Null only on legacy rows; the mapper then sums question marks. */
+  total_marks: number | string | null; start_at: string | null; end_at: string | null;
+  settings: ApiExamSettingsDto; question_count: number; attempt_count: number; participant_count: number;
+  created_at: string; updated_at: string;
 }
-export interface ApiTeacherExamDto extends Omit<ApiTeacherExamListDto, "question_count"> {
+export interface ApiTeacherExamDto extends ApiTeacherExamListDto {
   description: string; instructions: string; questions: ApiQuestionDto[];
 }
 
@@ -61,7 +64,8 @@ export interface ApiExamWritePayload {
 }
 export interface ApiQuestionWritePayload {
   type: ApiQuestionType; text: string; instructions: string; marks: number;
-  options?: Array<{ text: string; is_correct: boolean }>;
+  /** `id` keeps an existing option's identity (and its student answers) intact across edits. */
+  options?: Array<{ id?: string; text: string; is_correct: boolean }>;
   configuration?: Record<string, unknown>; explanation?: string;
 }
 
@@ -72,24 +76,38 @@ export interface ApiStudentAnswerDto {
 export interface ApiStudentAttemptExamDto {
   id: string; title: string; description: string; subject: string; grade: string; class_name: string;
   instructions: string; duration_minutes: number; start_at: string | null; end_at: string | null;
+  /** Marks, pass mark and release policy are student-safe; the answer key never is. */
+  total_marks: number | string; question_count: number; passing_percentage: number | string;
+  result_visibility: "immediate" | "pending" | "hidden";
   navigation: { allow_previous_questions: boolean; randomize_questions: boolean };
 }
 export interface ApiAttemptDto {
-  id: string; attempt_number: number; status: ApiAttemptStatus; started_at: string;
+  id: string; attempt_number: number; attempt_limit: number; status: ApiAttemptStatus; started_at: string;
   submitted_at: string | null; last_activity_at: string; server_time: string; expires_at: string;
   remaining_seconds: number; exam: ApiStudentAttemptExamDto; questions: ApiStudentQuestionDto[];
   answers: ApiStudentAnswerDto[];
 }
 export interface ApiAvailableExamDto {
   id: string; title: string; description: string; subject: string; grade: string; class_name: string;
-  duration_minutes: number; start_at: string | null; end_at: string | null;
+  duration_minutes: number; total_marks: number | string; start_at: string | null; end_at: string | null;
+  question_count: number; max_attempts: number; attempts_used: number;
+  passing_percentage: number | string; result_visibility: "immediate" | "pending" | "hidden";
   availability: "available" | "upcoming" | "completed" | "in_progress";
-  attempt: { id: string; status: ApiAttemptStatus; started_at: string; submitted_at: string | null } | null;
+  attempt: {
+    id: string; status: ApiAttemptStatus; started_at: string; submitted_at: string | null;
+    attempt_number: number; remaining_seconds: number | null;
+    /** Published-only summary; null while the teacher has not released the result. */
+    result: {
+      score: number | null; percentage: number | null; maximum_score: number;
+      passing_percentage: number; passed: boolean | null; is_final: boolean;
+    } | null;
+  } | null;
 }
 export interface ApiStudentResultDto {
   id: string; status: "pending" | "hidden" | "published"; score: number | string;
-  percentage: number | string | null; correct_count: number; incorrect_count: number;
-  unanswered_count: number; pending_manual_grading_count: number; is_final: boolean;
+  percentage: number | string | null; maximum_score: number; correct_count: number; incorrect_count: number;
+  unanswered_count: number; pending_manual_grading_count: number; passing_percentage: number;
+  passed: boolean | null; attempt_number: number; submitted_at: string | null; is_final: boolean;
   feedback: string; published_at: string | null;
 }
 export interface ApiSubmitAttemptDto {

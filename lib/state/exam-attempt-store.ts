@@ -12,6 +12,7 @@ interface AttemptState {
   toggleFlag: (questionId: string) => void;
   setCurrentQuestion: (index: number) => void;
   tick: () => void;
+  syncClock: (status: ExamAttempt["status"], remainingSeconds: number) => void;
   markSaved: (revision: number) => void;
   markSaveFailed: (revision: number) => void;
   setConnectionStatus: (status: "online" | "offline") => void;
@@ -51,6 +52,7 @@ export const useExamAttemptStore = create<AttemptState>((set, get) => ({
     const remainingSeconds = Math.max(0, state.attempt.remainingSeconds - Math.max(1, Math.floor((now.getTime() - lastTick.getTime()) / 1000)));
     return { attempt: { ...state.attempt, remainingSeconds, status: remainingSeconds === 0 ? "expired" : "in_progress", lastTickAt: now.toISOString() } };
   }),
+  syncClock: (status, remainingSeconds) => set((state) => !state.attempt ? state : { attempt: { ...state.attempt, status, remainingSeconds: Math.max(0, remainingSeconds), lastTickAt: new Date().toISOString() } }),
   markSaved: (revision) => set((state) => {
     if (!state.attempt || state.attempt.connectionStatus === "offline") return state;
     // A newer edit occurred while this request was in flight. Keep every dirty field queued

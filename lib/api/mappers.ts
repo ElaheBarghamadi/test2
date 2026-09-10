@@ -14,8 +14,11 @@ import type {
 } from "@/lib/api/dtos";
 import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamDraft, ExamResult, Question, Role, User } from "@/lib/types/domain";
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Only a real server UUID may be echoed back as an option id; rows the builder has not saved yet must be created. */
+const existingId = (value: string) => (UUID_PATTERN.test(value) ? value : undefined);
 const accentFor = (id: string): Exam["accent"] => ["indigo", "violet", "teal", "amber"][id.charCodeAt(0) % 4] as Exam["accent"];
-const number = (value: number | string | null | undefined, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const number = (value: number | string | null | undefined, fallback = 0) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
 const isoOrNow = (value: string | null | undefined) => value || new Date().toISOString();
 
 export function toUser(dto: ApiUserDto): User {
@@ -43,7 +46,7 @@ export function toTeacherQuestion(dto: ApiQuestionDto): Question {
     case "true_false":
       return { ...base, type: "true_false", correctAnswer: options.findIndex((option) => option.isCorrect) === 0, optionIds: { true: options[0]?.id || "", false: options[1]?.id || "" } };
     case "short_answer":
-      return { ...base, type: "short_answer", placeholder: stringConfig(config, "placeholder"), expectedAnswer: arrayConfig(config, "expected_answers")[0], maxLength: numberConfig(config, "max_length") };
+      return { ...base, type: "short_answer", placeholder: stringConfig(config, "placeholder"), expectedAnswers: arrayConfig(config, "expected_answers"), caseSensitive: config.case_sensitive === true, maxLength: numberConfig(config, "max_length") };
     case "written":
       return { ...base, type: "essay", placeholder: stringConfig(config, "placeholder"), maxLength: numberConfig(config, "max_length"), gradingNote: stringConfig(config, "grading_note") };
   }
@@ -76,14 +79,17 @@ function toExamSettings(dto: ApiExamSettingsDto, totalMarks = 0): Exam["settings
     resultVisibility: frontendVisibility(dto.result_visibility),
     showCorrectAnswers: dto.show_correct_answers,
     attemptLimit: dto.max_attempts,
-    passingScore: 0,
+    passingPercentage: number(dto.passing_percentage),
   };
 }
 
 export function toTeacherExam(dto: ApiTeacherExamDto | ApiTeacherExamListDto): Exam {
   const detailed = "questions" in dto;
   const questions = detailed ? dto.questions.map(toTeacherQuestion) : [];
-  const totalMarks = number(dto.total_marks, questions.reduce((sum, question) => sum + question.points, 0));
+  // The server keeps Exam.total_marks in sync with its questions; a missing value falls back to the
+  // question sum rather than to zero, so the teacher never sees "۰ نمره" for a populated exam.
+  const storedTotal = dto.total_marks;
+  const totalMarks = storedTotal === null || storedTotal === undefined || storedTotal === "" ? questions.reduce((sum, question) => sum + question.points, 0) : number(storedTotal);
   const settings = toExamSettings(dto.settings, totalMarks);
   settings.durationMinutes = dto.duration_minutes;
   return {
@@ -92,7 +98,8 @@ export function toTeacherExam(dto: ApiTeacherExamDto | ApiTeacherExamListDto): E
     status: dto.status, startAt: isoOrNow(dto.start_at), endAt: isoOrNow(dto.end_at),
     schedule: { startAt: dateTimeInput(dto.start_at), endAt: dateTimeInput(dto.end_at), timezone: "Asia/Tehran" },
     questionCount: detailed ? questions.length : dto.question_count,
-    participantCount: 0, settings, questions, teacherName: "", accent: accentFor(dto.id),
+    participantCount: dto.participant_count, attemptCount: dto.attempt_count,
+    settings, questions, teacherName: dto.teacher_name, accent: accentFor(dto.id),
     createdAt: dto.created_at, updatedAt: dto.updated_at,
   };
 }
@@ -123,6 +130,7 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
       result_visibility: apiVisibility(draft.settings.resultVisibility),
       show_correct_answers: draft.settings.showCorrectAnswers,
       max_attempts: draft.settings.attemptLimit,
+      passing_percentage: draft.settings.passingPercentage,
     },
   };
 }
@@ -130,12 +138,20 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
 export function toQuestionWritePayload(question: Question): ApiQuestionWritePayload {
   const base = { text: question.stem.trim(), instructions: question.helpText?.trim() || "", marks: question.points, explanation: question.explanation?.trim() || "" };
   switch (question.type) {
-    case "single_choice": return { ...base, type: "multiple_choice", configuration: {}, options: question.options.map((option) => ({ text: option.label.trim(), is_correct: option.id === question.correctOptionId })) };
-    case "multiple_choice": return { ...base, type: "multiple_answer", configuration: {}, options: question.options.map((option) => ({ text: option.label.trim(), is_correct: question.correctOptionIds?.includes(option.id) ?? false })) };
-    case "true_false": return { ...base, type: "true_false", configuration: {}, options: [{ text: "درست", is_correct: question.correctAnswer === true }, { text: "نادرست", is_correct: question.correctAnswer === false }] };
+    case "single_choice": return { ...base, type: "multiple_choice", configuration: {}, options: question.options.map((option) => ({ id: existingId(option.id), text: option.label.trim(), is_correct: option.id === question.correctOptionId })) };
+    case "multiple_choice": return { ...base, type: "multiple_answer", configuration: {}, options: question.options.map((option) => ({ id: existingId(option.id), text: option.label.trim(), is_correct: question.correctOptionIds?.includes(option.id) ?? false })) };
+    case "true_false": {
+      // Reuse the stored option ids so editing a live exam cannot orphan saved answers or trip the
+      // protected-delete rule; a freshly created true/false question simply has none.
+      const ids = question.optionIds;
+      return { ...base, type: "true_false", configuration: {}, options: [{ id: ids ? existingId(ids.true) : undefined, text: "درست", is_correct: question.correctAnswer === true }, { id: ids ? existingId(ids.false) : undefined, text: "نادرست", is_correct: question.correctAnswer === false }] };
+    }
     case "short_answer": {
       const configuration: Record<string, unknown> = {};
-      if (question.expectedAnswer?.trim()) configuration.expected_answers = [question.expectedAnswer.trim()];
+      const expected = (question.expectedAnswers ?? []).map((item) => item.trim()).filter(Boolean);
+      if (expected.length) configuration.expected_answers = expected;
+      // Only meaningful alongside a key; the server ignores it for manual grading.
+      if (expected.length && question.caseSensitive) configuration.case_sensitive = true;
       if (question.maxLength) configuration.max_length = question.maxLength;
       if (question.placeholder?.trim()) configuration.placeholder = question.placeholder.trim();
       return { ...base, type: "short_answer", configuration };
@@ -153,11 +169,26 @@ export function toQuestionWritePayload(question: Question): ApiQuestionWritePayl
 export function toStudentDashboardExam(dto: ApiAvailableExamDto): Exam {
   const status = dto.availability === "upcoming" ? "scheduled" : dto.availability === "completed" ? "completed" : "active";
   const startAt = isoOrNow(dto.start_at); const endAt = isoOrNow(dto.end_at);
+  const result = dto.attempt?.result;
   return {
     id: dto.id, title: dto.title, description: dto.description, subject: dto.subject, grade: dto.grade, className: dto.class_name,
-    status, startAt, endAt, schedule: { startAt, endAt, timezone: "Asia/Baku" }, questionCount: 0, participantCount: 0,
-    settings: { durationMinutes: dto.duration_minutes, totalMarks: 0, allowBackNavigation: false, randomizeQuestions: false, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 1, passingScore: 0 },
+    status, startAt, endAt, schedule: { startAt, endAt, timezone: "Asia/Tehran" },
+    questionCount: dto.question_count, participantCount: 0,
+    settings: {
+      durationMinutes: dto.duration_minutes, totalMarks: number(dto.total_marks), allowBackNavigation: true,
+      randomizeQuestions: false, showResultImmediately: dto.result_visibility === "immediate", resultVisibility: dto.result_visibility,
+      showCorrectAnswers: false, attemptLimit: dto.max_attempts,
+      passingPercentage: number(result?.passing_percentage ?? dto.passing_percentage),
+    },
     questions: [], teacherName: "", accent: accentFor(dto.id), createdAt: startAt, updatedAt: startAt,
+    availability: dto.availability, attemptsUsed: dto.attempts_used,
+    attemptId: dto.attempt?.id, attemptNumber: dto.attempt?.attempt_number,
+    remainingSeconds: dto.attempt?.remaining_seconds ?? null,
+    resultSummary: result ? {
+      score: number(result.score), percentage: result.percentage === null ? null : number(result.percentage),
+      maximumScore: number(result.maximum_score), passingPercentage: number(result.passing_percentage),
+      passed: result.passed, isFinal: result.is_final,
+    } : null,
   };
 }
 
@@ -181,21 +212,26 @@ export function toStudentAttempt(dto: ApiAttemptDto): { exam: Exam; attempt: Exa
   const totalMarks = questions.reduce((sum, question) => sum + question.points, 0);
   const exam: Exam = {
     id: dto.exam.id, title: dto.exam.title, description: dto.exam.description, subject: dto.exam.subject, grade: dto.exam.grade, className: dto.exam.class_name,
-    instructions: dto.exam.instructions || undefined, status: "active", startAt, endAt, schedule: { startAt, endAt, timezone: "Asia/Baku" }, questionCount: questions.length,
-    participantCount: 0, settings: { durationMinutes: dto.exam.duration_minutes, totalMarks, allowBackNavigation: dto.exam.navigation.allow_previous_questions, randomizeQuestions: dto.exam.navigation.randomize_questions, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 1, passingScore: 0 },
+    instructions: dto.exam.instructions || undefined, status: "active", startAt, endAt, schedule: { startAt, endAt, timezone: "Asia/Tehran" }, questionCount: questions.length,
+    participantCount: 0, settings: { durationMinutes: dto.exam.duration_minutes, totalMarks: number(dto.exam.total_marks, totalMarks), allowBackNavigation: dto.exam.navigation.allow_previous_questions, randomizeQuestions: dto.exam.navigation.randomize_questions, showResultImmediately: dto.exam.result_visibility === "immediate", resultVisibility: dto.exam.result_visibility, showCorrectAnswers: false, attemptLimit: dto.attempt_limit, passingPercentage: number(dto.exam.passing_percentage) },
     questions, teacherName: "", accent: accentFor(dto.exam.id), createdAt: dto.started_at, updatedAt: dto.server_time,
+    attemptId: dto.id, attemptNumber: dto.attempt_number,
   };
   return { exam, attempt: {
     id: dto.id, examId: dto.exam.id, studentId: "", status: dto.status, startedAt: dto.started_at, lastTickAt: dto.server_time,
     remainingSeconds: Math.max(0, dto.remaining_seconds), answers, currentQuestionIndex: 0, saveStatus: "saved", lastSavedAt: dto.server_time,
     answerRevision: 0, connectionStatus: typeof navigator === "undefined" || navigator.onLine ? "online" : "offline",
+    attemptNumber: dto.attempt_number, attemptLimit: dto.attempt_limit,
   } };
 }
 
 export function toStudentResult(dto: ApiStudentResultDto, attempt: ExamAttempt, exam: Exam): ExamResult {
   return {
     id: dto.id, examId: exam.id, status: dto.status === "published" ? "published" : "pending",
-    score: number(dto.score), maximumScore: exam.settings.totalMarks, percentage: number(dto.percentage), correct: dto.correct_count,
-    incorrect: dto.incorrect_count, unanswered: dto.unanswered_count, submittedAt: attempt.startedAt || new Date().toISOString(), feedback: dto.feedback || "",
+    score: number(dto.score), maximumScore: number(dto.maximum_score, exam.settings.totalMarks), percentage: number(dto.percentage),
+    correct: dto.correct_count, incorrect: dto.incorrect_count, unanswered: dto.unanswered_count,
+    pendingManualGrading: dto.pending_manual_grading_count, passingPercentage: number(dto.passing_percentage), passed: dto.passed,
+    attemptNumber: dto.attempt_number || attempt.attemptNumber || 1,
+    submittedAt: dto.submitted_at || attempt.startedAt || new Date().toISOString(), feedback: dto.feedback || "",
   };
 }
