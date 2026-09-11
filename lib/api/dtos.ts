@@ -130,8 +130,14 @@ export interface ApiAvailableExamDto {
 export interface ApiStudentResultDto {
   id: string; status: "pending" | "hidden" | "published"; score: number | string;
   percentage: number | string | null; maximum_score: number; correct_count: number; incorrect_count: number;
-  unanswered_count: number; pending_manual_grading_count: number; manual_grading_count: number;
-  passing_percentage: number; revised_at: string | null;
+  unanswered_count: number; pending_manual_grading_count: number;
+  /**
+   * Teacher-side bookkeeping. The student endpoint deliberately does not send either, so the mapper falls
+   * back to the pending count and treats an absent revision as "never revised"; declaring them as always
+   * present is what the wire shape does not promise.
+   */
+  manual_grading_count?: number;
+  passing_percentage: number; revised_at?: string | null;
   passed: boolean | null; attempt_number: number; submitted_at: string | null; is_final: boolean;
   feedback: string; published_at: string | null;
 }
