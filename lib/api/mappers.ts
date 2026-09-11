@@ -122,7 +122,24 @@ export function toTeacherExam(dto: ApiTeacherExamDto | ApiTeacherExamListDto): E
   };
 }
 
-function dateTimeInput(value: string | null | undefined) { return value ? value.slice(0, 16) : ""; }
+/**
+ * The schedule form edits a *wall clock* (`YYYY-MM-DDTHH:mm`), so an ISO instant has to be read back through
+ * the exam's own timezone. Slicing the ISO string instead showed a Tehran exam three and a half hours early
+ * on any machine that was not itself set to Tehran time.
+ */
+function dateTimeInput(value: string | null | undefined, timeZone = "Asia/Tehran") {
+  if (!value) return "";
+  const iso = value.length <= 16 ? `${value}${value.length === 10 ? "T00:00" : ""}:00Z` : value;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return value.slice(0, 16);
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(date);
+    const read = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "00";
+    return `${read("year")}-${read("month")}-${read("day")}T${read("hour")}:${read("minute")}`;
+  } catch {
+    return value.slice(0, 16);
+  }
+}
 /** Convert a datetime-local value using the timezone the teacher selected, not the browser's timezone. */
 function apiDate(value: string, timeZone: string) {
   if (!value) return null;

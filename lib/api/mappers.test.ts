@@ -81,8 +81,11 @@ describe("toTeacherExam", () => {
     expect(exam.settings).toMatchObject({ randomizeOptions: true, allowUnanswered: false });
   });
 
-  it("keeps datetime-local values intact for the edit form", () => {
-    expect(toTeacherExam(listDto()).schedule).toMatchObject({ startAt: "2026-03-20T05:30", endAt: "2026-03-20T07:30" });
+  it("reads a scheduled instant back as the school's own wall clock", () => {
+    // The edit form edits a wall clock, so 05:30Z has to come back as 09:00 Tehran — otherwise saving an
+    // exam without touching the schedule silently moves it three and a half hours earlier. `toExamWritePayload`
+    // below turns the same string back into the same instant, which is the round trip this pins down.
+    expect(toTeacherExam(listDto()).schedule).toMatchObject({ startAt: "2026-03-20T09:00", endAt: "2026-03-20T11:00", timezone: "Asia/Tehran" });
   });
 
   it("trusts the server-computed exam total over summing question marks", () => {
