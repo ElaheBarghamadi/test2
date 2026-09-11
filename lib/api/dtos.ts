@@ -23,6 +23,12 @@ export interface ApiRegisterPayload {
 
 export interface ApiOptionDto { id: string; text: string; order: number; is_correct?: boolean; }
 /** `count` is only present on the bank's tag list, where it drives the filter chips. */
+/** The bank import answers with a plain list when nothing was dropped, and with a report when it skipped. */
+export interface ApiQuestionImportResult {
+  created: ApiQuestionDto[];
+  skippedDuplicates: number;
+}
+
 export interface ApiQuestionTagDto { id: string; name: string; count?: number; }
 
 export interface ApiQuestionDto {
@@ -32,6 +38,8 @@ export interface ApiQuestionDto {
   difficulty?: "easy" | "medium" | "hard"; tags?: ApiQuestionTagDto[]; is_archived?: boolean;
   usage_count?: number; answered_count?: number; copied_from?: string | null;
   exam_title?: string; exam_subject?: string; exam_status?: ApiExamStatus;
+  /** Set instead of 201 when the exam already held this exact question and no second copy was made. */
+  deduplicated?: boolean;
   /** Teacher serializers only; intentionally absent on student endpoints. */
   configuration?: Record<string, unknown>; explanation?: string;
   created_at?: string; updated_at?: string;

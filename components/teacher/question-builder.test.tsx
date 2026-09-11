@@ -48,16 +48,16 @@ describe("TeacherQuestionBuilder options", () => {
     // Adding an option must not silently move the correct answer.
     expect(firstSingle(emittedQuestions).options.map((item) => item.label)).toEqual(["وات", "ژول", "وات ساعت"]);
     expect(firstSingle(emittedQuestions).correctOptionId).toBe("o1");
-    expect(attribute(screen.getByRole("radio", { name: /علامت‌گذاری گزینه 1/ }), "aria-checked")).toBe("true");
+    expect(attribute(screen.getByRole("radio", { name: /علامت‌گذاری گزینه ۱/ }), "aria-checked")).toBe("true");
   });
 
   it("marks exactly one correct option for single-choice questions", () => {
     let emittedQuestions: Question[] = [];
     render(<Harness initial={[singleChoice()]} onEmit={(next) => { emittedQuestions = next; }}/>);
-    fireEvent.click(screen.getByRole("radio", { name: /علامت‌گذاری گزینه 2/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /علامت‌گذاری گزینه ۲/ }));
 
-    expect(attribute(screen.getByRole("radio", { name: /علامت‌گذاری گزینه 2/ }), "aria-checked")).toBe("true");
-    expect(attribute(screen.getByRole("radio", { name: /علامت‌گذاری گزینه 1/ }), "aria-checked")).toBe("false");
+    expect(attribute(screen.getByRole("radio", { name: /علامت‌گذاری گزینه ۲/ }), "aria-checked")).toBe("true");
+    expect(attribute(screen.getByRole("radio", { name: /علامت‌گذاری گزینه ۱/ }), "aria-checked")).toBe("false");
     expect(firstSingle(emittedQuestions).correctOptionId).toBe("o2");
     expect(firstSingle(emittedQuestions).options.find((item) => item.id === "o1")?.isCorrect).toBe(false);
   });
@@ -67,11 +67,11 @@ describe("TeacherQuestionBuilder options", () => {
     const multi: Question = { id: "q2", order: 1, stem: "کدام‌ها صحیح‌اند؟", type: "multiple_choice", points: 3, required: true, options: [option("a", "یک", true), option("b", "دو")], correctOptionIds: ["a"] } as Question;
     render(<Harness initial={[multi]} onEmit={(next) => { emittedQuestions = next; }}/>);
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /علامت‌گذاری گزینه 2/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /علامت‌گذاری گزینه ۲/ }));
     expect(firstMulti(emittedQuestions).correctOptionIds).toEqual(expect.arrayContaining(["a", "b"]));
     expect(firstMulti(emittedQuestions).options.filter((item) => item.isCorrect).map((item) => item.id)).toEqual(expect.arrayContaining(["a", "b"]));
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /علامت‌گذاری گزینه 1/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /علامت‌گذاری گزینه ۱/ }));
     expect(firstMulti(emittedQuestions).correctOptionIds).toEqual(["b"]);
   });
 
@@ -79,16 +79,16 @@ describe("TeacherQuestionBuilder options", () => {
     let emittedQuestions: Question[] = [];
     render(<Harness initial={[singleChoice({ options: [option("o1", "وات", true), option("o2", "ژول"), option("o3", "وات ساعت")] })]} onEmit={(next) => { emittedQuestions = next; }}/>);
 
-    fireEvent.click(screen.getByRole("button", { name: /انتقال گزینه 2 به بالا/ }));
+    fireEvent.click(screen.getByRole("button", { name: /انتقال گزینه ۲ به بالا/ }));
     expect(firstSingle(emittedQuestions).options.map((item) => item.id)).toEqual(["o2", "o1", "o3"]);
 
-    fireEvent.click(screen.getByRole("button", { name: /حذف گزینه 3/ }));
+    fireEvent.click(screen.getByRole("button", { name: /حذف گزینه ۳/ }));
     expect(firstSingle(emittedQuestions).options.map((item) => item.id)).toEqual(["o2", "o1"]);
   });
 
   it("refuses to drop below the minimum option count", () => {
     render(<Harness initial={[singleChoice()]}/>);
-    const remove = screen.getByRole("button", { name: /حذف گزینه 1/ });
+    const remove = screen.getByRole("button", { name: /حذف گزینه ۱/ });
     expect(isDisabled(remove)).toBe(true);
     fireEvent.click(remove);
     expect(optionInputs()).toHaveLength(2);
@@ -105,7 +105,7 @@ describe("TeacherQuestionBuilder options", () => {
   it("duplicating an option creates an empty, unmarked row", () => {
     let emittedQuestions: Question[] = [];
     render(<Harness initial={[singleChoice()]} onEmit={(next) => { emittedQuestions = next; }}/>);
-    fireEvent.click(screen.getByRole("button", { name: /تکثیر گزینه 1/ }));
+    fireEvent.click(screen.getByRole("button", { name: /تکثیر گزینه ۱/ }));
     const options = firstSingle(emittedQuestions).options;
     const copy = options[1];
     expect(copy.label).toBe("");
@@ -118,8 +118,8 @@ describe("TeacherQuestionBuilder options", () => {
 
   it("moves the first and last option buttons out of the way", () => {
     render(<Harness initial={[singleChoice()]}/>);
-    expect(isDisabled(screen.getByRole("button", { name: /انتقال گزینه 1 به بالا/ }))).toBe(true);
-    expect(isDisabled(screen.getByRole("button", { name: /انتقال گزینه 2 به پایین/ }))).toBe(true);
+    expect(isDisabled(screen.getByRole("button", { name: /انتقال گزینه ۱ به بالا/ }))).toBe(true);
+    expect(isDisabled(screen.getByRole("button", { name: /انتقال گزینه ۲ به پایین/ }))).toBe(true);
   });
 });
 

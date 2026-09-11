@@ -61,6 +61,10 @@ Normal patches never change status. Service functions in `apps.exams.services` o
 
 Question types are structured Django choices: multiple choice, multiple answer, true/false, short answer, and written. Choice correctness lives in `QuestionOption`; short/written metadata has a narrowly validated `configuration` object. New teacher questions append safely, and reordering requires the complete question ID set in one transaction.
 
+True/false is the one type whose options are fixed wording rather than teacher content, so the pair is keyed on the option's `order` (1 = «درست», 2 = «نادرست») on both sides: the client maps its two buttons to those ids, option shuffling deliberately never touches the type, and grading compares UUIDs. The runner used to render both buttons with the same `value` prop, which gave both radios one DOM id — and the «نادرست» label, pointing at that id, toggled the *other* control, so a student who believed a statement was false could not say so. Two controls need two ids; that is now asserted in `components/exam/questions/true-false-question.test.tsx` rather than trusted.
+
+Repeating a question inside one exam is refused rather than stored: every row carries `content_hash`, the fingerprint of its content, and `POST /exams/{id}/questions/` answers a repeat with the existing row (`200`, `deduplicated: true`) while a `PATCH` that would create one is rejected. The identity is defined once in `apps/exams/content_identity.py`, mirrored in `lib/utils/question-identity.ts` so the builder can refuse a draft that repeats itself *before* sending it, and copied deliberately into the migration that backfilled the column — a migration must keep working after the app-side helper evolves, and the test suite asserts the two still agree.
+
 Teacher serializers may include `is_correct`, explanation, and configuration. The independent student attempt serializer family deliberately excludes answer keys, expected answers, explanations, configuration, and correct-answer settings. Result visibility and the answer-sheet rule are included on purpose: a student must be able to see when a result will appear and whether blanks block submission, and neither is a grading secret. Student routes never reuse a teacher serializer.
 
 ### Publication and integrity
@@ -127,6 +131,32 @@ None of this touches the API contract. `start_at`/`end_at` are still ISO-8601 in
 reads it back as the same wall clock, so editing an exam without touching its schedule no longer moves it.
 The window summary and the validation compare instants computed in the exam's timezone rather than the
 reader's.
+
+## Saving an exam twice must change the same rows
+
+The builder edits a draft of questions that may not have server ids yet, while the API exposes the exam and
+its questions as separate resources. `teacherExamService.synchronizeQuestions` therefore diffs the draft
+against what the exam currently holds: same id → `PATCH`, new id → `POST`, absent from the draft → `DELETE`.
+That diff is only correct if the draft knows the ids the server used, which is why `ExamCreator` re-derives
+its draft from the saved exam after every write (`setDraft(asDraft(saved))`) and, for an exam that did not
+have a route yet, replaces the address with `/teacher/exams/{id}/edit`. Before that, the first save created
+the questions and the second created them *again* while deleting the answered originals — the reason editing
+an exam looked wrong and the reason duplicate questions appeared at all. A `POST` that the server answered by
+reusing an existing row also counts as retained, so the delete pass can never erase the question the exam
+just matched, answers included.
+
+Navigation is deliberately not a gate: every step of the builder is one click away, each step shows how many
+issues it still has, and the only thing that blocks is publishing. A teacher fixing one stem should not have
+to walk the wizard backwards and forwards, and the validation the stepper reports is the same list the publish
+button enforces.
+
+The question bank is not read-only either: its composer is the same `QuestionFields` the exam builder uses,
+writing through the same payload and the same server-side rules, with the destination exam named in the dialog
+because every bank row belongs to a paper. The two surfaces point at each other — the builder's questions step
+links to `/teacher/questions?exam={id}`, the bank reads that parameter, filters its list to that exam, and
+preselects it in both dialogs, so "add from the bank" and "write a new one here" never ask which exam you
+meant twice. A new exam has no id to bank into yet, so its questions step offers the save first instead of a
+dead link.
 
 ## Permissions and query policy
 

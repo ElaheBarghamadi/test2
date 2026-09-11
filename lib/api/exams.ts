@@ -1,5 +1,5 @@
 import { apiRequest } from "@/lib/api/client";
-import type { ApiExamWritePayload, ApiQuestionBankQuery, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
+import type { ApiExamWritePayload, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
 
 export const examsApi = {
   list: () => apiRequest<ApiTeacherExamListDto[]>("/exams/"),
@@ -25,8 +25,19 @@ export const examsApi = {
     return apiRequest<ApiQuestionDto[]>(`/questions/${search ? `?${search}` : ""}`);
   },
   bankTags: () => apiRequest<ApiQuestionTagDto[]>("/questions/tags/"),
-  /** Copies bank questions into an exam. Copies, never moves, so no live answer sheet can change. */
-  importQuestions: (examId: string, questionIds: string[]) => apiRequest<ApiQuestionDto[]>(`/exams/${examId}/questions/import/`, { method: "POST", body: { question_ids: questionIds } }),
+  /**
+   * Copies bank questions into an exam. Copies, never moves, so no live answer sheet can change.
+   *
+   * Selections that repeat a question the destination exam already holds come back as a count rather than
+   * as extra rows, because a duplicate question is the same statement graded twice.
+   */
+  async importQuestions(examId: string, questionIds: string[]): Promise<ApiQuestionImportResult> {
+    const response = await apiRequest<ApiQuestionDto[] | { questions: ApiQuestionDto[]; created_count: number; skipped_duplicates: number }>(
+      `/exams/${examId}/questions/import/`,
+      { method: "POST", body: { question_ids: questionIds } },
+    );
+    return Array.isArray(response) ? { created: response, skippedDuplicates: 0 } : { created: response.questions, skippedDuplicates: response.skipped_duplicates };
+  },
   archiveQuestion: (questionId: string, action: "archive" | "restore") => apiRequest<ApiQuestionDto>(`/questions/${questionId}/archive/`, { method: "POST", body: { action } }),
   createQuestion: (examId: string, payload: ApiQuestionWritePayload) => apiRequest<ApiQuestionDto>(`/exams/${examId}/questions/`, { method: "POST", body: payload }),
   updateQuestion: (questionId: string, payload: ApiQuestionWritePayload) => apiRequest<ApiQuestionDto>(`/questions/${questionId}/`, { method: "PATCH", body: payload }),

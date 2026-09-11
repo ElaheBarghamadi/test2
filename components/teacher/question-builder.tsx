@@ -133,11 +133,23 @@ function QuestionTypePicker({ onPick }: { onPick: (type: QuestionType) => void }
 function QuestionEmpty({ onAdd }: { onAdd: () => void }) { return <Card className="grid min-h-80 place-items-center border-dashed bg-muted/20"><div className="p-6 text-center"><ListPlus className="mx-auto h-8 w-8 text-primary"/><h3 className="mt-4 font-black">هنوز سؤالی انتخاب نشده</h3><p className="mt-2 text-sm text-muted-foreground">یک سؤال جدید بسازید تا ویرایش آن را شروع کنید.</p><Button className="mt-5" onClick={onAdd}>افزودن سؤال</Button></div></Card>; }
 
 function QuestionEditor({ question, onChange, onPreview, onDuplicate, onDelete, onMove, first, last }: { question: Question; onChange: (question: Question) => void; onPreview: () => void; onDuplicate: () => void; onDelete: () => void; onMove: (direction: -1 | 1) => void; first: boolean; last: boolean }) {
-  const issues = questionIssues(question);
-  function changeType(type: QuestionType) { if (type === question.type) return; const fresh = blankQuestion(type, question.order); onChange({ ...fresh, id: question.id, stem: question.stem, points: question.points, helpText: question.helpText, explanation: question.explanation }); }
   return <Card className="overflow-hidden">
     <CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="section-label">ویرایش سؤال {toPersianNumber(question.order)}</p><CardTitle className="mt-1">{questionTypeLabel[question.type]}</CardTitle></div><div className="flex gap-1"><Button type="button" variant="ghost" size="icon-sm" onClick={() => onMove(-1)} disabled={first} aria-label="انتقال سؤال به بالا"><ChevronUp className="h-4 w-4"/></Button><Button type="button" variant="ghost" size="icon-sm" onClick={() => onMove(1)} disabled={last} aria-label="انتقال سؤال به پایین"><ChevronDown className="h-4 w-4"/></Button><Button type="button" variant="ghost" size="icon-sm" onClick={onPreview} aria-label="پیش‌نمایش سؤال"><Eye className="h-4 w-4"/></Button><Button type="button" variant="ghost" size="icon-sm" onClick={onDuplicate} aria-label="تکثیر سؤال"><Copy className="h-4 w-4"/></Button><Button type="button" variant="ghost" size="icon-sm" className="text-destructive" onClick={onDelete} aria-label="حذف سؤال"><Trash2 className="h-4 w-4"/></Button></div></div></CardHeader>
-    <CardContent className="p-5 sm:p-6">
+    <CardContent className="p-5 sm:p-6"><QuestionFields question={question} onChange={onChange} autosaved/></CardContent>
+  </Card>;
+}
+
+/**
+ * The question form itself, shared by the exam builder and by the bank's own composer.
+ *
+ * The bank used to be read-only: to add anything you had to open an exam, reach its questions step and
+ * build it there — which also meant a question you only wanted to keep for later had to be attached to a
+ * paper first. Same fields, same validation, one less trip.
+ */
+export function QuestionFields({ question, onChange, autosaved = false }: { question: Question; onChange: (question: Question) => void; autosaved?: boolean }) {
+  const issues = questionIssues(question);
+  function changeType(type: QuestionType) { if (type === question.type) return; const fresh = blankQuestion(type, question.order); onChange({ ...fresh, id: question.id, stem: question.stem, points: question.points, helpText: question.helpText, explanation: question.explanation }); }
+  return <>
       <div className="grid gap-4 sm:grid-cols-[1fr_130px]"><label className="block text-sm font-bold">نوع سؤال<select value={question.type} onChange={(event) => changeType(event.target.value as QuestionType)} className="mt-2 h-11 w-full rounded-xl border bg-background px-3 text-sm">{questionTypes.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}</select></label><label className="block text-sm font-bold">نمره<Input className="mt-2" type="number" min="0" max="100" step="0.25" value={question.points} onChange={(event) => onChange({ ...question, points: Math.max(0, Number(event.target.value)) })}/></label></div>
       <label className="mt-5 block text-sm font-bold">متن سؤال<Textarea className="mt-2 min-h-28" value={question.stem} onChange={(event) => onChange({ ...question, stem: event.target.value })} placeholder="متن روشن و کامل سؤال را وارد کنید..." maxLength={1000}/><span className="mt-1 block text-left text-[10px] font-bold text-muted-foreground">{toPersianNumber(question.stem.length)} / ۱۰۰۰</span></label>
       <label className="mt-4 block text-sm font-bold">راهنمای همین سؤال (اختیاری)<Input className="mt-2" value={question.helpText ?? ""} onChange={(event) => onChange({ ...question, helpText: event.target.value })} placeholder="مثلاً از واحد میلی‌متر استفاده کنید."/></label>
@@ -148,10 +160,9 @@ function QuestionEditor({ question, onChange, onPreview, onDuplicate, onDelete, 
       {question.type === "essay" && <WrittenEditor question={question} onChange={onChange}/>}
       <BankFields question={question} onChange={onChange}/>
       <label className="mt-5 block text-sm font-bold">توضیح یا بازخورد (اختیاری)<Textarea className="mt-2 min-h-20" value={question.explanation ?? ""} onChange={(event) => onChange({ ...question, explanation: event.target.value })} placeholder="توضیحی که بعداً می‌تواند به دانش‌آموز نمایش داده شود..."/></label>
-      <div className="mt-5 flex items-center justify-between border-t pt-5"><span className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground">{issues.length === 0 ? <><CircleCheck className="h-4 w-4 text-emerald-600"/>آماده برای انتشار</> : <><TriangleAlert className="h-4 w-4 text-amber-600"/>نیازمند تکمیل</>}</span><Badge variant="neutral">به‌صورت خودکار ذخیره می‌شود</Badge></div>
+      <div className="mt-5 flex items-center justify-between border-t pt-5"><span className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground">{issues.length === 0 ? <><CircleCheck className="h-4 w-4 text-emerald-600"/>آماده برای انتشار</> : <><TriangleAlert className="h-4 w-4 text-amber-600"/>نیازمند تکمیل</>}</span>{autosaved ? <Badge variant="neutral">به‌صورت خودکار ذخیره می‌شود</Badge> : <Badge variant="neutral">با ذخیره به بانک افزوده می‌شود</Badge>}</div>
       {issues.length > 0 && <ul className="mt-3 space-y-1 rounded-2xl border border-amber-500/25 bg-amber-500/[.07] p-3 text-xs leading-6 text-amber-900 dark:text-amber-300">{issues.map((issue) => <li key={issue} className="flex gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"/>{issue}</li>)}</ul>}
-    </CardContent>
-  </Card>;
+  </>;
 }
 
 /** Full option CRUD: reorder, duplicate, remove, and mark the key — all mirrored onto the write payload. */
@@ -168,14 +179,14 @@ function OptionsEditor({ options, correctIds, multiple, onChange, locked }: { op
   return <section className="mt-5">
     <div className="flex items-center justify-between gap-3"><div><h3 className="text-sm font-black">گزینه‌ها</h3><p className="mt-1 text-xs text-muted-foreground">{multiple ? "یک یا چند پاسخ درست را علامت بزنید." : "یک پاسخ درست را انتخاب کنید."}{locked ? " گزینه‌های این سؤال ثابت‌اند." : ""}</p></div><Button type="button" variant="outline" size="sm" onClick={addOption} disabled={locked || options.length >= MAX_OPTIONS}><Plus className="h-3.5 w-3.5"/>گزینه</Button></div>
     <div className="mt-3 space-y-2">{options.map((option, index) => { const checked = correctIds.includes(option.id); return <div className={cn("flex items-center gap-1.5 rounded-xl border p-2 transition-colors", checked && "border-emerald-500/35 bg-emerald-500/[.04]", !option.label.trim() && !checked && "border-amber-500/30")} key={option.id}>
-      {!locked && <button type="button" role={multiple ? "checkbox" : "radio"} aria-checked={checked} onClick={() => setCorrect(option.id)} className={cn("grid h-8 w-8 shrink-0 place-items-center rounded-lg border text-xs", checked ? "border-emerald-600 bg-emerald-600 text-white" : "bg-card text-muted-foreground")} aria-label={`علامت‌گذاری گزینه ${index + 1} به‌عنوان پاسخ درست`}>{checked ? <Check className="h-4 w-4"/> : toPersianNumber(index + 1)}</button>}
+      {!locked && <button type="button" role={multiple ? "checkbox" : "radio"} aria-checked={checked} onClick={() => setCorrect(option.id)} className={cn("grid h-8 w-8 shrink-0 place-items-center rounded-lg border text-xs", checked ? "border-emerald-600 bg-emerald-600 text-white" : "bg-card text-muted-foreground")} aria-label={`علامت‌گذاری گزینه ${toPersianNumber(index + 1)} به‌عنوان پاسخ درست`}>{checked ? <Check className="h-4 w-4"/> : toPersianNumber(index + 1)}</button>}
       {locked && <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-muted text-xs font-black text-muted-foreground">{toPersianNumber(index + 1)}</span>}
-      <Input value={option.label} onChange={(event) => updateLabel(index, event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addOption(); } }} placeholder={`گزینهٔ ${toPersianNumber(index + 1)}`} aria-label={`متن گزینه ${index + 1}`}/>
+      <Input value={option.label} onChange={(event) => updateLabel(index, event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addOption(); } }} placeholder={`گزینهٔ ${toPersianNumber(index + 1)}`} aria-label={`متن گزینه ${toPersianNumber(index + 1)}`}/>
       {locked ? null : <div className="flex shrink-0 items-center">
-        <Button type="button" variant="ghost" size="icon-sm" onClick={() => moveOption(index, -1)} disabled={index === 0} aria-label={`انتقال گزینه ${index + 1} به بالا`}><ChevronUp className="h-4 w-4"/></Button>
-        <Button type="button" variant="ghost" size="icon-sm" onClick={() => moveOption(index, 1)} disabled={index === options.length - 1} aria-label={`انتقال گزینه ${index + 1} به پایین`}><ChevronDown className="h-4 w-4"/></Button>
-        <Button type="button" variant="ghost" size="icon-sm" onClick={() => duplicateOption(index)} disabled={options.length >= MAX_OPTIONS} aria-label={`تکثیر گزینه ${index + 1}`}><Copy className="h-4 w-4"/></Button>
-        <Button type="button" variant="ghost" size="icon-sm" className="text-destructive hover:text-destructive" onClick={() => deleteOption(option.id)} disabled={options.length <= MIN_OPTIONS} aria-label={`حذف گزینه ${index + 1}`}><Trash2 className="h-4 w-4"/></Button>
+        <Button type="button" variant="ghost" size="icon-sm" onClick={() => moveOption(index, -1)} disabled={index === 0} aria-label={`انتقال گزینه ${toPersianNumber(index + 1)} به بالا`}><ChevronUp className="h-4 w-4"/></Button>
+        <Button type="button" variant="ghost" size="icon-sm" onClick={() => moveOption(index, 1)} disabled={index === options.length - 1} aria-label={`انتقال گزینه ${toPersianNumber(index + 1)} به پایین`}><ChevronDown className="h-4 w-4"/></Button>
+        <Button type="button" variant="ghost" size="icon-sm" onClick={() => duplicateOption(index)} disabled={options.length >= MAX_OPTIONS} aria-label={`تکثیر گزینه ${toPersianNumber(index + 1)}`}><Copy className="h-4 w-4"/></Button>
+        <Button type="button" variant="ghost" size="icon-sm" className="text-destructive hover:text-destructive" onClick={() => deleteOption(option.id)} disabled={options.length <= MIN_OPTIONS} aria-label={`حذف گزینه ${toPersianNumber(index + 1)}`}><Trash2 className="h-4 w-4"/></Button>
       </div>}
     </div>; })}</div>
     <div className="mt-2 flex items-center justify-between text-[10px] font-bold text-muted-foreground"><span>برای گزینهٔ بعدی Enter بزنید.</span><span>{toPersianNumber(options.length)} از {toPersianNumber(MAX_OPTIONS)}{empty ? ` · ${toPersianNumber(empty)} گزینهٔ خالی` : ""}</span></div>

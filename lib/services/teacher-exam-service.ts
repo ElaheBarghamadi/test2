@@ -16,6 +16,10 @@ async function synchronizeQuestions(examId: string, draft: ExamDraft, existing: 
       retainedIds.add(question.id); orderedIds.push(question.id);
     } else {
       const created = await examsApi.createQuestion(examId, payload);
+      // The server reuses an identical question it already holds (200 with `deduplicated`) instead of
+      // inserting a second copy. That row must be counted as retained, or the delete pass below would remove
+      // the very question the exam just matched — taking its students' answers with it.
+      retainedIds.add(created.id);
       orderedIds.push(created.id);
     }
   }

@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Archive, ArchiveRestore, CopyPlus, Eye, PencilLine, Search, Shapes, Tag } from "lucide-react";
+import { Archive, ArchiveRestore, CopyPlus, Eye, Layers, PencilLine, Plus, Search, Shapes, Tag } from "lucide-react";
 import { examsApi } from "@/lib/api/exams";
 import { apiErrorMessage } from "@/lib/api/client";
 import type { ApiQuestionTagDto, ApiQuestionType } from "@/lib/api/dtos";
-import { toTeacherQuestion } from "@/lib/api/mappers";
+import { toQuestionWritePayload, toTeacherQuestion } from "@/lib/api/mappers";
+import { blankQuestion, questionIssues, QuestionFields } from "@/components/teacher/question-builder";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,7 +34,7 @@ const difficultyVariants: Record<QuestionDifficulty, "success" | "warning" | "de
  * live answer sheet the moment someone edits it for the other one, and would silently re-grade attempts
  * that were already submitted, so the API copies the question and records the source for usage counts.
  */
-export function QuestionBankWorkspace() {
+export function QuestionBankWorkspace({ initialExamId }: { initialExamId?: string } = {}) {
   const { exams, loading, initialized, hydrate } = useTeacherExams();
   const toast = useToastStore((state) => state.push);
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -45,16 +46,23 @@ export function QuestionBankWorkspace() {
   const [difficulty, setDifficulty] = useState<"" | QuestionDifficulty>("");
   const [tag, setTag] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  // A bank opened from an exam (`?exam=`) stays pointed at that exam until the teacher widens it.
+  const [examFilter, setExamFilter] = useState(initialExamId ?? "");
   const [selected, setSelected] = useState<string[]>([]);
   const [preview, setPreview] = useState<Question | null>(null);
   const [insertOpen, setInsertOpen] = useState(false);
   const [insertTarget, setInsertTarget] = useState("");
+  // The bank used to be read-only: adding a question meant opening an exam and reaching its questions step.
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createTarget, setCreateTarget] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [newQuestion, setNewQuestion] = useState<Question>(() => blankQuestion("single_choice", 1));
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setListLoading(true); setError(null);
     try {
-      const rows = await examsApi.bank({ search: search.trim() || undefined, type: type || undefined, difficulty: difficulty || undefined, tag: tag || undefined, archived: showArchived || undefined });
+      const rows = await examsApi.bank({ search: search.trim() || undefined, type: type || undefined, difficulty: difficulty || undefined, tag: tag || undefined, exam: examFilter || undefined, archived: showArchived || undefined });
       setQuestions(rows.map(toTeacherQuestion));
       setTags(await examsApi.bankTags());
     } catch (reason) {
@@ -62,7 +70,7 @@ export function QuestionBankWorkspace() {
     } finally {
       setListLoading(false);
     }
-  }, [difficulty, search, showArchived, tag, type]);
+  }, [difficulty, examFilter, search, showArchived, tag, type]);
 
   useEffect(() => { void hydrate(); }, [hydrate]);
   // Debounced search: typing a phrase should not fire one request per character.
@@ -70,7 +78,15 @@ export function QuestionBankWorkspace() {
     const timeout = window.setTimeout(() => void load(), 250);
     return () => window.clearTimeout(timeout);
   }, [load]);
-  useEffect(() => { if (!insertTarget && exams[0]) setInsertTarget(exams.find((exam) => exam.status !== "archived")?.id ?? exams[0].id); }, [exams, insertTarget]);
+  useEffect(() => {
+    if (initialExamId) {
+      if (insertTarget !== initialExamId) setInsertTarget(initialExamId);
+      if (createTarget !== initialExamId) setCreateTarget(initialExamId);
+      return;
+    }
+    if (!insertTarget && exams[0]) setInsertTarget(exams.find((exam) => exam.status !== "archived")?.id ?? exams[0].id);
+    if (!createTarget && exams[0]) setCreateTarget(exams.find((exam) => exam.status === "draft" || exam.status === "scheduled")?.id ?? exams.find((exam) => exam.status !== "archived")?.id ?? exams[0].id);
+  }, [createTarget, exams, initialExamId, insertTarget]);
 
   const selectedQuestions = useMemo(() => questions.filter((question) => selected.includes(question.id)), [questions, selected]);
   const allSelected = questions.length > 0 && selected.length === questions.length;
@@ -82,11 +98,21 @@ export function QuestionBankWorkspace() {
     if (!insertTarget || !selected.length) return;
     setBusyId("insert");
     try {
-      const created = await examsApi.importQuestions(insertTarget, selected);
+      const { created, skippedDuplicates } = await examsApi.importQuestions(insertTarget, selected);
       const target = exams.find((exam) => exam.id === insertTarget);
       setSelected([]); setInsertOpen(false);
       await Promise.all([examsApi.bank({ archived: showArchived || undefined }).then((rows) => setQuestions(rows.map(toTeacherQuestion))), hydrate()]);
-      toast({ title: `${toPersianNumber(created.length)} سؤال به آزمون افزوده شد`, description: `کپی‌ها در «${target?.title ?? "آزمون انتخابی"}» ساخته شدند؛ سؤال اصلی تغییر نکرد.`, variant: "success" });
+      // An exact copy of something the destination already holds is reported, not inserted a second time:
+      // two identical questions mean a student answers the same statement twice for double the marks.
+      toast({
+        title: skippedDuplicates
+          ? `${toPersianNumber(created.length)} سؤال افزوده شد و ${toPersianNumber(skippedDuplicates)} مورد تکراری رد شد`
+          : `${toPersianNumber(created.length)} سؤال به آزمون افزوده شد`,
+        description: skippedDuplicates
+          ? `آنچه عیناً در «${target?.title ?? "آزمون مقصد"}» بود دوباره کپی نشد.`
+          : `کپی‌ها در «${target?.title ?? "آزمون انتخابی"}» ساخته شدند؛ سؤال اصلی تغییر نکرد.`,
+        variant: "success",
+      });
     } catch (reason) {
       toast({ title: "افزودن سؤال‌ها انجام نشد", description: apiErrorMessage(reason), variant: "error" });
     } finally {
@@ -104,6 +130,31 @@ export function QuestionBankWorkspace() {
       toast({ title: "عملیات انجام نشد", description: apiErrorMessage(reason), variant: "error" });
     } finally {
       setBusyId(null);
+    }
+  }
+
+  async function create(keepOpen: boolean) {
+    const target = exams.find((exam) => exam.id === createTarget);
+    if (!target) { toast({ title: "آزمون مقصد را انتخاب کنید", description: "هر سؤال بانک به یک آزمون تعلق دارد؛ بانک از همان‌جا خوانده می‌شود.", variant: "error" }); return; }
+    const issues = questionIssues(newQuestion);
+    if (issues.length) { toast({ title: "سؤال هنوز کامل نیست", description: issues[0], variant: "error" }); return; }
+    setCreating(true);
+    try {
+      const created = await examsApi.createQuestion(target.id, toQuestionWritePayload(newQuestion));
+      await Promise.all([load(), hydrate()]);
+      toast({
+        title: created.deduplicated ? "این سؤال عیناً در همان آزمون بود" : "سؤال به بانک افزوده شد",
+        description: created.deduplicated
+          ? `نسخهٔ دوم ساخته نشد؛ همان ردیف در «${target.title}» می‌ماند و از بانک قابل استفاده است.`
+          : `در «${target.title}» ذخیره شد و از این پس در بانک قابل جست‌وجو و کپی است.`,
+        variant: created.deduplicated ? "success" : "success",
+      });
+      setNewQuestion(blankQuestion(newQuestion.type, 1));
+      if (!keepOpen) setCreateOpen(false);
+    } catch (reason) {
+      toast({ title: "افزودن سؤال انجام نشد", description: apiErrorMessage(reason), variant: "error" });
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -130,10 +181,18 @@ export function QuestionBankWorkspace() {
             <option value="">همهٔ برچسب‌ها</option>
             {tags.map((item) => <option key={item.id} value={item.name}>{item.name}{item.count !== undefined ? ` (${toPersianNumber(item.count)})` : ""}</option>)}
           </select>
+          <Button type="button" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4"/>سؤال تازه در بانک</Button>
           <Button type="button" size="sm" variant={showArchived ? "default" : "outline"} onClick={() => setShowArchived(!showArchived)}><Archive className="h-3.5 w-3.5"/>بایگانی‌شده‌ها</Button>
         </div>
       </CardHeader>
       <CardContent>
+        {examFilter && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-primary/25 bg-primary/[.05] p-2.5 text-[11px] font-bold">
+            <span className="text-muted-foreground">در حال دیدن سؤال‌های</span>
+            <span className="text-foreground">{exams.find((exam) => exam.id === examFilter)?.title ?? "این آزمون"}</span>
+            <button type="button" onClick={() => setExamFilter("")} className="mr-auto rounded-lg border bg-card px-2 py-1 transition-colors hover:bg-muted">نمایش همهٔ سؤال‌ها</button>
+          </div>
+        )}
         {error ? <EmptyState title="بانک سؤال در دسترس نیست" description={error} action={{ label: "تلاش دوباره", onClick: () => void load() }}/> : listLoading ? <div className="space-y-2">{Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-20"/>)}
           </div> : !questions.length ? <EmptyState title={search || type || difficulty || tag || showArchived ? "سؤالی با این فیلترها پیدا نشد" : "بانک سؤال هنوز خالی است"} description={search || type || difficulty || tag || showArchived ? "فیلترها را تغییر دهید یا برچسب دیگری انتخاب کنید." : "با ساخت اولین آزمون، سؤال‌ها اینجا قابل جست‌وجو و مصرف مجدد می‌شوند."} icon={Shapes}/> : <>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -163,6 +222,21 @@ export function QuestionBankWorkspace() {
       <div className="mt-4 flex flex-wrap gap-2">{(preview?.tags ?? []).map((item) => <Badge key={item} variant="default"><Tag className="ml-1 h-3 w-3"/>{item}</Badge>)}{preview && <Badge variant={difficultyVariants[preview.difficulty ?? "medium"]}>{difficultyLabels[preview.difficulty ?? "medium"]}</Badge>}</div>
       <div className="mt-4 text-[11px] leading-5 text-muted-foreground">{preview && <p>این سؤال در {toPersianNumber(preview.answeredCount ?? 0)} پاسخ ثبت‌شده و {toPersianNumber(preview.usageCount ?? 0)} کپی استفاده شده است. برای ویرایش، آن را از آزمون مالکش باز کنید.</p>}</div>
       <div className="mt-5 flex justify-end"><Button onClick={() => setPreview(null)}>بستن</Button></div>
+    </Dialog>
+
+    <Dialog open={createOpen} onClose={() => !creating && setCreateOpen(false)} title="سؤال تازه در بانک" description="هر سؤال بانک به یک آزمون تعلق دارد؛ از همان آزمون در فهرست بانک دیده می‌شود و بعداً قابل کپی است." size="lg">
+      <label className="block text-xs font-bold text-muted-foreground">آزمون مقصد
+        <select value={createTarget} onChange={(event) => setCreateTarget(event.target.value)} className="mt-2 h-11 w-full rounded-xl border bg-background px-3 text-sm font-bold">
+          {exams.filter((exam) => exam.status !== "archived").map((exam) => <option key={exam.id} value={exam.id}>{exam.title} · {typeLabels[exam.status] ?? exam.status}</option>)}
+        </select>
+      </label>
+      <p className="mt-2 flex items-start gap-2 rounded-xl bg-muted/60 p-3 text-[11px] leading-5 text-muted-foreground"><Layers className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary"/>اگر همین سؤال با همین گزینه‌ها، همین کلید و همین نمره در آن آزمون وجود داشته باشد، نسخهٔ دوم ساخته نمی‌شود؛ بانک همان ردیف را نگه می‌دارد تا برگهٔ دانش‌آموز دو بار نمره نگیرد.</p>
+      <div className="mt-4"><QuestionFields question={newQuestion} onChange={setNewQuestion}/></div>
+      <div className="mt-5 flex flex-wrap justify-end gap-2">
+        <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>بستن</Button>
+        <Button variant="outline" onClick={() => void create(true)} disabled={creating}>{creating ? "در حال ذخیره…" : "افزودن و ادامه دادن"}</Button>
+        <Button data-autofocus onClick={() => void create(false)} disabled={creating}><Plus className="h-4 w-4"/>افزودن به بانک</Button>
+      </div>
     </Dialog>
   </>;
 }
