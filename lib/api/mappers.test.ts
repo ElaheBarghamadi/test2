@@ -3,6 +3,7 @@ import type {
   ApiAttemptDto,
   ApiAvailableExamDto,
   ApiExamSettingsDto,
+  ApiOptionDto,
   ApiQuestionDto,
   ApiStudentResultDto,
   ApiTeacherExamDto,
@@ -13,6 +14,7 @@ import {
   toQuestionWritePayload,
   toStudentAttempt,
   toStudentDashboardExam,
+  toStudentQuestion,
   toStudentResult,
   toTeacherExam,
   toTeacherQuestion,
@@ -157,6 +159,44 @@ describe("toQuestionWritePayload", () => {
   it("writes the essay grading note without empty noise", () => {
     const essay: Question = { id: "q1", order: 1, stem: "توضیح دهید", type: "essay", points: 4, required: true, maxLength: 1200, gradingNote: "  به استدلال نمره بدهید  " };
     expect(toQuestionWritePayload(essay).configuration).toEqual({ max_length: 1200, grading_note: "به استدلال نمره بدهید" });
+  });
+});
+
+describe("true/false option identity", () => {
+  /**
+   * The two buttons in the runner are fixed wording, so the client has to learn which stored option stands
+   * for «درست». Keying that on array position is what broke a student's ability to answer false: the pair is
+   * keyed on the option's own `order`, which shuffling never touches.
+   */
+  const tfDto = (options: ApiOptionDto[]) => ({
+    id: SERVER_ID,
+    type: "true_false" as const,
+    text: "۵ فرد است",
+    instructions: "",
+    marks: "4.00",
+    order: 1,
+    options,
+  });
+
+  it("takes the true option from order, not from the array position", () => {
+    const reversed = tfDto([
+      { id: "opt-false", text: "نادرست", order: 2 },
+      { id: "opt-true", text: "درست", order: 1 },
+    ]);
+    expect(toStudentQuestion(reversed)).toMatchObject({ type: "true_false", optionIds: { true: "opt-true", false: "opt-false" } });
+  });
+
+  it("reads the teacher's key from the same ordering", () => {
+    const teacherDto = {
+      ...tfDto([
+        { id: "opt-false", text: "نادرست", order: 2, is_correct: true },
+        { id: "opt-true", text: "درست", order: 1, is_correct: false },
+      ]),
+      exam: OTHER_ID,
+      configuration: {},
+      explanation: "",
+    };
+    expect(toTeacherQuestion(teacherDto)).toMatchObject({ type: "true_false", correctAnswer: false });
   });
 });
 

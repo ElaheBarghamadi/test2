@@ -8,6 +8,7 @@ import type {
   ApiQuestionWritePayload,
   ApiRole,
   ApiNotificationPageDto,
+  ApiOptionDto,
   ApiStudentResultDto,
   ApiTeacherExamDto,
   ApiTeacherExamListDto,
@@ -58,12 +59,27 @@ export function toTeacherQuestion(dto: ApiQuestionDto): Question {
     case "multiple_answer":
       return { ...base, type: "multiple_choice", options, correctOptionIds: options.filter((option) => option.isCorrect).map((option) => option.id) };
     case "true_false":
-      return { ...base, type: "true_false", correctAnswer: options.findIndex((option) => option.isCorrect) === 0, optionIds: { true: options[0]?.id || "", false: options[1]?.id || "" } };
+      return { ...base, type: "true_false", correctAnswer: orderedByPosition(dto)[0]?.is_correct === true, optionIds: trueFalseOptionIds(dto) };
     case "short_answer":
       return { ...base, type: "short_answer", placeholder: stringConfig(config, "placeholder"), expectedAnswers: arrayConfig(config, "expected_answers"), caseSensitive: config.case_sensitive === true, maxLength: numberConfig(config, "max_length") };
     case "written":
       return { ...base, type: "essay", placeholder: stringConfig(config, "placeholder"), maxLength: numberConfig(config, "max_length"), gradingNote: stringConfig(config, "grading_note") };
   }
+}
+
+/**
+ * The two true/false controls are fixed wording («درست» / «نادرست»), so the client has to learn which
+ * *stored option* stands for which. Payload array order is display order — the thing option shuffling is
+ * allowed to change — so the pair is keyed on the option's own `order`, which is the contract the server
+ * documents for true/false.
+ */
+function orderedByPosition(dto: { options?: ApiOptionDto[] }) {
+  return [...(dto.options || [])].sort((left, right) => left.order - right.order);
+}
+
+function trueFalseOptionIds(dto: { options?: ApiOptionDto[] }) {
+  const ordered = orderedByPosition(dto);
+  return { true: ordered[0]?.id || "", false: ordered[1]?.id || "" };
 }
 
 /** Student mapper intentionally reads only fields returned by the student-safe serializer. */
@@ -73,7 +89,7 @@ export function toStudentQuestion(dto: ApiStudentQuestionDto): Question {
   switch (dto.type) {
     case "multiple_choice": return { ...base, type: "single_choice", options };
     case "multiple_answer": return { ...base, type: "multiple_choice", options };
-    case "true_false": return { ...base, type: "true_false", optionIds: { true: options[0]?.id || "", false: options[1]?.id || "" } };
+    case "true_false": return { ...base, type: "true_false", optionIds: trueFalseOptionIds(dto) };
     case "short_answer": return { ...base, type: "short_answer" };
     case "written": return { ...base, type: "essay" };
   }
