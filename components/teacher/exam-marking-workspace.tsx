@@ -533,9 +533,7 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
                     </div>
                     <p className="mt-2 max-h-28 overflow-y-auto whitespace-pre-wrap rounded-xl bg-muted/45 p-2.5 text-[11px] leading-6">{row.text || row.selected_option_texts.join("، ") || "—"}</p>
                     {row.editable && (
-                      <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-                        <Input value={draft.feedback} onChange={(event) => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, feedback: event.target.value } }))} className="h-9 text-[11px]" placeholder="بازخورد کوتاه (اختیاری)"/>
-                      </div>
+                      <Input value={draft.feedback} onChange={(event) => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, feedback: event.target.value } }))} className="mt-2 h-9 text-[11px]" placeholder="بازخورد کوتاه برای این دانش‌آموز (اختیاری)"/>
                     )}
                   </div>
                   <div className="flex items-center gap-2 justify-self-start sm:justify-self-end">
@@ -553,7 +551,8 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
                           }}
                           className="h-9 w-20 text-center text-xs font-black"
                         />
-                        <Button type="button" variant="outline" size="sm" onClick={() => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, mark: String(maximum) } }))}>تمام</Button>
+                        <Button type="button" variant="outline" size="sm" onClick={() => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, mark: "0" } }))}>۰</Button>
+                        <Button type="button" variant="outline" size="sm" onClick={() => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, mark: String(maximum) } }))} title={`تمام بارم: ${maximum}`}>تمام</Button>
                       </>
                     ) : (
                       <span className="rounded-xl bg-muted/60 px-3 py-2 text-xs font-black text-muted-foreground">{toPersianNumber(numeric(row.awarded_score))}</span>
