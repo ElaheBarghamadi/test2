@@ -1,12 +1,12 @@
 /**
  * The session mirror: a small, HttpOnly record the Next.js server keeps for itself.
  *
- * Why it has to exist. The API credential is a bearer token in `sessionStorage`, because `fetch` cannot
+ * Why it has to exist. The API credential is a bearer token in `localStorage`, because `fetch` cannot
  * read an HttpOnly cookie and the deployment sometimes points the browser straight at Django. That is the
- * right arrangement for *data*, but it leaves the Next.js server blind at render time: it cannot see
- * `sessionStorage`, so nothing server-side could refuse to render `/admin/users` for a teacher. This
- * module is the mirror that closes the gap - written after a token has been checked against Django, read
- * by `middleware.ts` before it renders.
+ * right arrangement for *data*, but it leaves the Next.js server blind at render time: nothing the page
+ * keeps in web storage travels with a document request, so the server could not refuse to render
+ * `/admin/users` for a teacher. This module is the mirror that closes the gap - written after a token has
+ * been checked against Django, read by `middleware.ts` before it renders.
  *
  * Two properties matter for safety:
  *  - **It is not a credential.** It is never forwarded to Django as authorization, so the cookie alone

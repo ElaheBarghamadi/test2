@@ -82,4 +82,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 // role guards react to the anonymous state and route through the standard login flow.
 setAuthenticationFailureHandler(() => useAuthStore.getState().clearSession());
 
+/**
+ * The credential is shared across tabs (`localStorage`), so the auth state has to follow it. Without this,
+ * a tab that had already rendered as anonymous would keep saying "please log in" next to a tab that had just
+ * logged in — the report this replaces: one tab in the account, the other demanding a login.
+ */
+if (typeof window !== "undefined") {
+  tokenStorage.subscribe((present) => {
+    const state = useAuthStore.getState();
+    if (!present) {
+      if (state.status !== "anonymous") state.clearSession();
+      return;
+    }
+    if (state.status !== "authenticated") void state.bootstrap();
+  });
+}
+
 export function authErrorMessage(error: unknown) { return apiErrorMessage(error, "ورود انجام نشد. ایمیل و گذرواژه را بررسی کنید."); }

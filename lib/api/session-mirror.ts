@@ -1,7 +1,7 @@
 /**
  * Client-side half of the session mirror.
  *
- * The browser still authenticates the API with the bearer tokens in `sessionStorage`; these calls only keep
+ * The browser still authenticates the API with the bearer tokens in `localStorage`; these calls only keep
  * the server's HttpOnly copy in step, so the page gate knows about logins, refreshes and logouts as they
  * happen. Every call is best effort: if the mirror cannot be written the app keeps working, because the
  * gate falls back to its hint and the data routes are the real authority.
