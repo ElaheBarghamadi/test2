@@ -247,6 +247,20 @@ class SchoolAdministratorApiTests(TestCase):
             )
             self.assertEqual(refused.status_code, 403, f"a principal cannot hand out the {role} role")
 
+    def test_a_stale_school_id_cannot_break_creating_inside_their_own_school(self) -> None:
+        """The payload's claim about the school is dropped, not validated, for a principal."""
+        self.authenticate(self.principal)
+        created = self.client.post(
+            "/api/v1/admin/users/",
+            {
+                "email": "fresh.teacher@example.com", "password": self.password, "first_name": "F", "last_name": "T",
+                "role": User.Role.TEACHER, "school_id": "11111111-1111-1111-1111-111111111111",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, "an id the principal cannot use is ignored, not rejected")
+        self.assertEqual(created.data["school"]["name"], "North Academy")
+
     def test_people_of_another_school_are_not_even_visible(self) -> None:
         self.authenticate(self.principal)
         self.assertEqual(self.client.patch(f"/api/v1/admin/users/{self.rival_teacher.pk}/", {"is_active": False}, format="json").status_code, 404)

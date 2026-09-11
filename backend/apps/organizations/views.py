@@ -149,13 +149,16 @@ class AdminUserListCreateView(APIView):
             # Creating an administrator — of the platform or of a school — is not something a school
             # administrator can do to themselves or to anyone else.
             raise PermissionDenied("نقش مدیر را فقط مدیر کل سامانه می‌تواند بدهد.")
-        serializer = AdminUserCreateSerializer(data=request.data)
+        if school is not None:
+            # The new account belongs to the administrator's own school, whatever the payload claimed - and
+            # the claim is dropped before validation, so a stale or invented `school_id` cannot come back as
+            # a confusing "no such school" error for a field the caller has no control over anyway.
+            payload = {**request.data, "school_id": str(school.pk)}
+            serializer = AdminUserCreateSerializer(data=payload)
+        else:
+            serializer = AdminUserCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        if school is not None:
-            # The new account belongs to the administrator's own school, whatever the payload claimed.
-            data["school"] = school
-            data["school_id"] = str(school.pk)
         with transaction.atomic():
             user = User.objects.create_user(
                 email=data["email"], password=data["password"], first_name=data.get("first_name", ""),
