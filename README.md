@@ -29,6 +29,12 @@ npm run dev
 
 `NEXT_PUBLIC_API_BASE_URL=/api/v1` uses the server-only `API_PROXY_TARGET` rewrite in local development, so browser code never embeds a localhost API URL. For a deployed HTTPS API, set `NEXT_PUBLIC_API_BASE_URL` to its `/api/v1` origin and configure Django CORS for the frontend origin.
 
+The same variable does one more job: it is where `middleware.ts` asks Django whether a session is alive
+before it renders a protected page (`/student/*`, `/teacher/*`, `/admin/*`). Without it, the gate falls back
+to the client-side guard — the API is still the authority on every value, but the wrong-role shell would be
+produced before the browser redirects. It is read from `.env.local` (`.env.local.example` ships the local
+values); leave `API_PROXY_TARGET` unset and the gate stays inactive rather than locking anyone out.
+
 Validate a production build (do not run it concurrently with `npm run dev`):
 
 ```bash
