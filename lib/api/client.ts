@@ -1,4 +1,5 @@
 import { getApiBaseUrl } from "@/lib/api/config";
+import { syncSessionMirror } from "@/lib/api/session-mirror";
 import { tokenStorage } from "@/lib/api/token-storage";
 
 export interface ApiErrorPayload {
@@ -149,6 +150,9 @@ async function refreshSession(): Promise<boolean> {
       });
       if (!response.access) return false;
       tokenStorage.updateAccess(response.access, response.refresh);
+      // Rotated tokens are also why the server's page mirror has to be rewritten from here rather than
+      // only from the auth store: a refresh can happen on any request, including during an exam.
+      void syncSessionMirror();
       return true;
     } catch {
       return false;

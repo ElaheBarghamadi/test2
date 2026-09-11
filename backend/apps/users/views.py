@@ -92,9 +92,17 @@ class LogoutView(APIView):
         if not refresh_token:
             raise serializers.ValidationError({"refresh": "A refresh token is required."})
         try:
-            RefreshToken(refresh_token).blacklist()
+            token = RefreshToken(refresh_token)
         except Exception as exc:
             raise serializers.ValidationError({"refresh": "The refresh token is invalid."}) from exc
+        # A logout request may only revoke its own session: without this, possession of any other
+        # user's refresh string (a leaked reset email, a shared browser) would be a denial-of-service
+        # against that account.
+        # `user_id` is the user model's primary key as a string: this project's User is UUID-keyed, so
+        # it is compared as text (int() here would raise a 500 on every logout).
+        if str(token.payload.get("user_id")) != str(request.user.pk):
+            raise serializers.ValidationError({"refresh": "The refresh token does not belong to this account."})
+        token.blacklist()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

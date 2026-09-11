@@ -34,7 +34,7 @@ class TeacherResultsAccessMixin:
 
     def exams(self):  # type: ignore[no-untyped-def]
         queryset = Exam.objects.select_related("settings", "teacher")
-        if self.request.user.role != "admin":
+        if self.request.user.role != User.Role.ADMIN:
             queryset = queryset.filter(teacher=self.request.user)
         return queryset
 
@@ -355,7 +355,7 @@ class TeacherStudentsOverviewView(TeacherResultsAccessMixin, APIView):
         # A school-assigned teacher gets a real roster, including students who have not yet
         # started an exam. Legacy teachers without a school only see their actual participants.
         membership = SchoolMembership.objects.filter(user=request.user).select_related("school").first()
-        if request.user.role == "admin":
+        if request.user.role == User.Role.ADMIN:
             roster = User.objects.filter(role=User.Role.STUDENT).select_related("student_profile")
         elif membership:
             roster = User.objects.filter(

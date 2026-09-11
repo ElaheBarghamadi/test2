@@ -5,6 +5,7 @@ import { authApi } from "@/lib/api/auth";
 import { apiErrorMessage, setAuthenticationFailureHandler } from "@/lib/api/client";
 import { toUser } from "@/lib/api/mappers";
 import { tokenStorage } from "@/lib/api/token-storage";
+import { clearSessionMirror, syncSessionMirror } from "@/lib/api/session-mirror";
 import type { ApiRegisterPayload } from "@/lib/api/dtos";
 import type { User } from "@/lib/types/domain";
 
@@ -35,14 +36,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Do not trust a cached UI role: ask the server for the current safe user DTO.
       const user = toUser(await authApi.me());
       set({ user, status: "authenticated" });
+      // The page gate may have no mirror yet (a cookie that expired, a first load after this code
+      // shipped). Re-writing it from a live session is what stops a valid login looking like a stranger.
+      await syncSessionMirror();
     } catch {
       tokenStorage.clear();
+      void clearSessionMirror();
       set(anonymous);
     }
   },
   login: async (email, password) => {
     const response = await authApi.login(email.trim(), password);
     tokenStorage.set({ access: response.access, refresh: response.refresh });
+    // Awaited on purpose: the redirect to a protected page is the very next thing that happens, and the
+    // server-side gate must already know about this session by then.
+    await syncSessionMirror();
     // Confirm current identity/role server-side even though login includes a safe user.
     const user = toUser(await authApi.me());
     set({ user, status: "authenticated" });
@@ -60,11 +68,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Clearing local credentials is still mandatory, even if the network/logout endpoint failed.
     } finally {
       tokenStorage.clear();
+      await clearSessionMirror();
       set(anonymous);
     }
   },
   setUser: (user) => set({ user, status: "authenticated" }),
-  clearSession: () => { tokenStorage.clear(); set(anonymous); },
+  // Synchronous by contract (the API client calls it from a failure handler), so the mirror is cleared
+  // without awaiting it: a stale mirror only means the gate falls back to its hint on the next request.
+  clearSession: () => { tokenStorage.clear(); void clearSessionMirror(); set(anonymous); },
 }));
 
 // apiRequest calls this after a failed refresh. It intentionally has no redirect side effect;

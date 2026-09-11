@@ -65,6 +65,9 @@ def _drf_validation_error(exc: DjangoValidationError) -> serializers.ValidationE
 
 class TeacherExamAccessMixin:
     permission_classes = (IsTeacherOrAdministrator, IsExamOwnerOrAdministrator)
+    # Authoring is bulk-friendly by design (options, reorder, import), so the same write budget that
+    # guards the exam engine guards it: 240/min is far above real editing, and it caps a runaway loop.
+    throttle_scope = "exam_write"
 
     def get_exam_queryset(self, *, include_questions: bool = False):  # type: ignore[no-untyped-def]
         queryset = Exam.objects.select_related("teacher", "settings").annotate(

@@ -11,6 +11,7 @@ import { authErrorMessage, dashboardForRole, useAuthStore } from "@/lib/state/au
 import { usersApi } from "@/lib/api/users";
 import { authApi } from "@/lib/api/auth";
 import { useToastStore } from "@/lib/state/toast-store";
+import { safeNextPath } from "@/lib/auth/page-access";
 
 type Mode = "login" | "register" | "forgot";
 const content: Record<Mode, { title: string; subtitle: string; submit: string }> = {
@@ -19,7 +20,8 @@ const content: Record<Mode, { title: string; subtitle: string; submit: string }>
   forgot: { title: "بازیابی گذرواژه", subtitle: "ایمیل حساب را وارد کنید تا پیوند امن ساخت گذرواژهٔ جدید برایتان ارسال شود.", submit: "ارسال پیوند بازیابی" },
 };
 
-function safeNext(value: string | null) { return value?.startsWith("/") && !value.startsWith("//") ? value : null; }
+// The same rule the page gate uses, so `?next=` can never become a way to hand a session to another site.
+const safeNext = safeNextPath;
 
 export function AuthForm({ mode }: { mode: Mode }) {
   const [showPassword, setShowPassword] = useState(false);
