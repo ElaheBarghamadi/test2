@@ -30,8 +30,8 @@ export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => null)) as SessionRequestBody | null;
   const access = bearerOnly(body?.access);
   const refresh = bearerOnly(body?.refresh);
-  const response = NextResponse.json({ ok: Boolean(access), role: null }, { status: access ? 200 : 400 });
   if (!access) {
+    const response = NextResponse.json({ ok: false, role: null }, { status: 400 });
     eraseMirror(response);
     return response;
   }
@@ -39,16 +39,18 @@ export async function POST(request: NextRequest) {
   const verification = await verifyToken(access, decodeExpiry(access));
   if (verification.kind === "invalid") {
     // A refused token is the one answer that must also clear any mirror that was already there.
+    const response = NextResponse.json({ ok: false, code: "invalid_token" }, { status: 401 });
     eraseMirror(response);
-    return NextResponse.json({ ok: false, code: "invalid_token" }, { status: 401 });
+    return response;
   }
-  writeMirror(response, {
-    role: verification.kind === "valid" ? verification.role : null,
-    accessToken: access,
-    accessExpiry: decodeExpiry(access) ?? 0,
-    refresh,
-  });
-  return NextResponse.json({ ok: true, role: verification.kind === "valid" ? verification.role : null });
+
+  // One response, mutated then returned. Building a second `NextResponse` to carry the body would drop the
+  // `Set-Cookie` headers with the first one, and the gate would then see an anonymous visitor on every
+  // request from a signed-in browser — turning the feature into a lock-out.
+  const role = verification.kind === "valid" ? verification.role : null;
+  const response = NextResponse.json({ ok: true, role });
+  writeMirror(response, { role, accessToken: access, accessExpiry: decodeExpiry(access) ?? 0, refresh });
+  return response;
 }
 
 /** `DELETE` ends the session locally. Revoking the API token itself stays the browser's job (`/auth/logout/`). */

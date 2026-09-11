@@ -8,6 +8,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
-    include: ["components/**/*.test.{ts,tsx}", "lib/**/*.test.{ts,tsx}"],
+    // `app/**` is in the list because the session mirror's route handler is load-bearing for page access,
+    // and the only way to check what it actually sends is to call it.
+    include: ["components/**/*.test.{ts,tsx}", "lib/**/*.test.{ts,tsx}", "app/**/*.test.{ts,tsx}"],
   },
 });

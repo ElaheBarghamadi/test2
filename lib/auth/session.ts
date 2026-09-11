@@ -42,6 +42,20 @@ export type Verification =
   /** Nothing follows from this answer, so it must not be read as a logout. */
   | { kind: "unknown"; reason: "no-token" | "expired" | "offline" | "unconfigured" };
 
+/** base64url without `Buffer`: the mirror is read in the edge runtime as well as in Node. */
+function encodeBase64Url(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeBase64Url(segment: string): string {
+  const padded = segment.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(segment.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
+}
+
 function attributes(maxAge: number) {
   return {
     httpOnly: true,
@@ -70,12 +84,14 @@ export function writeMirror(response: CookieHost, mirror: Mirror) {
   // `null` means "a session we could not read a role for": the token cookie still goes out, the role
   // record is cleared rather than guessed, so the gate renders instead of redirecting to a dashboard.
   const record = mirror.role
-    ? Buffer.from(JSON.stringify({ v: 1, role: mirror.role, aexp: mirror.accessExpiry }), "utf8").toString("base64url")
+    ? encodeBase64Url(JSON.stringify({ v: 1, role: mirror.role, aexp: mirror.accessExpiry }))
     : "";
   if (record) response.cookies.set(ROLE_COOKIE, record, attributes(MIRROR_MAX_AGE_SECONDS));
   else response.cookies.set(ROLE_COOKIE, "", attributes(0));
-  // Written as `access.refresh` so one cookie carries the pair the browser would otherwise re-send.
-  response.cookies.set(ACCESS_COOKIE, [mirror.accessToken, mirror.refresh].filter(Boolean).join("."), attributes(MIRROR_MAX_AGE_SECONDS));
+  // One cookie carries the pair the browser would otherwise re-send. The separator is `~`, not `.`: a JWT
+  // is itself `header.payload.signature`, so a dot join cannot be split again without guessing — and the
+  // first version of this line guessed, handing the gate a bearer string Django had to refuse.
+  response.cookies.set(ACCESS_COOKIE, [mirror.accessToken, mirror.refresh].filter(Boolean).join("~"), attributes(MIRROR_MAX_AGE_SECONDS));
 }
 
 export function eraseMirror(response: CookieHost) {
@@ -86,7 +102,7 @@ function readRecord(source: CookieReader): { role: Role | null; accessExpiry: nu
   const raw = source.cookies.get(ROLE_COOKIE)?.value;
   if (!raw) return { role: null, accessExpiry: 0 };
   try {
-    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as { v?: unknown; role?: unknown; aexp?: unknown };
+    const parsed = JSON.parse(decodeBase64Url(raw)) as { v?: unknown; role?: unknown; aexp?: unknown };
     if (parsed.v !== 1) return { role: null, accessExpiry: 0 };
     return {
       role: isRole(parsed.role) ? parsed.role : null,
@@ -103,11 +119,21 @@ export function readMirror(source: CookieReader): Mirror | null {
   const raw = source.cookies.get(ACCESS_COOKIE)?.value;
   if (!raw) return null;
   const { role, accessExpiry } = readRecord(source);
-  // A JWT is `header.payload.signature`, so the last dot separates our two tokens from the payload dots.
-  const split = raw.lastIndexOf(".");
-  if (split < 0) return null;
-  const accessToken = raw.slice(0, split);
-  const refresh = raw.slice(split + 1);
+  const split = raw.indexOf("~");
+  let accessToken: string;
+  let refresh: string;
+  if (split >= 0) {
+    accessToken = raw.slice(0, split);
+    refresh = raw.slice(split + 1);
+  } else {
+    // A mirror written before the separator changed: the join was a dot, so the only sound reading is
+    // "three dot-segments are one token". Refusing outright would log out every session that predates
+    // this fix on its next page view, which is a worse outcome than one more request.
+    const parts = raw.split(".");
+    if (parts.length < 6) return null;
+    accessToken = parts.slice(0, 3).join(".");
+    refresh = parts.slice(3).join(".");
+  }
   if (!accessToken) return null;
   return { role, accessToken, accessExpiry, refresh };
 }
@@ -117,8 +143,7 @@ export function decodeExpiry(token: string): number | null {
   const segment = token.split(".")[1];
   if (!segment) return null;
   try {
-    const padded = segment.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(segment.length / 4) * 4, "=");
-    const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as { exp?: unknown };
+    const payload = JSON.parse(decodeBase64Url(segment)) as { exp?: unknown };
     return typeof payload.exp === "number" ? payload.exp : null;
   } catch {
     return null;
