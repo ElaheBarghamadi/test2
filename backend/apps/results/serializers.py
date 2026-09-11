@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
-from apps.attempts.models import ExamAttempt, StudentAnswer
+from apps.attempts.models import AttemptEvent, ExamAttempt, StudentAnswer
 
 from .models import ExamResult
 
@@ -46,6 +46,14 @@ class StudentResultSerializer(serializers.ModelSerializer):
         return result.pending_manual_grading_count == 0
 
     def get_maximum_score(self, result: ExamResult) -> float:
+        """The marks this attempt was actually graded against.
+
+        Falling back to the live exam total would let a later re-weighting contradict a score the
+        student already saw; the snapshot is the record, and the fallback only covers rows graded
+        before the column existed.
+        """
+        if result.maximum_score:
+            return float(result.maximum_score)
         return float(result.attempt.exam.total_marks)
 
     def get_attempt_number(self, result: ExamResult) -> int:
@@ -83,9 +91,11 @@ class TeacherResultSerializer(serializers.ModelSerializer):
             "incorrect_count",
             "unanswered_count",
             "pending_manual_grading_count",
+            "manual_grading_count",
             "feedback",
             "computed_at",
             "published_at",
+            "revised_at",
         )
 
 
@@ -99,10 +109,12 @@ class TeacherAttemptRowSerializer(serializers.ModelSerializer):
     class_name = serializers.CharField(source="student.student_profile.class_name", read_only=True, default="")
     score = serializers.SerializerMethodField()
     percentage = serializers.SerializerMethodField()
-    maximum_score = serializers.DecimalField(source="exam.total_marks", max_digits=8, decimal_places=2, read_only=True)
+    maximum_score = serializers.SerializerMethodField()
     submission_status = serializers.SerializerMethodField()
     completion_minutes = serializers.SerializerMethodField()
     pending_manual_grading_count = serializers.SerializerMethodField()
+    manual_grading_count = serializers.SerializerMethodField()
+    attempt_number = serializers.IntegerField(read_only=True)
     result_status = serializers.SerializerMethodField()
 
     class Meta:
@@ -124,6 +136,8 @@ class TeacherAttemptRowSerializer(serializers.ModelSerializer):
             "percentage",
             "maximum_score",
             "pending_manual_grading_count",
+            "manual_grading_count",
+            "attempt_number",
             "result_status",
         )
         read_only_fields = fields
@@ -144,6 +158,20 @@ class TeacherAttemptRowSerializer(serializers.ModelSerializer):
         result = self._result(attempt)
         return result.pending_manual_grading_count if result else 0
 
+    def get_manual_grading_count(self, attempt: ExamAttempt) -> int:
+        result = self._result(attempt)
+        if result is None:
+            return 0
+        # Rows graded before the total was snapshotted fall back to "whatever is still open".
+        return result.manual_grading_count or result.pending_manual_grading_count
+
+    def get_maximum_score(self, attempt: ExamAttempt) -> float:
+        """The exam total as the result saw it, so a row's score and maximum cannot disagree."""
+        result = self._result(attempt)
+        if result is not None and result.maximum_score:
+            return float(result.maximum_score)
+        return float(attempt.exam.total_marks)
+
     def get_result_status(self, attempt: ExamAttempt) -> str | None:
         result = self._result(attempt)
         return result.status if result else None
@@ -161,6 +189,15 @@ class TeacherAttemptRowSerializer(serializers.ModelSerializer):
             return None
         seconds = max(0, (attempt.submitted_at - attempt.started_at).total_seconds())
         return int(Decimal(seconds / 60).quantize(Decimal("1")))
+
+
+class TeacherAttemptEventSerializer(serializers.ModelSerializer):
+    """One recorded session/activity signal. Timestamps are the server's, never the browser's."""
+
+    class Meta:
+        model = AttemptEvent
+        fields = ("id", "kind", "detail", "created_at")
+        read_only_fields = fields
 
 
 class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):

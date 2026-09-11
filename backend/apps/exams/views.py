@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from apps.users.models import User
 from apps.users.permissions import IsExamOwnerOrAdministrator, IsTeacherOrAdministrator
 
-from .models import Exam, Question, QuestionOption
+from .models import Exam, Question, QuestionOption, QuestionTag
 from .serializers import (
     ExamWriteSerializer,
     QuestionReorderSerializer,
@@ -22,6 +22,7 @@ from .serializers import (
 )
 from .services import (
     archive_exam,
+    close_overdue_exams,
     complete_exam,
     duplicate_exam,
     extend_exam_time,
@@ -99,11 +100,18 @@ class TeacherExamListCreateView(TeacherExamAccessMixin, APIView):
     """Teacher/admin owned exam listing and creation; no client-provided owner or status."""
 
     def get(self, request) -> Response:  # type: ignore[no-untyped-def]
+        # No scheduler runs here, so the list read is where an exam whose window closed is moved out of
+        # "active". The query behind it is a single indexed filter and the transition is idempotent.
+        close_overdue_exams(owner=request.user)
         params = ExamListQuerySerializer(data=request.query_params)
         params.is_valid(raise_exception=True)
         data = params.validated_data
 
-        queryset = self.get_exam_queryset().annotate(question_count=Count("questions"))
+        # No re-annotation here on purpose: `question_count` already exists from the shared queryset,
+        # and re-declaring it without `distinct=True` multiplies questions by attempts through the join.
+        # No re-annotation here on purpose: `question_count` already exists from the shared queryset,
+        # and re-declaring it without `distinct=True` multiplies questions by attempts through the join.
+        queryset = self.get_exam_queryset()
         if exam_status := data.get("status"):
             queryset = queryset.filter(status=exam_status)
         if search := data.get("search"):
@@ -166,8 +174,18 @@ class ExamActionView(TeacherExamAccessMixin, APIView):
 
 class QuestionAccessMixin(TeacherExamAccessMixin):
     def get_question_queryset(self):  # type: ignore[no-untyped-def]
-        queryset = Question.objects.select_related("exam", "exam__teacher").prefetch_related(
-            Prefetch("options", queryset=QuestionOption.objects.order_by("order"))
+        queryset = (
+            Question.objects.select_related("exam", "exam__teacher")
+            .prefetch_related(
+                Prefetch("options", queryset=QuestionOption.objects.order_by("order")),
+                "tags",
+            )
+            # Bank bookkeeping: how many attempts answered this question, and how many copies the
+            # teacher has made of it elsewhere. Both are annotations so a list stays one query.
+            .annotate(
+                answered_count=Count("student_answers", distinct=True),
+                usage_count=Count("copies", distinct=True),
+            )
         )
         if self.request.user.role != User.Role.ADMIN:
             queryset = queryset.filter(exam__teacher=self.request.user)
@@ -194,6 +212,95 @@ class ExamQuestionListCreateView(QuestionAccessMixin, APIView):
         return Response(TeacherQuestionSerializer(question).data, status=status.HTTP_201_CREATED)
 
 
+class QuestionBankFilterSerializer(serializers.Serializer):
+    """Query-string filters for the reusable question bank."""
+
+    search = serializers.CharField(required=False, allow_blank=True, max_length=200)
+    type = serializers.ChoiceField(required=False, choices=Question.Type.choices)
+    difficulty = serializers.ChoiceField(required=False, choices=Question.Difficulty.choices)
+    tag = serializers.CharField(required=False, allow_blank=True, max_length=60)
+    subject = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    exam = serializers.UUIDField(required=False)
+    archived = serializers.BooleanField(required=False, default=False)
+    ordering = serializers.ChoiceField(
+        required=False,
+        default="-updated_at",
+        choices=(
+            "updated_at", "-updated_at", "difficulty", "-difficulty",
+            "marks", "-marks", "answered_count", "-answered_count", "type", "-type",
+        ),
+    )
+
+
+class QuestionBankListView(QuestionAccessMixin, APIView):
+    """Every question this teacher owns, searchable, so the next exam can reuse the last one."""
+
+    def get(self, request) -> Response:  # type: ignore[no-untyped-def]
+        params = QuestionBankFilterSerializer(data=request.query_params)
+        params.is_valid(raise_exception=True)
+        data = params.validated_data
+        queryset = self.get_question_queryset().select_related("exam__settings")
+        if search := data.get("search", "").strip():
+            queryset = queryset.filter(Q(text__icontains=search) | Q(instructions__icontains=search) | Q(exam__subject__icontains=search))
+        if data.get("type"):
+            queryset = queryset.filter(type=data["type"])
+        if data.get("difficulty"):
+            queryset = queryset.filter(difficulty=data["difficulty"])
+        if data.get("subject", "").strip():
+            queryset = queryset.filter(exam__subject__iexact=data["subject"].strip())
+        if data.get("tag", "").strip():
+            queryset = queryset.filter(tags__name__iexact=data["tag"].strip())
+        if data.get("exam"):
+            queryset = queryset.filter(exam_id=data["exam"])
+        queryset = queryset.filter(is_archived=bool(data.get("archived")))
+        order = data["ordering"]
+        if order == "answered_count" or order == "-answered_count":
+            queryset = queryset.order_by(order, "-created_at")
+        else:
+            queryset = queryset.order_by(order, "exam__title", "order")
+        return Response(TeacherQuestionSerializer(queryset[:200], many=True).data)
+
+
+class QuestionBankTagsView(QuestionAccessMixin, APIView):
+    """The teacher's tag list, with counts, for the bank's filter chips."""
+
+    def get(self, request) -> Response:  # type: ignore[no-untyped-def]
+        teacher = None if request.user.role == User.Role.ADMIN else request.user
+        tags = QuestionTag.objects.filter(teacher=teacher) if teacher is not None else QuestionTag.objects.all()
+        return Response([{"id": str(tag.id), "name": tag.name, "count": tag.questions.count()} for tag in tags.order_by("name")])
+
+
+class QuestionImportSerializer(serializers.Serializer):
+    """Bulk "insert these bank questions into that exam"."""
+
+    question_ids = serializers.ListField(child=serializers.UUIDField(), allow_empty=False, max_length=100)
+
+    def validate(self, attrs: dict) -> dict:
+        unexpected = set(self.initial_data).difference(self.fields)
+        if unexpected:
+            raise serializers.ValidationError({field: "This is not a supported import field." for field in unexpected})
+        if len(attrs["question_ids"]) != len(set(attrs["question_ids"])):
+            raise serializers.ValidationError({"question_ids": "Question IDs must not repeat."})
+        return attrs
+
+
+class ExamQuestionImportView(QuestionAccessMixin, APIView):
+    """Copy bank questions into an exam. Copies, never moves: grading history stays untouched."""
+
+    def post(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
+        exam = self.get_exam(exam_id)
+        params = QuestionImportSerializer(data=request.data)
+        params.is_valid(raise_exception=True)
+        from .services import copy_questions_into_exam
+
+        try:
+            created_ids = copy_questions_into_exam(exam, params.validated_data["question_ids"], request.user)
+        except DjangoValidationError as exc:
+            raise _drf_validation_error(exc) from exc
+        questions = self.get_question_queryset().filter(pk__in=created_ids).order_by("order")
+        return Response(TeacherQuestionSerializer(questions, many=True).data, status=status.HTTP_201_CREATED)
+
+
 class TeacherQuestionDetailView(QuestionAccessMixin, APIView):
     def get(self, request, question_id) -> Response:  # type: ignore[no-untyped-def]
         return Response(TeacherQuestionSerializer(self.get_question(question_id)).data)
@@ -207,12 +314,43 @@ class TeacherQuestionDetailView(QuestionAccessMixin, APIView):
 
     def delete(self, request, question_id) -> Response:  # type: ignore[no-untyped-def]
         question = self.get_question(question_id)
+        if question.student_answers.exists():
+            # StudentAnswer.question is PROTECT, and that protection is the point: deleting this row
+            # would delete the answer history it belongs to. Before this check the ORM raised
+            # ProtectedError and the API answered with a 500 debug page.
+            return Response(
+                {
+                    "detail": {
+                        "question": (
+                            "This question has student answers, so it cannot be deleted. Archive it to hide it "
+                            "from the bank, or duplicate the exam if you need a clean copy."
+                        )
+                    },
+                    "code": "question_has_answers",
+                    "answered_count": question.student_answers.count(),
+                    "status_code": status.HTTP_409_CONFLICT,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         with transaction.atomic():
             exam = Exam.objects.select_for_update().get(pk=question.exam_id)
             question.delete()
             resequence_questions(exam.pk)
             refresh_total_marks(exam)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class QuestionArchiveView(QuestionAccessMixin, APIView):
+    """Hide a question from the bank picker, or bring it back. Exam content is untouched either way."""
+
+    def post(self, request, question_id) -> Response:  # type: ignore[no-untyped-def]
+        action = (request.data.get("action") or "archive").strip().lower()
+        if action not in {"archive", "restore"}:
+            raise serializers.ValidationError({"action": "Use `archive` or `restore`."})
+        question = self.get_question(question_id)
+        question.is_archived = action == "archive"
+        question.save(update_fields=("is_archived", "updated_at"))
+        return Response(TeacherQuestionSerializer(self.get_question(question.pk)).data)
 
 
 class ExamQuestionReorderView(QuestionAccessMixin, APIView):

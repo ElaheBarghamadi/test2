@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
+from corsheaders.defaults import default_headers
 import dj_database_url
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
@@ -23,6 +25,9 @@ def env_list(name: str, default: str = "") -> list[str]:
 
 
 DEBUG = env_bool("DJANGO_DEBUG", True)
+# The test runner disables throttling by default (the throttle cache is not flushed between test
+# methods); `THROTTLE_DURING_TESTS` lets a test ask for the real behaviour.
+TESTING = "test" in sys.argv[1:2] or "pytest" in sys.argv[1:2]
 _secret_key = os.getenv("DJANGO_SECRET_KEY")
 if not _secret_key and not DEBUG:
     raise ImproperlyConfigured("DJANGO_SECRET_KEY must be configured when DJANGO_DEBUG is false.")
@@ -46,6 +51,7 @@ INSTALLED_APPS = [
     "apps.exams",
     "apps.attempts",
     "apps.results",
+    "apps.notifications",
 ]
 
 MIDDLEWARE = [
@@ -103,7 +109,23 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
     "EXCEPTION_HANDLER": "apps.core.api.exception_handler",
+    # Explicit cache so throttling works without Redis; LocMem is a per-process budget, which is an
+    # honest trade at one school's traffic and is documented as such.
+    "DEFAULT_THROTTLE_CLASSES": ("apps.core.throttling.ScopedRateThrottle",),
+    # An empty rate disables a scope, which is how tests opt out without changing production behaviour.
+    "DEFAULT_THROTTLE_RATES": {
+        "login": os.getenv("DJANGO_THROTTLE_LOGIN", "12/min"),
+        "register": os.getenv("DJANGO_THROTTLE_REGISTER", "8/hour"),
+        "password_reset": os.getenv("DJANGO_THROTTLE_PASSWORD_RESET", "5/hour"),
+        "exam_write": os.getenv("DJANGO_THROTTLE_EXAM_WRITE", "240/min"),
+    },
 }
+
+# Explicit cache backing for the throttle classes above.
+CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "examora"}}
+
+# Password-reset links are single-purpose; Django's three-day default is far too generous for a school.
+PASSWORD_RESET_TIMEOUT = int(os.getenv("DJANGO_PASSWORD_RESET_TIMEOUT_SECONDS", 60 * 60 * 3))
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
@@ -114,7 +136,9 @@ SIMPLE_JWT = {
 
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
-CORS_ALLOW_CREDENTIALS = True
+# The attempt write guards ride on custom headers, and a cross-origin deployment (the README supports
+# pointing NEXT_PUBLIC_API_BASE_URL straight at Django) would fail preflight without this allowlist.
+CORS_ALLOW_HEADERS = (*default_headers, "x-exam-session", "x-exam-revision")
 
 # Password-reset delivery is environment configured. Console mail is deliberate for local development;
 # production must configure a real Django email backend and sender address.
@@ -131,3 +155,19 @@ EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
 # Session cookies are not used for API authentication, but safe defaults retain admin protection.
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS")
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# API auth is a bearer header, so cookies never need to cross the wire with the session; disabling
+# credentialed CORS removes a whole class of ambient-credential abuse for no functional cost.
+CORS_ALLOW_CREDENTIALS = env_bool("DJANGO_CORS_ALLOW_CREDENTIALS", False)
+
+# Transport hardening applies outside DEBUG so a local run stays usable.
+if not DEBUG:
+    SECURE_SSL_REDIRECT = env_bool("DJANGO_SECURE_SSL_REDIRECT", True)
+    SECURE_HSTS_SECONDS = int(os.getenv("DJANGO_SECURE_HSTS_SECONDS", str(60 * 60 * 24 * 30)))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool("DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS", True)
+    SECURE_HSTS_PRELOAD = env_bool("DJANGO_SECURE_HSTS_PRELOAD", False)
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = "same-origin"
+    X_FRAME_OPTIONS = "DENY"
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True

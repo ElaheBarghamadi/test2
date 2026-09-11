@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views import (
     ExamActionView,
+    ExamQuestionImportView,
     ExamQuestionListCreateView,
     ExamQuestionReorderView,
     TeacherExamDetailView,
@@ -21,4 +22,5 @@ urlpatterns = [
     path("<uuid:exam_id>/duplicate/", ExamActionView.as_view(action="duplicate"), name="exam-duplicate"),
     path("<uuid:exam_id>/questions/", ExamQuestionListCreateView.as_view(), name="exam-question-list-create"),
     path("<uuid:exam_id>/questions/reorder/", ExamQuestionReorderView.as_view(), name="exam-question-reorder"),
+    path("<uuid:exam_id>/questions/import/", ExamQuestionImportView.as_view(), name="exam-question-import"),
 ]

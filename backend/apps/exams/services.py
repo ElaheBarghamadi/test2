@@ -11,6 +11,8 @@ from django.db.models import F, Max, Prefetch, Sum
 from django.utils import timezone
 
 from .models import Exam, ExamSettings, Question, QuestionOption
+from apps.notifications.models import Notification
+from apps.notifications.services import notify, notify_exam_audience
 
 
 CHOICE_QUESTION_TYPES = {
@@ -154,6 +156,12 @@ def publish_exam(exam_id) -> Exam:
         exam.status = target_status
         exam.status_before_archive = None
         exam.save(update_fields=("status", "status_before_archive", "updated_at"))
+        notify_exam_audience(
+            exam,
+            kind=Notification.Kind.EXAM_PUBLISHED,
+            title="آزمون تازه منتشر شد",
+            body=f"«{exam.title}» برای شما منتشر شد.",
+        )
         return exam
 
 
@@ -165,6 +173,10 @@ def archive_exam(exam_id) -> Exam:
         exam.status_before_archive = exam.status
         exam.status = Exam.Status.ARCHIVED
         exam.save(update_fields=("status", "status_before_archive", "updated_at"))
+        # Archiving takes the exam away from the class, so no attempt may stay open behind it.
+        from apps.attempts.services import close_exam_attempts
+
+        close_exam_attempts(exam, reason="archived")
         return exam
 
 
@@ -193,12 +205,26 @@ def restore_exam(exam_id) -> Exam:
 
 
 def complete_exam(exam_id) -> Exam:
+    """End an exam now: the writing window closes and every open attempt is graded as it stands."""
     with transaction.atomic():
         exam = _locked_exam(exam_id)
         if exam.status != Exam.Status.ACTIVE:
             raise ValidationError({"status": ["Only active exams can be completed."]})
         exam.status = Exam.Status.COMPLETED
         exam.save(update_fields=("status", "updated_at"))
+        from apps.attempts.services import close_exam_attempts
+
+        closed = close_exam_attempts(exam, reason="completed")
+        notify(
+            [exam.teacher],
+            kind=Notification.Kind.EXAM_ENDED,
+            title="آزمون پایان یافت",
+            body=f"«{exam.title}» بسته شد؛ {closed} تلاش باز نهایی گردید.",
+            link=f"/teacher/results?exam={exam.pk}",
+            exam=exam,
+            # Ending can legitimately happen again after a restore, so this one is allowed to repeat.
+            dedupe="",
+        )
         return exam
 
 
@@ -223,6 +249,13 @@ def start_exam_now(exam_id) -> Exam:
         exam.status = Exam.Status.ACTIVE
         exam.status_before_archive = None
         exam.save(update_fields=("status", "status_before_archive", "start_at", "total_marks", "updated_at"))
+        notify_exam_audience(
+            exam,
+            kind=Notification.Kind.EXAM_STARTED,
+            title="آزمون آغاز شد",
+            body=f"«{exam.title}» اکنون باز است و زمانش شمارش شروع می‌شود.",
+            link=f"/student/exam/{exam.pk}",
+        )
         return exam
 
 
@@ -242,6 +275,11 @@ def extend_exam_time(exam_id, extra_minutes: int) -> Exam:
         if exam.end_at:
             exam.end_at = max(exam.end_at, timezone.now()) + timedelta(minutes=extra_minutes)
         exam.save(update_fields=("duration_minutes", "end_at", "updated_at"))
+        # Attempt deadlines are snapshots, so an extension has to be applied on purpose: students who
+        # are mid-answer get exactly the same extra minutes, and nobody else's history moves.
+        from apps.attempts.services import shift_open_attempt_deadlines
+
+        shift_open_attempt_deadlines(exam, extra_minutes)
         return exam
 
 
@@ -312,6 +350,94 @@ def duplicate_exam(exam_id, owner) -> Exam:
             ])
         refresh_total_marks(duplicate)
         return duplicate
+
+
+def close_overdue_exams(*, owner=None) -> int:
+    """Move active exams whose window has closed into `completed`.
+
+    There is no scheduler in this stack and 180 students do not justify one. Reading the exam list is
+    the natural moment to reconcile the state, and the transition is idempotent, so the teacher panel
+    and the student availability rule stop disagreeing about an exam that has already finished.
+    """
+    now = timezone.now()
+    overdue = Exam.objects.filter(status=Exam.Status.ACTIVE, end_at__isnull=False, end_at__lte=now)
+    if owner is not None and getattr(owner, "role", None) == "teacher":
+        overdue = overdue.filter(teacher=owner)
+    closed = 0
+    for exam_id in list(overdue.values_list("id", flat=True)):
+        with transaction.atomic():
+            exam = Exam.objects.select_for_update().get(pk=exam_id)
+            if exam.status != Exam.Status.ACTIVE or not exam.end_at or exam.end_at > timezone.now():
+                continue
+            exam.status = Exam.Status.COMPLETED
+            exam.save(update_fields=("status", "updated_at"))
+            from apps.attempts.services import close_exam_attempts
+
+            close_exam_attempts(exam, reason="window_closed")
+            closed += 1
+    return closed
+
+
+def copy_questions_into_exam(exam: Exam, question_ids: list, teacher) -> list:  # type: ignore[no-untyped-def]
+    """Insert copies of bank questions at the end of an exam, in the selected order.
+
+    Copying rather than linking is deliberate. A question that is *shared* between two exams would
+    change the answer sheet of a live exam the moment someone edits it for the other one, and it would
+    silently re-grade attempts that were already submitted. The link (`copied_from`) only exists so the
+    bank can report where a question ended up.
+    """
+    from django.db import transaction as db_transaction
+
+    from .models import QuestionTag
+
+    with db_transaction.atomic():
+        locked = Exam.objects.select_for_update().get(pk=exam.pk)
+        if locked.status in {Exam.Status.ARCHIVED}:
+            raise ValidationError({"exam": ["An archived exam cannot be changed."]})
+        sources = list(
+            Question.objects.select_related("exam")
+            .prefetch_related(Prefetch("options", queryset=QuestionOption.objects.order_by("order")), "tags")
+            .filter(pk__in=question_ids)
+        )
+        by_id = {str(question.pk): question for question in sources}
+        missing = [str(question_id) for question_id in question_ids if str(question_id) not in by_id]
+        if missing:
+            raise ValidationError({"question_ids": ["One or more questions no longer exist. Reload the bank and try again."]})
+        foreign = [question for question in sources if question.exam.teacher_id != getattr(teacher, "pk", None) and getattr(teacher, "role", None) != "admin"]
+        if foreign and getattr(teacher, "role", None) != "admin":
+            raise ValidationError({"question_ids": ["You can only reuse questions from your own exams."]})
+
+        next_order = (locked.questions.aggregate(max_order=Max("order"))["max_order"] or 0)
+        created: list[Question] = []
+        for question_id in question_ids:
+            source = by_id[str(question_id)]
+            next_order += 1
+            copy = Question.objects.create(
+                exam=locked,
+                type=source.type,
+                text=source.text,
+                instructions=source.instructions,
+                order=next_order,
+                marks=source.marks,
+                configuration=deepcopy(source.configuration),
+                explanation=source.explanation,
+                difficulty=source.difficulty,
+                copied_from=source,
+            )
+            QuestionOption.objects.bulk_create(
+                [
+                    QuestionOption(question=copy, text=option.text, is_correct=option.is_correct, order=index)
+                    for index, option in enumerate(source.options.all(), start=1)
+                ]
+            )
+            for tag in source.tags.all():
+                target_tag, _ = QuestionTag.objects.get_or_create(
+                    teacher_id=locked.teacher_id, name=tag.name, defaults={"name": tag.name}
+                )
+                copy.tags.add(target_tag)
+            created.append(copy)
+        refresh_total_marks(locked)
+        return [str(question.pk) for question in created]
 
 
 def reorder_questions(exam_id, question_ids: list) -> None:

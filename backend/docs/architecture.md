@@ -2,7 +2,7 @@
 
 ## Scope
 
-The backend is an independently runnable Django/DRF service alongside the root-level Next.js frontend. This release implements JWT authentication, password reset/change, self-profile management, school membership/onboarding, administrator school/user management, teacher/admin exam and question management, and the complete student attempt lifecycle: availability, start/reuse, safe session detail, autosave, flags, deadline finalization, automatic grading, manual text grading, publication, and visibility-gated results. The existing Next.js UI connects to these APIs through typed adapters.
+The backend is an independently runnable Django/DRF service alongside the root-level Next.js frontend. It implements JWT authentication with rate limiting, password reset/change, self-profile management, school membership/onboarding, administrator school/user management, teacher exam and question management (including early start, time extension, and a reusable searchable question bank), the complete student attempt lifecycle (availability, start/reuse, safe session detail, guarded autosave, offline queue, flags, deadline finalization, automatic grading, manual grading, publication, visibility-gated results), server-recorded session activity signals, and in-app notifications. The existing Next.js UI connects to these APIs through typed adapters.
 
 Detailed request/response documentation is in [`api-v1.md`](api-v1.md).
 
@@ -23,6 +23,10 @@ Detailed request/response documentation is in [`api-v1.md`](api-v1.md).
 | `CORS_ALLOWED_ORIGINS` | Comma-separated frontend origin allowlist; wildcard origins are disabled. |
 | `CSRF_TRUSTED_ORIGINS` | Optional trusted origins for Django-admin/session use. |
 | `FRONTEND_URL` | Absolute frontend origin embedded in password-reset emails. |
+| `DJANGO_THROTTLE_LOGIN` / `_REGISTER` / `_PASSWORD_RESET` / `_EXAM_WRITE` | Per-scope rate limits; an empty value disables that scope. |
+| `DJANGO_PASSWORD_RESET_TIMEOUT_SECONDS` | Reset-link lifetime (three hours by default; Django's own default is three days). |
+| `DJANGO_CORS_ALLOW_CREDENTIALS` | Off by default; bearer tokens need no ambient credentials. |
+| `DJANGO_SECURE_SSL_REDIRECT` / `DJANGO_SECURE_HSTS_SECONDS` / `DJANGO_ALLOWED_HOSTS` | Transport hardening, applied only when `DJANGO_DEBUG=false`. |
 | `DEFAULT_FROM_EMAIL` / `DJANGO_EMAIL_BACKEND` | Reset-email sender and Django delivery backend; configure SMTP variables in production. |
 
 When `DATABASE_URL` is deliberately absent, a local ignored SQLite database supports smoke tests. Shared, staging, and production deployments must provide PostgreSQL. Timestamps are timezone-aware (`USE_TZ=True`, `TIME_ZONE=Asia/Tehran`).
@@ -34,7 +38,8 @@ When `DATABASE_URL` is deliberately absent, a local ignored SQLite database supp
 - **users**: custom email user, lean role profiles, JWT auth, password reset/change, self-profile serializers, and reusable role/owner permissions.
 - **exams**: teacher-owned exams, structured settings, questions/options, workflow/validation services, and teacher/student serializer separation.
 - **attempts**: student availability/start/detail, strict answer autosave and flags, durable attempt question order, deadline finalization, and submission services.
-- **results**: persisted automatic-grading snapshots, manual-grading pending count, and student visibility-gated safe result reads.
+- **results**: persisted grading snapshots (score, frozen maximum, verdict counts, manual-grading progress), manual grading, publication, teacher reporting, and the grading queue.
+- **notifications**: in-app, recipient-scoped rows with per-event dedupe, written inside the transition they describe.
 
 `AUTH_USER_MODEL = "users.User"` was set before initial migrations. Do not replace it after data exists.
 
@@ -48,7 +53,7 @@ Self-profile updates use structured nested profile serializers. They cannot muta
 
 ### Exams and settings
 
-`Exam` owns teacher, metadata, duration, schedule, status, and a persisted total mark value. The narrow one-to-one `ExamSettings` model holds navigation, randomization, result visibility, correct-answer visibility, and attempt limits; API input uses this structured model rather than an unvalidated settings blob.
+`Exam` owns teacher, metadata, duration, schedule, status, and a persisted total mark value. The narrow one-to-one `ExamSettings` model holds navigation, question and option randomization, the complete-answer-sheet rule, result visibility, correct-answer visibility, attempt limits, and the passing percentage; API input uses this structured model rather than an unvalidated settings blob, and every field is validated in both `clean()` and the serializer.
 
 Normal patches never change status. Service functions in `apps.exams.services` own publishing, completion, archive, restore, duplication, and ordering transitions. `status_before_archive` is a small internal field that lets restore return an exam to its prior state; it is not client-writable.
 
@@ -56,7 +61,7 @@ Normal patches never change status. Service functions in `apps.exams.services` o
 
 Question types are structured Django choices: multiple choice, multiple answer, true/false, short answer, and written. Choice correctness lives in `QuestionOption`; short/written metadata has a narrowly validated `configuration` object. New teacher questions append safely, and reordering requires the complete question ID set in one transaction.
 
-Teacher serializers may include `is_correct`, explanation, and configuration. The independent student attempt serializer family deliberately excludes answer keys, expected answers, explanations, configuration, teacher identity, result visibility, and correct-answer settings. Student routes never reuse a teacher serializer.
+Teacher serializers may include `is_correct`, explanation, and configuration. The independent student attempt serializer family deliberately excludes answer keys, expected answers, explanations, configuration, and correct-answer settings. Result visibility and the answer-sheet rule are included on purpose: a student must be able to see when a result will appear and whether blanks block submission, and neither is a grading secret. Student routes never reuse a teacher serializer.
 
 ### Publication and integrity
 
@@ -68,9 +73,17 @@ Teacher serializers may include `is_correct`, explanation, and configuration. Th
 
 Student access uses structured grade/class values already present on `StudentProfile` and `Exam`: a blank target is open to every eligible student, while a populated target must match the profile. When an exam owner belongs to a school, the student must belong to that same school; legacy users without a teacher-school membership retain the former audience behavior. Draft and archived exams are never exposed; schedule windows are evaluated with timezone-aware server time.
 
-`ExamAttempt.question_order` is a backend-generated UUID snapshot. It persists the one-time randomized question sequence when `ExamSettings.randomize_questions` is enabled, so response order cannot change between requests. There is intentionally no option-randomization feature because no current structured setting defines it.
+`ExamAttempt.question_order` is a backend-generated UUID snapshot: the one-time randomized question sequence, so order cannot change between requests. `ExamAttempt.option_order` does the same per question when `randomize_options` is enabled. Both are snapshots rather than per-request randomness, which is what makes refresh, reconnect, and re-open show the same paper. Grading always matches option UUIDs — never a position — so no shuffle can move a score, and true/false is excluded from option shuffling because the student's boolean answer maps positionally.
 
-The authoritative deadline is the earlier of `started_at + duration_minutes` and exam `end_at`. A request reaching an expired active attempt retains saved answers, changes the status to `EXPIRED`, records `submitted_at`, and creates a grading snapshot. Answer writes then fail. Duplicate start returns the active attempt; duplicate submission returns the existing finalized result.
+The authoritative deadline is snapshotted per attempt: `ExamAttempt.expires_at = min(started_at + duration_minutes, exam.end_at)`, evaluated once at start. Deriving it from the live exam row instead (the previous behaviour) let a routine `PATCH /exams/{id}/ {"duration_minutes": 5}` re-cut the time of every student mid-answer. `extend_exam_time` therefore moves open attempts' deadlines explicitly, and completion/archival set them to now so a closed exam leaves no window behind.
+
+A request reaching an expired active attempt retains saved answers, changes the status to `EXPIRED`, records `submitted_at`, and creates a grading snapshot. Answer writes then fail with `409 {"code": "attempt_finalized"}`. Duplicate start returns the active attempt; duplicate submission returns the existing finalized result.
+
+Two optimistic-concurrency guards cover the races that actually happen. `answer_revision` increments inside every accepted write, and a request whose `X-Exam-Revision` is older is refused with `409 {"code": "stale_revision", "answer_revision": n}`, so a retried or offline-queued request cannot overwrite a newer answer; the client re-bases from the reported number and sends once more. `client_session` names the window that owns the attempt: a write from a different `X-Exam-Session` while the owner wrote within 45 seconds is refused with `409 {"code": "another_session_active"}`. Reads are never refused, and `claim-session` is the explicit takeover, so an accidental duplicate tab cannot quietly destroy answers and a deliberate device switch is one click. Both guards are opt-in per request (absent headers mean no guard), which keeps older clients working.
+
+State transitions run in transactions that lock the parent row: `select_for_update()` on the exam for start/publish/extend/complete/archive/duplicate/reorder, and on the attempt for every answer, flag, and submission. On SQLite the locks are effectively no-ops and correctness rests on the unique constraints (`unique_exam_student_attempt_number`, `unique_answer_per_attempt_question`); on PostgreSQL they serialize the concurrent-start and double-submit races outright.
+
+`ExamResult` is a snapshot, not a recompute-on-read: it stores the score, the frozen `maximum_score` it was graded against, the verdict counts, `manual_grading_count` for progress, and `published_at`. Re-grading preserves a `PUBLISHED` status (stamping `revised_at`) because pulling a result back out of a student's hands is not a side effect anyone asked for; publication is reversed deliberately by an administrator, not implicitly by the next keystroke.
 
 Choice questions are graded with exact correct-option set matching; multiple-answer intentionally awards full credit only for an exact set. Short answers are graded only when the existing typed `expected_answers` structure is configured. Written answers and unconfigured short answers remain pending manual grading and do not count as incorrect. Result percentage is null until all manual grading is complete.
 
@@ -78,9 +91,9 @@ Choice questions are graded with exact correct-option set matching; multiple-ans
 
 ## Permissions and query policy
 
-Use `apps.users.permissions` rather than ad hoc role checks. Teacher management routes require `IsTeacherOrAdministrator` plus `IsExamOwnerOrAdministrator`. Student routes require `IsStudent` or `IsOwnStudentAttempt`; teachers and administrators cannot act as students through these endpoints. Teachers receive owner-filtered querysets; unseen teacher/student-owned resources return `404` rather than leak existence. Administrators retain the broader teacher-management access already established.
+Use `apps.users.permissions` rather than ad hoc role checks. Teacher management routes require `IsTeacherOrAdministrator` plus `IsExamOwnerOrAdministrator`. Student routes require `IsStudent` or `IsOwnStudentAttempt`; teachers and administrators cannot act as students through these endpoints. Teachers receive owner-filtered querysets; unseen teacher/student-owned resources return `404` rather than leak existence. Notification rows and the attempt heartbeat/claim/signal routes are filtered by `recipient`/`student` in the queryset before any object check, so another account's row is indistinguishable from a missing one. Administrators retain the broader teacher-management access already established.
 
-Administrator organization lists annotate school/exam/user counts and select related membership/profile rows. Major teacher list/detail queries use `select_related()` for teacher/settings and targeted `prefetch_related()` for questions/options. School-assigned teachers receive a same-school roster including students with no attempt; legacy teachers receive participant-derived rows. Student attempt detail prefetches the caller's answers/options and independently fetches the persisted ordered question set, avoiding obvious N+1 patterns.
+Administrator organization lists annotate school/exam/user counts and select related membership/profile rows. Major teacher list/detail queries use `select_related()` for teacher/settings and targeted `prefetch_related()` for questions/options. School-assigned teachers receive a same-school roster including students with no attempt; legacy teachers receive participant-derived rows. Student attempt detail prefetches the caller's answers/options and independently fetches the persisted ordered question set, avoiding obvious N+1 patterns. `GET /student/exams/` resolves the caller's school membership and profile once (`AudienceContext`) instead of twice per exam, which was the dominant cost of the busiest student route. The clock resync uses the heartbeat route, which returns four numbers rather than a serialized answer sheet. Teacher list/detail rows annotate distinct counts so a question count is never multiplied by the attempts join.
 
 ## API conventions
 
@@ -103,7 +116,26 @@ curl http://localhost:8000/health/
 
 Create an administrative user in a controlled environment with `./.venv/bin/python manage.py createsuperuser`, then use `/admin/` for administration.
 
+## Concurrency and integrity summary
+
+- Attempt start, answer writes, flags and submission each run inside a transaction that locks the parent
+  row (`select_for_update()` on the exam for start, on the attempt for every write).
+- Attempt identity is enforced in the schema (`exam`, `student`, `attempt_number` unique), so a concurrent
+  duplicate start cannot produce two attempts even where row locks are weak (SQLite).
+- `answer_revision` is bumped per accepted write in the same transaction, and a stale `X-Exam-Revision` is
+  refused — a retried request can never overwrite a newer answer.
+- `X-Exam-Session` names the owning window; a second window may read but not write until it claims the
+  session. The switch count and the claim are recorded as signals for the teacher, not enforced as a
+  punishment.
+- Grading is a snapshot write: score, frozen `maximum_score`, counts, `manual_grading_count`, and status
+  transitions (`PENDING`/`HIDDEN`/`PUBLISHED`), never a recompute-on-read. Publication survives regrading.
+- A start requires at least 60 seconds of remaining window, so the closing exam cannot consume a student's
+  only attempt.
+- `score <= maximum_score`, positive orders/marks/durations, `end_at > start_at` and
+  `attempt_number >= 1` are database CHECK constraints, not only Python validation.
+
 ## Deliberately deferred
 
-- Option randomization, advanced partial scoring, fuzzy/NLP assessment, and post-exam answer-key review
-- Redis, WebSockets, Celery, proctoring, anti-cheating, advanced analytics, and deployment pipeline work
+- Partial credit inside one multiple-answer question (exact-set matching is a deliberate rule with stored results behind it), fuzzy/NLP assessment, and post-exam answer-key review (`show_correct_answers` is stored and editable but no student route reads it yet).
+- Redis, WebSockets, Celery, proctoring, screen capture, advanced analytics, and deployment pipeline work. Session detection, offline recovery, and clock reconciliation are all HTTP + snapshot state, which is sufficient at a school's scale and removes a failure domain rather than adding one.
+- Automatic activation still runs lazily: reading the teacher exam list closes exams whose window has passed, and `manage.py close_overdue_exams` does the same for everyone when wired to cron.

@@ -25,6 +25,7 @@ from .models import User
 class RegisterView(generics.CreateAPIView):
     permission_classes = (permissions.AllowAny,)
     serializer_class = RegisterSerializer
+    throttle_scope = "register"
 
     def create(self, request, *args, **kwargs) -> Response:  # type: ignore[no-untyped-def]
         serializer = self.get_serializer(data=request.data)
@@ -36,6 +37,8 @@ class RegisterView(generics.CreateAPIView):
 class LoginView(TokenObtainPairView):
     permission_classes = (permissions.AllowAny,)
     serializer_class = EmailTokenObtainPairSerializer
+    # The one endpoint worth brute-forcing, so it is the one that says "slow down".
+    throttle_scope = "login"
 
 
 class RefreshView(TokenRefreshView):
@@ -46,6 +49,7 @@ class PasswordResetRequestView(APIView):
     """Send a reset URL without revealing whether the requested email is registered."""
 
     permission_classes = (permissions.AllowAny,)
+    throttle_scope = "password_reset"
 
     def post(self, request) -> Response:  # type: ignore[no-untyped-def]
         serializer = PasswordResetRequestSerializer(data=request.data)
@@ -69,6 +73,7 @@ class PasswordResetRequestView(APIView):
 
 class PasswordResetConfirmView(APIView):
     permission_classes = (permissions.AllowAny,)
+    throttle_scope = "password_reset"
 
     def post(self, request) -> Response:  # type: ignore[no-untyped-def]
         serializer = PasswordResetConfirmSerializer(data=request.data)

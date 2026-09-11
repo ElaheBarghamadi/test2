@@ -7,6 +7,7 @@ from rest_framework import serializers
 from apps.exams.models import Exam, ExamSettings, Question, QuestionOption
 
 from .models import ExamAttempt, StudentAnswer
+from .services import apply_option_order
 
 
 class StudentAvailableAttemptSerializer(serializers.ModelSerializer):
@@ -56,6 +57,8 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
     attempts_used = serializers.SerializerMethodField()
     passing_percentage = serializers.SerializerMethodField()
     result_visibility = serializers.SerializerMethodField()
+    allow_unanswered = serializers.SerializerMethodField()
+    teacher_name = serializers.SerializerMethodField()
     question_count = serializers.IntegerField(read_only=True)
 
     class Meta:
@@ -77,6 +80,8 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
             "attempts_used",
             "passing_percentage",
             "result_visibility",
+            "allow_unanswered",
+            "teacher_name",
             "attempt",
         )
         read_only_fields = fields
@@ -93,6 +98,15 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
     def get_result_visibility(self, exam: Exam) -> str:
         # The policy itself is public; whether a score is released is a separate question.
         return exam.settings.result_visibility
+
+    def get_teacher_name(self, exam: Exam) -> str:
+        # A student may see who set their exam, exactly as on a paper exam paper. The in-attempt payload
+        # stays free of teacher fields; this is the dashboard, outside the answer window.
+        return exam.teacher.get_full_name()
+
+    def get_allow_unanswered(self, exam: Exam) -> bool:
+        # The student has to know before starting that a blank answer will block submission.
+        return exam.settings.allow_unanswered
 
 
 class StudentAttemptOptionSerializer(serializers.ModelSerializer):
@@ -138,7 +152,9 @@ class StudentNavigationSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExamSettings
         # Result visibility, max attempts, and correct-answer visibility are management-only settings.
-        fields = ("allow_previous_questions", "randomize_questions")
+        # `allow_unanswered` is different: the student has to know before pressing submit that the
+        # teacher requires a complete answer sheet, and knowing it leaks nothing.
+        fields = ("allow_previous_questions", "randomize_questions", "allow_unanswered")
         read_only_fields = fields
 
 
@@ -191,6 +207,7 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
     expires_at = serializers.SerializerMethodField()
     remaining_seconds = serializers.SerializerMethodField()
     attempt_limit = serializers.SerializerMethodField()
+    answer_revision = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = ExamAttempt
@@ -198,6 +215,7 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
             "id",
             "attempt_number",
             "attempt_limit",
+            "answer_revision",
             "status",
             "started_at",
             "submitted_at",
@@ -215,7 +233,9 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
         questions = getattr(attempt, "student_questions", None)
         if questions is None:
             questions = attempt.exam.questions.prefetch_related("options").order_by("order")
-        return StudentAttemptQuestionSerializer(questions, many=True).data
+        payload = StudentAttemptQuestionSerializer(questions, many=True).data
+        # Display order is a per-attempt snapshot; correctness is never positional.
+        return apply_option_order(attempt, payload)
 
     def _timing_value(self, attempt: ExamAttempt, field: str) -> Any:
         timing = self.context.get("timing")

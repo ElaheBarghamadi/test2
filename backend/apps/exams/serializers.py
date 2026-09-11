@@ -6,7 +6,7 @@ from django.db import transaction
 from django.db.models import F, Max
 from rest_framework import serializers
 
-from .models import Exam, ExamSettings, Question, QuestionOption
+from .models import Exam, ExamSettings, Question, QuestionOption, QuestionTag
 from .services import question_definition_errors, refresh_total_marks
 
 
@@ -32,8 +32,21 @@ class TeacherQuestionOptionSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "order")
 
 
+class QuestionTagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuestionTag
+        fields = ("id", "name")
+
+
 class TeacherQuestionSerializer(serializers.ModelSerializer):
     options = TeacherQuestionOptionSerializer(many=True, read_only=True)
+    tags = QuestionTagSerializer(many=True, read_only=True)
+    usage_count = serializers.IntegerField(read_only=True)
+    answered_count = serializers.IntegerField(read_only=True)
+    # The bank lists questions across exams, so each row names its owner exam and that exam's state.
+    exam_title = serializers.CharField(source="exam.title", read_only=True)
+    exam_subject = serializers.CharField(source="exam.subject", read_only=True)
+    exam_status = serializers.CharField(source="exam.status", read_only=True)
 
     class Meta:
         model = Question
@@ -48,10 +61,19 @@ class TeacherQuestionSerializer(serializers.ModelSerializer):
             "configuration",
             "explanation",
             "options",
+            "difficulty",
+            "tags",
+            "is_archived",
+            "copied_from",
+            "usage_count",
+            "answered_count",
+            "exam_title",
+            "exam_subject",
+            "exam_status",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "exam", "order", "created_at", "updated_at")
+        read_only_fields = ("id", "exam", "order", "copied_from", "created_at", "updated_at")
 
 
 class QuestionOptionWriteSerializer(serializers.Serializer):
@@ -87,6 +109,8 @@ class ExamSettingsSerializer(serializers.ModelSerializer):
             "show_correct_answers",
             "max_attempts",
             "passing_percentage",
+            "randomize_options",
+            "allow_unanswered",
         )
 
     def validate_max_attempts(self, value: int) -> int:
@@ -267,11 +291,25 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
     """Write-only nested option input; teacher responses use TeacherQuestionSerializer."""
 
     options = QuestionOptionWriteSerializer(many=True, required=False)
+    # Blanks are tolerated and dropped rather than rejected: the builder's tag input keeps an empty
+    # field while the teacher is typing a new label.
+    tags = serializers.ListField(child=serializers.CharField(max_length=60, allow_blank=True, trim_whitespace=True), required=False, allow_empty=True)
     protected_fields = {"exam", "order", "id"}
 
     class Meta:
         model = Question
-        fields = ("type", "text", "instructions", "marks", "configuration", "explanation", "options")
+        fields = (
+            "type",
+            "text",
+            "instructions",
+            "marks",
+            "configuration",
+            "explanation",
+            "options",
+            "difficulty",
+            "tags",
+            "is_archived",
+        )
 
     def validate_text(self, value: str) -> str:
         value = value.strip()
@@ -294,6 +332,13 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(errors)
 
         instance = self.instance
+        if instance is not None and instance.student_answers.exists():
+            # Answers already reference this question's type and its options; re-typing it would keep the
+            # stored selection but grade it under different rules. Cloning the exam is the safe path.
+            if "type" in attrs and attrs["type"] != instance.type:
+                raise serializers.ValidationError({
+                    "type": "This question already has student answers, so its type cannot change. Copy it into a new exam instead."
+                })
         question_type = attrs.get("type", instance.type if instance else None)
         configuration = attrs.get("configuration", instance.configuration if instance else {})
         options_supplied = "options" in attrs
@@ -355,8 +400,28 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
         for option in removed:
             option.delete()
 
+    @staticmethod
+    def _apply_tags(question: Question, tag_names: list[str] | None) -> None:
+        """Resolve tag names to this teacher's tags, creating missing ones.
+
+        `None` means "the caller said nothing about tags"; an empty list means "no tags". Names are
+        trimmed, blanks dropped and duplicates folded case-insensitively, because the builder sends what
+        the teacher typed, not normalised data.
+        """
+        if tag_names is None:
+            return
+        wanted = [name.strip()[:60] for name in tag_names if name and name.strip()]
+        tags = []
+        for name in dict.fromkeys(wanted):
+            tag = QuestionTag.objects.filter(teacher_id=question.exam.teacher_id, name__iexact=name).first()
+            if tag is None:
+                tag = QuestionTag.objects.create(teacher_id=question.exam.teacher_id, name=name)
+            tags.append(tag)
+        question.tags.set(tags)
+
     def create(self, validated_data: dict) -> Question:
         options_data = validated_data.pop("options", [])
+        tag_names = validated_data.pop("tags", None)
         parent_exam = self.context["exam"]
         with transaction.atomic():
             # Serialising creates for one exam prevents two writers taking the same next order.
@@ -365,12 +430,14 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             question = Question(exam=exam, order=next_order, **validated_data)
             question.full_clean()
             question.save()
+            self._apply_tags(question, tag_names)
             self._sync_options(question, options_data)
             refresh_total_marks(exam)
             return question
 
     def update(self, instance: Question, validated_data: dict) -> Question:
         options_data = validated_data.pop("options", None)
+        tag_names = validated_data.pop("tags", None)
         with transaction.atomic():
             question = Question.objects.select_for_update().select_related("exam").get(pk=instance.pk)
             for field, value in validated_data.items():
@@ -379,6 +446,7 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             question.save()
             if options_data is not None:
                 self._sync_options(question, options_data)
+            self._apply_tags(question, tag_names)
             refresh_total_marks(question.exam)
             return question
 

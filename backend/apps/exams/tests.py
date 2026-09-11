@@ -5,9 +5,10 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.users.models import User
+from apps.attempts.models import ExamAttempt
+from apps.users.models import StudentProfile, User
 
-from .models import Exam, ExamSettings, Question, QuestionOption
+from .models import Exam, ExamSettings, Question, QuestionOption, QuestionTag
 
 
 class TeacherExamApiTests(TestCase):
@@ -539,3 +540,346 @@ class QuestionOptionIdentityApiTests(TeacherExamApiTests):
         )
         self.assertEqual(stale.status_code, 400)
         self.assertIn("options", stale.data["detail"])
+
+
+class ExamLifecycleIntegrityTests(TestCase):
+    """Ending, extending and expiring an exam must not move the goalposts under a student."""
+
+    password = "A-strong-test-password-927"
+
+    def setUp(self) -> None:
+        self.teacher = User.objects.create_user(email="lifecycle.teacher@example.com", password=self.password, role=User.Role.TEACHER)
+        self.student = User.objects.create_user(email="lifecycle.student@example.com", password=self.password)
+        self.client = APIClient()
+
+    def authenticate(self, user: User) -> None:
+        self.client.force_authenticate(user=user)
+
+    def make_exam(self, **overrides) -> Exam:
+        defaults = {"title": "Lifecycle exam", "subject": "Biology", "duration_minutes": 30}
+        defaults.update(overrides)
+        exam = Exam.objects.create(teacher=self.teacher, **defaults)
+        exam.settings.randomize_questions = False
+        exam.settings.save()
+        return exam
+
+    def add_question(self, exam: Exam, *, marks: int = 2) -> Question:
+        question = Question.objects.create(exam=exam, type=Question.Type.MULTIPLE_CHOICE, text="Pick one", order=1, marks=marks)
+        QuestionOption.objects.create(question=question, text="Right", is_correct=True, order=1)
+        QuestionOption.objects.create(question=question, text="Wrong", is_correct=False, order=2)
+        return question
+
+    def start_attempt(self, exam: Exam):
+        self.authenticate(self.student)
+        return self.client.post(f"/api/v1/student/exams/{exam.id}/start/")
+
+    def test_duration_edit_does_not_recut_a_running_attempt(self) -> None:
+        """A teacher shortening the exam for later groups must not steal minutes mid-answer."""
+        exam = self.make_exam()
+        self.add_question(exam)
+        self.authenticate(self.teacher)
+        self.assertEqual(self.client.post(f"/api/v1/exams/{exam.id}/publish/").status_code, 200)
+        attempt = self.start_attempt(exam).data
+        before = self.client.get(f"/api/v1/student/attempts/{attempt['id']}/", HTTP_AUTHORIZATION="x").data["remaining_seconds"] if False else None
+        self.authenticate(self.student)
+        before = self.client.get(f"/api/v1/student/attempts/{attempt['id']}/").data["remaining_seconds"]
+
+        self.authenticate(self.teacher)
+        self.assertEqual(self.client.patch(f"/api/v1/exams/{exam.id}/", {"duration_minutes": 5}, format="json").status_code, 200)
+
+        self.authenticate(self.student)
+        after = self.client.get(f"/api/v1/student/attempts/{attempt['id']}/").data["remaining_seconds"]
+        self.assertGreater(after, before - 10, "the running session kept its window")
+        self.assertGreater(attempt and ExamAttempt.objects.get(pk=attempt["id"]).expires_at - ExamAttempt.objects.get(pk=attempt["id"]).started_at, timedelta(minutes=29))
+
+    def test_extending_time_widens_open_attempts_only(self) -> None:
+        exam = self.make_exam()
+        self.add_question(exam)
+        self.authenticate(self.teacher)
+        self.client.post(f"/api/v1/exams/{exam.id}/publish/")
+        attempt_id = self.start_attempt(exam).data["id"]
+        # Twenty-five of the thirty minutes are gone. The deadline is a snapshot, so the test moves it
+        # the same way a running clock would.
+        ExamAttempt.objects.filter(pk=attempt_id).update(
+            started_at=timezone.now() - timedelta(minutes=25),
+            expires_at=timezone.now() + timedelta(minutes=5),
+        )
+        self.authenticate(self.student)
+        remaining = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data["remaining_seconds"]
+        self.assertLess(remaining, 6 * 60)
+
+        self.authenticate(self.teacher)
+        extended = self.client.post(f"/api/v1/exams/{exam.id}/extend/", {"extra_minutes": 20}, format="json")
+        self.assertEqual(extended.status_code, 200)
+        self.assertEqual(extended.data["duration_minutes"], 50)
+
+        self.authenticate(self.student)
+        widened = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data["remaining_seconds"]
+        self.assertGreater(widened, remaining + 19 * 60 - 5)
+
+        # A second student who has not started yet gets the new duration; nobody's history moves.
+        other = User.objects.create_user(email="late.student@example.com", password=self.password)
+        self.authenticate(other)
+        later = self.client.post(f"/api/v1/student/exams/{exam.id}/start/").data
+        self.assertGreater(later["remaining_seconds"], 49 * 60)
+
+    def test_completing_an_exam_finalizes_open_attempts_and_grades_saved_work(self) -> None:
+        from apps.results.models import ExamResult
+
+        exam = self.make_exam()
+        question = self.add_question(exam)
+        self.authenticate(self.teacher)
+        self.client.post(f"/api/v1/exams/{exam.id}/publish/")
+        attempt_id = self.start_attempt(exam).data["id"]
+        self.authenticate(self.student)
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [str(question.options.get(order=1).id)]},
+            format="json",
+        )
+
+        self.authenticate(self.teacher)
+        self.assertEqual(self.client.post(f"/api/v1/exams/{exam.id}/complete/").status_code, 200)
+
+        attempt = ExamAttempt.objects.get(pk=attempt_id)
+        self.assertEqual(attempt.status, ExamAttempt.Status.EXPIRED)
+        self.assertIsNotNone(attempt.submitted_at)
+        result = ExamResult.objects.get(attempt=attempt)
+        self.assertEqual(result.score, Decimal("2.00"))
+        # Writing after the teacher closed the exam is refused rather than silently accepted.
+        self.authenticate(self.student)
+        refused = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [str(question.options.get(order=2).id)]},
+            format="json",
+        )
+        self.assertEqual(refused.status_code, 409)
+
+    def test_archiving_closes_open_attempts(self) -> None:
+        exam = self.make_exam()
+        self.add_question(exam)
+        self.authenticate(self.teacher)
+        self.client.post(f"/api/v1/exams/{exam.id}/publish/")
+        attempt_id = self.start_attempt(exam).data["id"]
+        self.authenticate(self.teacher)
+        self.assertEqual(self.client.post(f"/api/v1/exams/{exam.id}/archive/").status_code, 200)
+        self.assertEqual(ExamAttempt.objects.get(pk=attempt_id).status, ExamAttempt.Status.EXPIRED)
+
+    def test_overdue_exam_is_closed_lazily_on_read(self) -> None:
+        """No scheduler: the list read reconciles an exam whose window already closed."""
+        exam = self.make_exam(status=Exam.Status.ACTIVE, start_at=timezone.now() - timedelta(hours=2), end_at=timezone.now() - timedelta(minutes=5))
+        self.add_question(exam)
+        self.authenticate(self.teacher)
+        rows = self.client.get("/api/v1/exams/").data
+        self.assertEqual(Exam.objects.get(pk=exam.id).status, Exam.Status.COMPLETED)
+        self.assertEqual(next(row for row in rows if row["id"] == str(exam.id))["status"], "completed")
+
+    def test_result_keeps_the_maximum_it_was_graded_against(self) -> None:
+        exam = self.make_exam()
+        exam.settings.result_visibility = ExamSettings.ResultVisibility.IMMEDIATE
+        exam.settings.save()
+        question = self.add_question(exam, marks=2)
+        self.authenticate(self.teacher)
+        self.client.post(f"/api/v1/exams/{exam.id}/publish/")
+        attempt_id = self.start_attempt(exam).data["id"]
+        self.authenticate(self.student)
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [str(question.options.get(order=1).id)]},
+            format="json",
+        )
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+
+        # The teacher re-weights the exam afterwards; the graded snapshot must not drift.
+        self.authenticate(self.teacher)
+        self.client.patch(f"/api/v1/questions/{question.id}/", {"marks": 10}, format="json")
+
+        self.authenticate(self.student)
+        result = self.client.get(f"/api/v1/student/results/{attempt_id}/").data
+        self.assertEqual(result["maximum_score"], 2.0)
+        self.assertEqual(result["percentage"], "100.00")
+
+    def test_published_result_survives_later_manual_grading(self) -> None:
+        from apps.attempts.models import ExamAttempt as Attempt
+        from apps.results.models import ExamResult
+
+        exam = self.make_exam()
+        self.add_question(exam)
+        exam.settings.result_visibility = ExamSettings.ResultVisibility.PENDING
+        exam.settings.save()
+        attempt = Attempt.objects.create(
+            exam=exam, student=self.student, attempt_number=1,
+            status=Attempt.Status.SUBMITTED, started_at=timezone.now(), submitted_at=timezone.now(),
+        )
+        result = ExamResult.objects.create(attempt=attempt, status=ExamResult.Status.PUBLISHED, score=Decimal("1.00"), maximum_score=Decimal("2.00"), published_at=timezone.now())
+
+        from apps.attempts.services import _grade_attempt
+
+        _grade_attempt(attempt, finalized_at=timezone.now())
+        result.refresh_from_db()
+        self.assertEqual(result.status, ExamResult.Status.PUBLISHED, "regrading must not un-publish a result a student has seen")
+        self.assertIsNotNone(result.published_at)
+
+
+class QuestionBankApiTests(TestCase):
+    """The bank is a search-and-copy surface; it must never move a question out from under an exam."""
+
+    password = "A-strong-test-password-927"
+
+    def setUp(self) -> None:
+        self.teacher = User.objects.create_user(email="bank.teacher@example.com", password=self.password, role=User.Role.TEACHER)
+        self.other_teacher = User.objects.create_user(email="rival.teacher@example.com", password=self.password, role=User.Role.TEACHER)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.teacher)
+
+    def make_exam(self, owner: User | None = None, **overrides) -> Exam:
+        defaults = {"title": "Source exam", "subject": "Physics", "duration_minutes": 45, "status": Exam.Status.DRAFT}
+        defaults.update(overrides)
+        return Exam.objects.create(teacher=owner or self.teacher, **defaults)
+
+    def add_question(self, exam: Exam, text: str, *, order: int = 1, difficulty: str = Question.Difficulty.MEDIUM, tags: list[str] | None = None) -> Question:
+        question = Question.objects.create(exam=exam, type=Question.Type.MULTIPLE_CHOICE, text=text, order=order, marks=2, difficulty=difficulty)
+        QuestionOption.objects.create(question=question, text="Right", is_correct=True, order=1)
+        QuestionOption.objects.create(question=question, text="Wrong", is_correct=False, order=2)
+        if tags:
+            for name in tags:
+                tag, _ = QuestionTag.objects.get_or_create(teacher=exam.teacher, name=name)
+                question.tags.add(tag)
+        return question
+
+    def test_bank_search_filters_by_text_type_difficulty_and_tag(self) -> None:
+        exam = self.make_exam()
+        self.add_question(exam, "About forces", difficulty=Question.Difficulty.HARD, tags=["mechanics"])
+        self.add_question(exam, "About waves", order=2, tags=["optics"])
+
+        rows = self.client.get("/api/v1/questions/").data
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["difficulty"] for row in rows}, {"hard", "medium"})
+        self.assertTrue(all(isinstance(row["id"], str) for row in rows), "ids stay strings on the wire")
+        self.assertEqual(len(self.client.get("/api/v1/questions/?search=forces").data), 1)
+        self.assertEqual(len(self.client.get("/api/v1/questions/?difficulty=hard").data), 1)
+        self.assertEqual(len(self.client.get("/api/v1/questions/?type=written").data), 0)
+        self.assertEqual(len(self.client.get("/api/v1/questions/?tag=Optics").data), 1)
+        self.assertEqual(len(self.client.get("/api/v1/questions/?subject=chemistry").data), 0)
+
+        tags = self.client.get("/api/v1/questions/tags/").data
+        self.assertEqual({tag["name"] for tag in tags}, {"mechanics", "optics"})
+        self.assertTrue(all(tag["count"] == 1 for tag in tags))
+
+    def test_bank_list_is_scoped_to_the_teacher_and_admin_sees_everything(self) -> None:
+        mine = self.make_exam()
+        self.add_question(mine, "Mine")
+        theirs = self.make_exam(owner=self.other_teacher)
+        self.add_question(theirs, "Theirs")
+
+        self.assertEqual({row["text"] for row in self.client.get("/api/v1/questions/").data}, {"Mine"})
+        admin = User.objects.create_user(email="bank.admin@example.com", password=self.password, role=User.Role.ADMIN)
+        self.client.force_authenticate(user=admin)
+        self.assertEqual({row["text"] for row in self.client.get("/api/v1/questions/").data}, {"Mine", "Theirs"})
+
+    def test_invalid_bank_filters_are_rejected_not_ignored(self) -> None:
+        response = self.client.get("/api/v1/questions/?difficulty=impossible")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("difficulty", response.data["detail"])
+
+    def test_import_copies_questions_and_never_moves_the_source(self) -> None:
+        source_exam = self.make_exam()
+        source = self.add_question(source_exam, "Newton's second law", tags=["mechanics"])
+        target = self.make_exam(title="Target exam")
+
+        response = self.client.post(f"/api/v1/exams/{target.id}/questions/import/", {"question_ids": [str(source.id)]}, format="json")
+        self.assertEqual(response.status_code, 201)
+        imported = response.data[0]
+        self.assertNotEqual(imported["id"], str(source.id))
+        self.assertEqual(imported["text"], "Newton's second law")
+        self.assertEqual(len(imported["options"]), 2)
+        self.assertEqual({option["text"] for option in imported["options"]}, {"Right", "Wrong"})
+        self.assertEqual([tag["name"] for tag in imported["tags"]], ["mechanics"])
+        self.assertEqual(str(imported["copied_from"]), str(source.id))
+        self.assertEqual(imported["order"], 1)
+
+        # The source exam keeps exactly what it had; the copy is what the new exam now grades.
+        self.assertEqual(list(source_exam.questions.values_list("id", flat=True)), [source.id])
+        self.assertEqual(Question.objects.filter(copied_from=source).count(), 1)
+        target.refresh_from_db()
+        self.assertEqual(target.total_marks, Decimal("2.00"))
+
+    def test_import_appends_in_the_selected_order_and_reports_usage(self) -> None:
+        exam = self.make_exam()
+        first = self.add_question(exam, "First", order=1)
+        second = self.add_question(exam, "Second", order=2)
+        target = self.make_exam(title="Target")
+
+        response = self.client.post(f"/api/v1/exams/{target.id}/questions/import/", {"question_ids": [str(second.id), str(first.id)]}, format="json")
+        self.assertEqual([row["text"] for row in response.data], ["Second", "First"])
+        self.assertEqual([row["order"] for row in response.data], [1, 2])
+
+        bank = self.client.get("/api/v1/questions/").data
+        counts = {row["text"]: row["usage_count"] for row in bank if str(row["exam"]) == str(exam.id)}
+        self.assertEqual(counts, {"First": 1, "Second": 1}, bank)
+
+    def test_import_rejects_foreign_and_missing_questions(self) -> None:
+        theirs = self.make_exam(owner=self.other_teacher)
+        foreign = self.add_question(theirs, "Not yours")
+        response = self.client.post(f"/api/v1/exams/{self.make_exam(title='T').id}/questions/import/", {"question_ids": [str(foreign.id)]}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("question_ids", response.data["detail"])
+
+        target = self.make_exam(title="T2")
+        missing = self.client.post(f"/api/v1/exams/{target.id}/questions/import/", {"question_ids": ["11111111-1111-1111-1111-111111111111"]}, format="json")
+        self.assertEqual(missing.status_code, 400)
+
+    def test_archiving_a_question_hides_it_from_the_bank_without_touching_the_exam(self) -> None:
+        exam = self.make_exam(status=Exam.Status.ACTIVE)
+        question = self.add_question(exam, "Retire me")
+
+        archived = self.client.post(f"/api/v1/questions/{question.id}/archive/", {"action": "archive"}, format="json")
+        self.assertEqual(archived.status_code, 200)
+        self.assertTrue(archived.data["is_archived"])
+        self.assertEqual(len(self.client.get("/api/v1/questions/").data), 0)
+        self.assertEqual(len(self.client.get("/api/v1/questions/?archived=true").data), 1)
+        # The live exam still lists it: archiving is a bank concern, not a content change.
+        self.assertEqual([row["id"] for row in self.client.get(f"/api/v1/exams/{exam.id}/questions/").data], [str(question.id)])
+        self.assertEqual(self.client.post(f"/api/v1/questions/{question.id}/archive/", {"action": "delete"}, format="json").status_code, 400)
+
+    def test_difficulty_and_tags_round_trip_through_the_write_serializer(self) -> None:
+        exam = self.make_exam()
+        response = self.client.post(
+            f"/api/v1/exams/{exam.id}/questions/",
+            {"type": Question.Type.MULTIPLE_CHOICE, "text": "Tagged", "marks": 1, "difficulty": "hard", "tags": ["Mechanics", "mechanics", "  "], "options": [{"text": "a", "is_correct": True}, {"text": "b", "is_correct": False}]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["difficulty"], "hard")
+        self.assertEqual([tag["name"] for tag in response.data["tags"]], ["Mechanics"], "tags are deduplicated case-insensitively and blanks dropped")
+        self.assertEqual(len(self.client.get("/api/v1/questions/?tag=mechanics").data), 1)
+
+        cleared = self.client.patch(f"/api/v1/questions/{response.data['id']}/", {"tags": []}, format="json")
+        self.assertEqual(cleared.data["tags"], [])
+
+
+class ExamListCounterAccuracyTests(TeacherExamApiTests):
+    """The list rows must agree with the detail rows no matter how many attempts exist."""
+
+    def test_question_and_attempt_counts_do_not_multiply_each_other(self) -> None:
+        from apps.attempts.models import ExamAttempt
+
+        exam = self.create_exam()
+        for order in (1, 2, 3):
+            question = Question.objects.create(exam=exam, type="multiple_choice", text=f"Q{order}", order=order, marks=1)
+            QuestionOption.objects.create(question=question, text="yes", is_correct=True, order=1)
+            QuestionOption.objects.create(question=question, text="no", is_correct=False, order=2)
+        students = [
+            User.objects.create_user(email=f"counter.{index}@example.com", password=self.password) for index in range(4)
+        ]
+        for index, student in enumerate(students):
+            ExamAttempt.objects.create(exam=exam, student=student, attempt_number=1, status=ExamAttempt.Status.IN_PROGRESS)
+
+        self.authenticate(self.teacher)
+        row = next(item for item in self.client.get("/api/v1/exams/").data if item["id"] == str(exam.id))
+        detail = self.client.get(f"/api/v1/exams/{exam.id}/").data
+        self.assertEqual(row["question_count"], 3)
+        self.assertEqual(row["attempt_count"], 4)
+        self.assertEqual(row["participant_count"], 4)
+        self.assertEqual(row["question_count"], detail["question_count"])
+        self.assertEqual(row["attempt_count"], detail["attempt_count"])

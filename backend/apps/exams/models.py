@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.functions import Lower
 
 from apps.core.models import TimeStampedUUIDModel
 from apps.users.models import User
@@ -40,6 +41,17 @@ class Exam(TimeStampedUUIDModel):
             models.Index(fields=("status", "start_at")),
             models.Index(fields=("subject", "grade")),
         ]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(duration_minutes__gte=1), name="exam_duration_positive"),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(end_at__isnull=True)
+                    | models.Q(start_at__isnull=True)
+                    | models.Q(end_at__gt=models.F("start_at"))
+                ),
+                name="exam_end_after_start",
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.title
@@ -70,11 +82,18 @@ class ExamSettings(TimeStampedUUIDModel):
     result_visibility = models.CharField(max_length=20, choices=ResultVisibility.choices, default=ResultVisibility.PENDING)
     show_correct_answers = models.BooleanField(default=False)
     max_attempts = models.PositiveSmallIntegerField(default=1)
+    # Option order is randomized per attempt on top of question order; grading never sees these orders.
+    randomize_options = models.BooleanField(default=False)
+    # False makes "submit" refuse while a question of the attempt snapshot is still blank.
+    allow_unanswered = models.BooleanField(default=True)
     # Pass mark as a percentage of the exam total; 0 disables the pass/fail verdict everywhere.
     passing_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
 
     class Meta:
         verbose_name_plural = "Exam settings"
+
+    def answerable_question_count(self) -> int:  # pragma: no cover - convenience for admin tooling
+        return self.exam.questions.count()
 
     def clean(self) -> None:
         errors: dict[str, str] = {}
@@ -97,6 +116,11 @@ class Question(TimeStampedUUIDModel):
         SHORT_ANSWER = "short_answer", "Short answer"
         WRITTEN = "written", "Written answer"
 
+    class Difficulty(models.TextChoices):
+        EASY = "easy", "Easy"
+        MEDIUM = "medium", "Medium"
+        HARD = "hard", "Hard"
+
     exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name="questions")
     type = models.CharField(max_length=30, choices=Type.choices, db_index=True)
     text = models.TextField()
@@ -106,11 +130,27 @@ class Question(TimeStampedUUIDModel):
     # Holds type-specific non-secret configuration: e.g. max_length or grading note.
     configuration = models.JSONField(default=dict, blank=True)
     explanation = models.TextField(blank=True)
+    # Bank metadata. These never change how a question grades; they only make it findable and reusable.
+    difficulty = models.CharField(max_length=10, choices=Difficulty.choices, default=Difficulty.MEDIUM, db_index=True)
+    tags = models.ManyToManyField("QuestionTag", related_name="questions", blank=True)
+    # Set when this question was copied out of the bank, so the source can report where it is used.
+    copied_from = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="copies")
+    # Hidden from the bank picker; existing exams keep showing and grading it as before.
+    is_archived = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("order",)
-        constraints = [models.UniqueConstraint(fields=("exam", "order"), name="unique_question_order_per_exam")]
-        indexes = [models.Index(fields=("exam", "order")), models.Index(fields=("exam", "type"))]
+        constraints = [
+            models.UniqueConstraint(fields=("exam", "order"), name="unique_question_order_per_exam"),
+            models.CheckConstraint(condition=models.Q(order__gte=1), name="question_order_positive"),
+            models.CheckConstraint(condition=models.Q(marks__gte=Decimal("0")), name="question_marks_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=("exam", "order")),
+            models.Index(fields=("exam", "type")),
+            models.Index(fields=("type", "difficulty")),
+            models.Index(fields=("is_archived", "difficulty")),
+        ]
 
     def __str__(self) -> str:
         return f"{self.exam.title} · Q{self.order}"
@@ -160,7 +200,10 @@ class QuestionOption(TimeStampedUUIDModel):
 
     class Meta:
         ordering = ("order",)
-        constraints = [models.UniqueConstraint(fields=("question", "order"), name="unique_option_order_per_question")]
+        constraints = [
+            models.UniqueConstraint(fields=("question", "order"), name="unique_option_order_per_question"),
+            models.CheckConstraint(condition=models.Q(order__gte=1), name="option_order_positive"),
+        ]
         indexes = [models.Index(fields=("question", "order"))]
 
     def __str__(self) -> str:
@@ -171,3 +214,25 @@ class QuestionOption(TimeStampedUUIDModel):
             raise ValidationError({"question": "Only choice and true/false questions may have options."})
         if self.order < 1:
             raise ValidationError({"order": "Option order must start at 1."})
+
+
+class QuestionTag(TimeStampedUUIDModel):
+    """A teacher-scoped label used to make the question bank searchable."""
+
+    teacher = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="question_tags")
+    name = models.CharField(max_length=60)
+
+    class Meta:
+        ordering = ("name",)
+        constraints = [
+            models.UniqueConstraint(Lower("name"), models.F("teacher"), name="unique_tag_name_per_teacher"),
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+    def clean(self) -> None:
+        if not self.name.strip():
+            raise ValidationError({"name": "Tag name cannot be blank."})
+        if len(self.name.strip()) > 60:
+            raise ValidationError({"name": "Tag name must be 60 characters or fewer."})

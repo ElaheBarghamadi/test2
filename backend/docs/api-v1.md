@@ -133,12 +133,16 @@ Invalid values return a validation error rather than being silently interpreted.
     "result_visibility": "pending",
     "show_correct_answers": false,
     "max_attempts": 1,
-    "passing_percentage": 50
+    "passing_percentage": 50,
+    "randomize_options": false,
+    "allow_unanswered": true
   }
 }
 ```
 
-`settings` may be omitted or partially supplied on `PATCH`. `passing_percentage` is a percentage of the
+`randomize_options` shuffles option order per attempt (see *Option order* below); `allow_unanswered`
+set to `false` makes `submit` refuse while any question in the attempt's own snapshot is still blank.
+`passing_percentage` is a percentage of the
 exam total (`0`–`100`, two decimals, `0` meaning "no pass verdict"); it drives `passed` on every student
 result and is copied by `duplicate`. Durations must be positive; an end time requires a start time and must follow it. `teacher`, `status`, `status_before_archive`, and `total_marks` are server-controlled and rejected in normal create/update payloads.
 
@@ -243,6 +247,43 @@ Each entry in `options` may carry the `id` of an existing option:
 
 A client that has no server identity for an option (a row the teacher just added in the builder) must omit `id` rather than invent one; any non-UUID placeholder is treated as a new option by the web client for that reason.
 
+Two further guards protect attempts that already exist:
+
+- `type` cannot change on a question that has student answers: the stored selection would be graded
+  under different rules. The response is a `400` naming `type`.
+- `DELETE /questions/{id}/` on a question with answers returns `409` with
+  `{"code": "question_has_answers", "answered_count": n}`. `StudentAnswer.question` is `PROTECT`, and that
+  protection is the point; before this check the ORM raised `ProtectedError` and the endpoint answered a
+  `500` debug page.
+
+### Bank metadata
+
+A question also carries bank-only fields — they never enter grading:
+
+| Field | Meaning |
+| --- | --- |
+| `difficulty` | `easy`, `medium` or `hard`; defaults to `medium` |
+| `tags` | list of `{id, name}`; writing `["a", "b"]` replaces the set, `[]` clears it |
+| `is_archived` | hidden from the bank list, still fully part of its exam |
+| `usage_count` | how many questions were copied from this one |
+| `answered_count` | how many student answers reference this row |
+| `exam_title`, `exam_subject`, `exam_status` | the owning exam, so the bank needs no second request |
+
+### Question bank endpoints
+
+| Method | URL | Purpose |
+| --- | --- | --- |
+| `GET` | `/questions/` | Search every question the caller owns. Filters: `search`, `type`, `difficulty`, `tag`, `subject`, `exam`, `archived`, `ordering` (`updated_at`, `difficulty`, `marks`, `answered_count`, `type`, each optionally `-`prefixed). First 200 rows. |
+| `GET` | `/questions/tags/` | The teacher's tags with usage counts, for filter chips. |
+| `POST` | `/questions/{id}/archive/` | Body `{"action": "archive"}` or `{"action": "restore"}`. |
+| `POST` | `/exams/{id}/questions/import/` | Body `{"question_ids": [...]}` — appends **copies** of those questions to the exam, in the given order, and records `copied_from`. |
+
+Import copies rather than links on purpose: a *shared* question would let an edit made for one exam change
+the answer sheet of a live one and silently re-grade attempts already submitted. Copies preserve each exam's
+history, and `usage_count` is how the bank still reports where a question ended up. A question belonging to
+another teacher (or a missing id) is refused with a `400` on `question_ids`; the whole import is one
+transaction and refreshes the target exam's `total_marks`.
+
 Validation by question type:
 
 - `multiple_choice`: at least two options and exactly one correct option.
@@ -300,6 +341,8 @@ Each item of `GET /student/exams/` carries the facts the student space needs wit
   "attempts_used": 1,
   "passing_percentage": 50.0,
   "result_visibility": "pending",
+  "allow_unanswered": false,
+  "teacher_name": "Sara Mohammadipour",
   "availability": "in_progress",
   "attempt": {
     "id": "attempt-uuid",
@@ -313,21 +356,51 @@ Each item of `GET /student/exams/` carries the facts the student space needs wit
 
 `availability` is one of `available`, `upcoming`, `in_progress`, `completed`. `attempt` is the caller's own
 most recent attempt and is `null` when there is none; `remaining_seconds` is recomputed from the server clock
-so a resumed session shows the time that is actually left. `passing_percentage` and `result_visibility` come
-from the exam settings, which lets the start screen state the pass mark and the release policy before the
-first attempt. `attempt.result` is emitted **only once the teacher has published the result** and contains
+so a resumed session shows the time that is actually left. `passing_percentage`, `allow_unanswered` and
+`result_visibility` come from the exam settings, which lets the start screen state the pass mark, the
+blank-answer rule, and the release policy before the first attempt. `teacher_name` is a full name only: no
+teacher primary key, email, or settings object appears in a student response, and the in-attempt payload
+carries no teacher block at all. `attempt.result` is emitted **only once the teacher has published the result** and contains
 `score`, `percentage`, `maximum_score`, `passing_percentage`, `passed`, and `is_final`; `passed` is `null`
 while the score is not final or when the teacher left `passing_percentage` at `0`, and `is_final` is `false`
 while any response awaits manual grading. Nothing else about the attempt — answers, flags, or keys — is
 included.
 
-Start runs in a transaction. It validates the role, audience, state/window, questions, and attempt limit. A second start request reuses the valid in-progress attempt (`200`) rather than creating a parallel attempt; the first creation returns `201`.
+Start runs in a transaction that locks the exam row. It validates the role, audience, state/window, questions, attempt limit, and one more thing: **at least 60 seconds of usable window**. The window is `min(duration_minutes, exam.end_at - now)`, so a student who opens a closing exam is refused (`400` with `seconds_left`) instead of burning an attempt on an unanswerable paper. A second start request reuses the valid in-progress attempt (`200`) rather than creating a parallel attempt; the first creation returns `201`.
 
 At start, question UUID order is generated by the backend and persisted in `ExamAttempt.question_order`. With `randomize_questions=true`, this order uses server-side randomness once and remains stable for that attempt. Option randomization is intentionally not implemented because there is no current structured option-randomization setting or snapshot field.
 
 ### Attempt detail and timer
 
-Attempt detail returns the attempt state, safe exam content, navigation-only settings (`allow_previous_questions`, `randomize_questions`), questions/options, the student's own answers/flags, plus `server_time`, `expires_at`, `remaining_seconds`, `attempt_number`, and `attempt_limit`. Its `exam` block also carries `total_marks`, `question_count`, `passing_percentage`, and `result_visibility` so the review screen can state the pass mark and when the result will appear; `show_correct_answers`, `max_attempts`, and every answer-key field stay out of it on purpose. The deadline is server-calculated as the earlier of `started_at + duration_minutes` and exam `end_at` when one exists.
+Attempt detail returns the attempt state, safe exam content, navigation settings (`allow_previous_questions`, `randomize_questions`, `allow_unanswered`), questions/options, the student's own answers/flags, plus `server_time`, `expires_at`, `remaining_seconds`, `attempt_number`, `attempt_limit`, and `answer_revision`. Its `exam` block also carries `total_marks`, `question_count`, `passing_percentage`, and `result_visibility` so the review screen can state the pass mark and when the result will appear; `show_correct_answers`, `max_attempts`, and every answer-key field stay out of it on purpose.
+
+**The deadline is a per-attempt snapshot.** `ExamAttempt.expires_at` is fixed at `min(started_at + duration_minutes, exam.end_at)` when the attempt starts, and the timer is computed from it. A teacher who edits `duration_minutes` mid-exam therefore changes nothing for students who are writing — only `POST /exams/{id}/extend/` moves an open attempt's deadline, by exactly the minutes granted, and only for attempts whose deadline has not passed. Attempts created before the column existed fall back to deriving the deadline from the live exam. `POST /exams/{id}/complete/` and `/archive/` set every open attempt's deadline to now, finalize it, and grade the answers it already holds (`409` on later writes) — a closed exam does not leave a window open behind it.
+
+### Write guards: revision and session
+
+Two optional request headers guard student writes. Absent headers mean "no guard", so older clients keep working.
+
+| Header | Meaning |
+| --- | --- |
+| `X-Exam-Revision` | The `answer_revision` the payload was built from. |
+| `X-Exam-Session` | A random id one browser tab holds for the life of the attempt. |
+
+- Any accepted write (answer, batch, or a flag that changed state) advances `answer_revision` inside the same transaction.
+- A write carrying a lower revision is refused with `409 {"code": "stale_revision", "answer_revision": n}`, so a retried or queued request cannot land on top of a newer answer. `n` lets the client re-base and resend once.
+- A write from a *different* session while the owning session wrote within 45 seconds is refused with `409 {"code": "another_session_active"}`. Reads are never refused, so a second tab can still show the exam.
+- One quiet exception: a start request that *reuses* an in-progress attempt moves ownership to the window that asked, because that is the window the student is looking at. The displaced window then sees the conflict on its next write and can claim back.
+- A write to an attempt that has been finalized returns `409 {"code": "attempt_finalized"}`.
+- Rejected stale writes and deliberate takeovers are recorded as `AttemptEvent` rows.
+
+| Method | URL | Purpose |
+| --- | --- | --- |
+| `POST` | `/student/attempts/{id}/heartbeat/` | Clock-only resync: `server_time`, `expires_at`, `remaining_seconds`, `status`, `answer_revision`, `session_locked_by_other`, `question_count`. Also finalizes an expired attempt, and refreshes session ownership. Deliberately tiny — it exists so a class polling once a minute does not each download the whole answer sheet. |
+| `POST` | `/student/attempts/{id}/claim-session/` | Explicit takeover: moves the attempt to the caller's `X-Exam-Session`, increments `session_switch_count`, records a signal. Returns the same shape as the heartbeat. |
+| `POST` | `/student/attempts/{id}/signals/` | Records one browser-observed signal: `tab_hidden`, `tab_visible`, `disconnected`, `reconnected`. Any other `kind` is a `400`; the server stamps the time and ignores signals after finalization. |
+
+### Option order
+
+With `randomize_options`, an attempt snapshots `option_order` — `{question_id: [option ids]}` — at start, and `StudentAttemptQuestionSerializer` emits options in that order for the rest of the attempt's life. It is stable across refresh, reconnect and re-open, and differs per attempt. True/false questions are never reordered (the student's boolean answer maps positionally), and grading always matches option UUIDs, so display order can never change a score. The deadline is server-calculated as the earlier of `started_at + duration_minutes` and exam `end_at` when one exists.
 
 Any request that reads or changes an in-progress attempt independently checks the deadline. On expiry, saved work is retained, the attempt is set to `expired`, `submitted_at` is recorded, automatic grading runs, and later modifications are rejected. Submitting an already-expired attempt returns its existing finalized state safely; work is never discarded.
 
@@ -358,13 +431,15 @@ For batch autosave, each item has a question ID plus one of the shapes above. Al
 
 ### Submission, grading, and visibility
 
-Submission is idempotent: repeated requests do not create a second result or change an already final state. Multiple choice, multiple answer, and true/false use exact selection matching. Multiple-answer is deliberately **full-credit only**: the selected option set must exactly equal the correct set. Short answers are automatically graded only when the existing structured `expected_answers` configuration is present, using trimmed exact matching and optional case sensitivity. Written answers, and short answers without expected answers, are counted as pending manual grading rather than incorrect.
+Submission is idempotent: repeated requests do not create a second result or change an already final state. `{"trigger": "auto"}` in the body only labels the activity log entry (a submission the timer forced), it never changes what is graded. When `allow_unanswered` is `false`, submit answers `400` on `answers` while any question of the attempt's own snapshot is blank. Multiple choice, multiple answer, and true/false use exact selection matching. Multiple-answer is deliberately **full-credit only**: the selected option set must exactly equal the correct set. Short answers are automatically graded only when the existing structured `expected_answers` configuration is present, using trimmed exact matching and optional case sensitivity. Written answers, and short answers without expected answers, are counted as pending manual grading rather than incorrect.
 
 The persisted snapshot reports automatic `score`, aggregate correct/incorrect/unanswered counts, pending manual count, and percentage only when no manual grading remains. It also reports `maximum_score`, `attempt_number`, `submitted_at`, `passing_percentage`, and the derived `passed` verdict (`null` when the percentage is not final or no pass mark is configured). It never returns question answer keys. `result_visibility` is enforced as follows:
 
 - `immediate` → safe result is published and returned.
 - `pending` → result is stored as pending and not visible to the student.
 - `hidden` → result is stored as hidden and not visible to the student.
+
+`ExamResult.maximum_score` is the total this attempt was graded against, frozen at grading time, so a later re-weighting of questions cannot contradict a result a student has already read; the read endpoints report it rather than the live `exam.total_marks`. `manual_grading_count` is how many answers needed the teacher's pen, which makes "17 of 24 graded" computable without walking answers. Re-grading a published result keeps it published (`revised_at` is stamped); publication is only ever reversed on purpose.
 
 `show_correct_answers` is deliberately **not used by any student API in this release**. Even for immediate results, no response contains `is_correct`, correct option IDs, expected answers, explanations, question configuration, or teacher-only settings. This conservative rule is intentional until a separate reviewed product policy for post-exam answer review is implemented.
 
@@ -376,11 +451,16 @@ Teacher and administrator accounts can access reporting only for the teacher-own
 | --- | --- | --- |
 | `GET` | `/results/teacher/overview/` | Aggregate dashboard counts and recent attempt activity. |
 | `GET` | `/results/teacher/students/` | A school-assigned teacher receives the same-school student roster (including no-attempt students); legacy teachers receive actual participants only. |
-| `GET` | `/results/teacher/exams/{exam_id}/` | Aggregate per-attempt class results for one owned exam. |
+| `GET` | `/results/teacher/exams/{exam_id}/` | Aggregate per-attempt class results for one owned exam. Optional `?submission_status=submitted\|needs_grading\|in_progress` filters server-side. |
+| `GET` | `/results/teacher/grading-queue/` | Finalized attempts with answers still waiting, teacher-wide, least-finished first. Optional `exam_id`, `student_id`. |
 | `GET` | `/results/teacher/attempts/{attempt_id}/` | Teacher-only submitted text/choice response detail. |
 | `PATCH` | `/results/teacher/attempts/{attempt_id}/answers/{question_id}/grade/` | Grade a submitted short/written answer. |
 | `PATCH` | `/results/teacher/attempts/{attempt_id}/feedback/` | Save the aggregate feedback string for the result. |
 | `POST` | `/results/teacher/exams/{exam_id}/publish/` | Publish all fully graded pending/hidden results for that exam. |
+
+A queue row is `{"attempt_id", "attempt_number", "student_id", "student_name", "exam_id", "exam_title", "submitted_at", "graded_count", "manual_count", "open_count", "progress", "result_status"}`; the counts come from the grading snapshot, so clearing the queue does not need one request per attempt. `GET /results/teacher/overview/` now returns `completion_rate`, `average_percentage`, `average_score`, `graded_result_count`, `verdict_count`, `passed_count`, `pass_rate`, `pending_manual_answer_count`, `manual_answer_count` and `recently_completed_exams` alongside the previous counts — every one a database aggregate, because the dashboard's progress bar used to be drawn from `20 + participant_count * 10`.
+
+`GET /results/teacher/attempts/{attempt_id}/` also returns `attempt_number`, `server_time`, `remaining_seconds` (for an attempt still in progress), `session_switch_count` and `session_signals`. Signals are observations for a human, not a verdict: nothing in the platform changes a score because of them.
 
 Manual grading accepts a score between zero and the question marks plus optional response feedback:
 
@@ -389,6 +469,19 @@ Manual grading accepts a score between zero and the question marks plus optional
 ```
 
 Only finalized written answers and short answers without an automatic expected-answer rule can be manually graded. Regrading recalculates the persisted result snapshot. A pending/hidden result is student-visible only after the publish endpoint is used; rows with unresolved manual responses are deliberately left unpublished.
+
+## Notifications API
+
+In-app only: no email, push, worker or socket is involved, and rows are created inside the transaction of the transition they describe (a rolled-back publish leaves no ghost notification).
+
+| Method | URL | Purpose |
+| --- | --- | --- |
+| `GET` | `/notifications/` | The caller's rows plus `unread_count`. Filters: `unread_only`, `limit` (1-100, default 30). |
+| `GET` | `/notifications/unread-count/` | Badge count only. |
+| `POST` | `/notifications/{id}/read/` | Mark one read; another user's row is `404`. |
+| `POST` | `/notifications/read-all/` | Mark every unread row of the caller read. |
+
+Kinds: `exam_published`, `exam_started`, `exam_ended`, `grading_required`, `grading_completed`, `result_published`. Recipients are resolved with the same audience rule the student dashboard uses (school membership first, then the grade/class pair), so a publish notifies exactly the students who could sit the exam. Repeating an event is a no-op: each row carries a `dedupe_key` (`<kind>:<exam id>` or `<kind>:<attempt id>`) with a partial unique constraint per recipient, and the bulk insert ignores conflicts.
 
 ## Organization administration API
 
@@ -407,6 +500,34 @@ School deletion is deliberately absent because memberships are protected. Deacti
 
 An `admin/users` create request uses `email`, `password` (minimum 8 characters), optional names/`role`/`is_active`/`school_id`, and role-specific `student_profile: { grade, class_name }` or `teacher_profile: { department }`. Updates accept the same mutable fields (email is intentionally immutable) and an optional new password.
 
+## Rate limits and hardening
+
+Throttling uses the LocMem cache and is opted in per view through `throttle_scope`; nothing else pays for a cache round-trip.
+
+| Scope | Default | Keyed by |
+| --- | --- | --- |
+| `login` | `12/min` | source IP + the email in the body |
+| `register` | `8/hour` | source IP |
+| `password_reset` | `5/hour` | source IP + the email in the body |
+| `exam_write` | `240/min` | source IP (student answer/flag/submit/start routes) |
+
+Every rate is an environment override (`DJANGO_THROTTLE_LOGIN`, `DJANGO_THROTTLE_REGISTER`, `DJANGO_THROTTLE_PASSWORD_RESET`, `DJANGO_THROTTLE_EXAM_WRITE`); an empty value disables that scope. Keying login by IP *and* account is what makes credential stuffing cost the attacker while one shared school NAT address cannot lock out a whole class. A throttled answer write is a `429`, and the client keeps the pending queue and retries rather than dropping the edit.
+
+Also fixed in this pass: `CORS_ALLOW_CREDENTIALS` is off (bearer headers need no ambient credentials), `PASSWORD_RESET_TIMEOUT` is three hours instead of Django's three days, and outside `DEBUG` the settings module turns on HSTS, `SECURE_SSL_REDIRECT`, `SECURE_CONTENT_TYPE_NOSNIFF`, `X_FRAME_OPTIONS=DENY` and secure session/CSRF cookies. `DJANGO_ALLOWED_HOSTS` remains the only way to add a host.
+
+### Database invariants
+
+Enforced in the schema, not only in Python:
+
+- `unique_exam_student_attempt_number` — one row per attempt number, so a duplicate start cannot create a second one.
+- `attempt_number_positive`, `exam_duration_positive`, `question_order_positive`, `question_marks_non_negative`, `option_order_positive` — non-negative/positive columns.
+- `exam_end_after_start` — `end_at > start_at` whenever both exist.
+- `score_within_maximum` — a result's score never exceeds its frozen `maximum_score`.
+- `unique_tag_name_per_teacher` — tags are lowercased for comparison and scoped to one teacher.
+- `StudentAnswer.question` and `ExamAttempt.exam`/`.student` are `PROTECT`; deleting graded content is refused rather than cascading.
+
+`manage.py close_overdue_exams` is the scheduler-free way to move exams whose window has closed into `completed` (and finalize their open attempts); the teacher exam list runs the same idempotent transition for its own scope, so a cron entry is an optimization, not a requirement.
+
 ## Intentionally absent
 
-Live WebSocket updates, Redis/Celery processing, advanced anti-cheating, AI monitoring, screen recording, and advanced analytics remain outside this API. There is also no post-submission answer-review endpoint: after `submit`, a student sees aggregated marks and the pass verdict, never per-question correctness or the answer key. `show_correct_answers` remains a stored, teacher-editable setting that no student route reads yet. The platform provides authenticated exam delivery, autosave, result retrieval, manual text grading, controlled publication, school management, user management, and CSV export.
+Live WebSocket updates, Redis/Celery processing, advanced anti-cheating, AI monitoring, screen recording, and advanced analytics remain outside this API. Deliberately absent after review, because they would create contradictory behaviour rather than capability: `show_score` and `show_teacher_feedback` toggles (result visibility already governs whether a student sees a published result at all, and per-field switches would let a "published" result hide the number it publishes), and an `autosubmit_at_timeout` switch (an expired attempt is always finalized and graded so no saved work is lost; the client's automatic submit is a convenience on top of that). Option-level randomization and the reusable bank, by contrast, shipped in this round. There is also no post-submission answer-review endpoint: after `submit`, a student sees aggregated marks and the pass verdict, never per-question correctness or the answer key. `show_correct_answers` remains a stored, teacher-editable setting that no student route reads yet. The platform provides authenticated exam delivery, autosave, result retrieval, manual text grading, controlled publication, school management, user management, and CSV export.

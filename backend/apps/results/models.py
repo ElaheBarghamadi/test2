@@ -23,13 +23,27 @@ class ExamResult(TimeStampedUUIDModel):
     incorrect_count = models.PositiveIntegerField(default=0)
     unanswered_count = models.PositiveIntegerField(default=0)
     pending_manual_grading_count = models.PositiveIntegerField(default=0)
+    # Total answers that needed manual grading when this snapshot was taken, so the marking screen can
+    # say "17 / 24 graded" instead of only "4 left".
+    manual_grading_count = models.PositiveIntegerField(default=0)
     feedback = models.TextField(blank=True)
+    # Denominator frozen at grading time. Without it, a later marks edit would leave the stored
+    # percentage and the reported maximum contradicting each other.
+    maximum_score = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
     computed_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
+    # Set whenever a result that students may already have seen is recomputed.
+    revised_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ("-updated_at",)
         indexes = [models.Index(fields=("status", "published_at"))]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(score__isnull=True) | models.Q(score__lte=models.F("maximum_score")),
+                name="score_within_maximum",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"Result: {self.attempt}"

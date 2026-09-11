@@ -136,3 +136,84 @@ class AuthenticationApiTests(TestCase):
         user.refresh_from_db()
         self.assertTrue(user.check_password(self.password))
         self.assertEqual(client.post("/api/v1/users/me/password/", {"old_password": "wrong", "new_password": "Another-strong-password-912"}, format="json").status_code, 400)
+
+
+class AuthRateLimitTests(TestCase):
+    """Brute-force protection on the only endpoints that are worth attacking.
+
+    These tests opt into throttling explicitly: the suite shares one cache and is not flushed between
+    test methods, so silent limiting would only make unrelated tests flaky.
+    """
+
+    password = "A-strong-test-password-927"
+
+    def setUp(self) -> None:
+        from django.core.cache import cache
+
+        cache.clear()
+        self.client = APIClient()
+        self.user = User.objects.create_user(email="throttle@example.com", password=self.password)
+
+    def override(self, **rates):
+        from django.test import override_settings
+
+        from rest_framework.settings import api_settings
+
+        merged = {**api_settings.DEFAULT_THROTTLE_RATES, **rates}
+        return override_settings(
+            THROTTLE_DURING_TESTS=True,
+            REST_FRAMEWORK={**api_settings.user_settings, "DEFAULT_THROTTLE_RATES": merged},
+        )
+
+    def post_login(self, email: str, password: str = "wrong-password"):
+        return self.client.post("/api/v1/auth/login/", {"email": email, "password": password}, format="json")
+
+    def test_repeated_failed_logins_are_throttled_and_report_usefully(self) -> None:
+        with self.override(login="3/min"):
+            for _ in range(3):
+                self.assertEqual(self.post_login(self.user.email).status_code, 401)
+            limited = self.post_login(self.user.email)
+            self.assertEqual(limited.status_code, 429)
+            self.assertIn("detail", limited.data)
+
+            # A throttled response must not leak which attempt count was reached, and a correct password
+            # is still refused while the window is open: the point is to cost the attacker time.
+            self.assertEqual(self.post_login(self.user.email, self.password).status_code, 429)
+
+    def test_the_bucket_follows_the_account_being_attacked_not_the_whole_school(self) -> None:
+        """One shared NAT address must not let a locked-out account lock out its classmates."""
+        other = User.objects.create_user(email="neighbour@example.com", password=self.password)
+        with self.override(login="3/min"):
+            for _ in range(3):
+                self.post_login(self.user.email)
+            self.assertEqual(self.post_login(self.user.email).status_code, 429)
+            self.assertEqual(self.post_login(other.email, self.password).status_code, 200)
+
+    def test_password_reset_requests_are_capped(self) -> None:
+        with self.override(password_reset="2/min"):
+            for _ in range(2):
+                self.assertEqual(self.client.post("/api/v1/auth/password-reset/", {"email": self.user.email}, format="json").status_code, 200)
+            capped = self.client.post("/api/v1/auth/password-reset/", {"email": self.user.email}, format="json")
+            self.assertEqual(capped.status_code, 429)
+
+    def test_registration_is_capped(self) -> None:
+        with self.override(register="1/min"):
+            first = self.client.post("/api/v1/auth/register/", {"email": "first.self@example.com", "password": self.password}, format="json")
+            self.assertEqual(first.status_code, 201)
+            second = self.client.post("/api/v1/auth/register/", {"email": "second.self@example.com", "password": self.password}, format="json")
+            self.assertEqual(second.status_code, 429)
+
+    def test_endpoints_without_a_scope_are_never_throttled(self) -> None:
+        """Only the attacked endpoints pay for this; a chatty autosave must not be limited into data loss."""
+        self.client.force_authenticate(self.user)
+        with self.override(login="1/min"):
+            self.assertEqual(self.post_login(self.user.email, self.password).status_code, 200)
+            self.assertEqual(self.post_login(self.user.email, self.password).status_code, 429)
+            for _ in range(30):
+                self.assertEqual(self.client.get("/api/v1/users/me/").status_code, 200)
+
+    def test_reset_links_expire_quickly_and_credentials_are_not_accepted_over_cors(self) -> None:
+        from django.conf import settings
+
+        self.assertLessEqual(settings.PASSWORD_RESET_TIMEOUT, 60 * 60 * 6)
+        self.assertFalse(settings.CORS_ALLOW_CREDENTIALS, "bearer tokens need no ambient credentials")

@@ -28,18 +28,37 @@ class ExamAttempt(TimeStampedUUIDModel):
     last_activity_at = models.DateTimeField(default=timezone.now, db_index=True)
     # Backend-generated question UUID order; keeps randomized order stable across sessions.
     question_order = models.JSONField(default=list, blank=True)
+    # {question_id: [option ids]} in the order this attempt should display them. Snapshot, not derived,
+    # so option randomization survives a refresh, a reconnect, and a teacher re-ordering the question.
+    option_order = models.JSONField(default=dict, blank=True)
+    # The deadline is snapshotted per attempt. Deriving it from the live exam row would let a routine
+    # duration edit re-cut the time of every student who is writing right now.
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # Optimistic-concurrency counter: rejects a retried/queued write that would overwrite a newer answer.
+    answer_revision = models.PositiveIntegerField(default=0)
+    # Tab/device ownership of the session. Enforced server-side so a second tab cannot clobber answers.
+    client_session = models.CharField(max_length=64, blank=True)
+    session_switch_count = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         ordering = ("-created_at",)
-        constraints = [models.UniqueConstraint(fields=("exam", "student", "attempt_number"), name="unique_exam_student_attempt_number")]
+        constraints = [
+            models.UniqueConstraint(fields=("exam", "student", "attempt_number"), name="unique_exam_student_attempt_number"),
+            models.CheckConstraint(condition=models.Q(attempt_number__gte=1), name="attempt_number_positive"),
+        ]
         indexes = [
             models.Index(fields=("student", "status")),
             models.Index(fields=("exam", "status")),
             models.Index(fields=("exam", "student")),
+            models.Index(fields=("status", "expires_at")),
         ]
 
     def __str__(self) -> str:
         return f"{self.student} · {self.exam} · #{self.attempt_number}"
+
+    @property
+    def is_finalized(self) -> bool:
+        return self.status in {self.Status.SUBMITTED, self.Status.EXPIRED}
 
     def clean(self) -> None:
         errors: dict[str, str] = {}
@@ -83,3 +102,32 @@ class StudentAnswer(TimeStampedUUIDModel):
                 errors["selected_options"] = "Selected options must belong to this answer's question."
         if errors:
             raise ValidationError(errors)
+
+
+class AttemptEvent(TimeStampedUUIDModel):
+    """Server-recorded session and activity signals for one attempt.
+
+    These are *observations*, not verdicts: a teacher reads them next to the answers, and nothing here
+    automatically penalises a student. Timestamps always come from the server, never from the browser.
+    """
+
+    class Kind(models.TextChoices):
+        SESSION_SWITCH = "session_switch", "Another browser session took over"
+        TAB_HIDDEN = "tab_hidden", "Exam tab hidden"
+        TAB_VISIBLE = "tab_visible", "Exam tab visible again"
+        DISCONNECTED = "disconnected", "Connection lost"
+        RECONNECTED = "reconnected", "Connection restored"
+        AUTO_SUBMITTED = "auto_submitted", "Submitted when the timer expired"
+        EXAM_CLOSED = "exam_closed", "Finalized because the teacher ended the exam"
+        STALE_WRITE_REJECTED = "stale_write_rejected", "Out-of-date save request rejected"
+
+    attempt = models.ForeignKey(ExamAttempt, on_delete=models.CASCADE, related_name="events")
+    kind = models.CharField(max_length=32, choices=Kind.choices, db_index=True)
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=("attempt", "kind")), models.Index(fields=("attempt", "created_at"))]
+
+    def __str__(self) -> str:
+        return f"{self.attempt} · {self.kind}"

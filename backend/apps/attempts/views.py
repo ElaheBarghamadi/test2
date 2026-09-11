@@ -24,9 +24,14 @@ from .serializers import (
     StudentBatchAnswerSerializer,
 )
 from .services import (
+    AttemptConflict,
+    AudienceContext,
     attempt_question_ids,
     attempt_timing,
+    claim_session,
     exam_availability,
+    heartbeat,
+    record_client_signal,
     refresh_attempt_if_expired,
     save_answer,
     save_answers_batch,
@@ -34,6 +39,35 @@ from .services import (
     start_attempt,
     submit_attempt,
 )
+
+
+def _session_context(request) -> tuple[str, int | None]:  # type: ignore[no-untyped-def]
+    """Read the two optional write guards. Absent headers simply mean "no guard", so old clients work.
+
+    `X-Exam-Session` is a random id the browser tab keeps in sessionStorage; `X-Exam-Revision` is the
+    attempt revision that payload was built from. Both travel as headers so the strict, field-validated
+    answer payloads stay untouched.
+    """
+    client_session = (request.headers.get("X-Exam-Session") or "")[:64]
+    raw_revision = request.headers.get("X-Exam-Revision")
+    expected_revision = None
+    if raw_revision is not None:
+        try:
+            expected_revision = max(0, int(raw_revision))
+        except (TypeError, ValueError):
+            expected_revision = None
+    return client_session, expected_revision
+
+
+def _conflict_response(exc: AttemptConflict) -> Response:
+    """A rejected write is a conflict, not a validation failure: clients branch on `code`."""
+    payload: dict[str, object] = {
+        "detail": str(exc),
+        "code": exc.code,
+        "status_code": status.HTTP_409_CONFLICT,
+    }
+    payload.update(exc.extra)
+    return Response(payload, status=status.HTTP_409_CONFLICT)
 
 
 def _drf_validation_error(exc: DjangoValidationError) -> serializers.ValidationError:
@@ -83,9 +117,12 @@ class StudentAvailableExamView(APIView):
     permission_classes = (IsStudent,)
 
     def get(self, request) -> Response:  # type: ignore[no-untyped-def]
+        # Membership and profile are constants for this request; resolving them once keeps the loop
+        # from issuing two extra queries per exam.
+        audience = AudienceContext(request.user)
         candidate_exams = (
             Exam.objects.filter(status__in=(Exam.Status.SCHEDULED, Exam.Status.ACTIVE, Exam.Status.COMPLETED))
-            .select_related("settings")
+            .select_related("settings", "teacher")
             .annotate(question_count=Count("questions", distinct=True))
             .prefetch_related(
                 Prefetch(
@@ -105,7 +142,7 @@ class StudentAvailableExamView(APIView):
             if latest_attempt and latest_attempt.status == ExamAttempt.Status.IN_PROGRESS:
                 latest_attempt = refresh_attempt_if_expired(latest_attempt.id, request.user)
 
-            availability = exam_availability(exam, request.user)
+            availability = exam_availability(exam, request.user, audience=audience)
             if availability is None or (availability == "completed" and latest_attempt is None):
                 continue
             if latest_attempt and latest_attempt.status == ExamAttempt.Status.IN_PROGRESS:
@@ -124,11 +161,14 @@ class StudentAvailableExamView(APIView):
 
 
 class StudentExamStartView(APIView):
+    throttle_scope = "exam_write"
+
     permission_classes = (IsStudent,)
 
     def post(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
+        client_session, _ = _session_context(request)
         try:
-            attempt, created = start_attempt(exam_id, request.user)
+            attempt, created = start_attempt(exam_id, request.user, client_session=client_session)
         except (DjangoValidationError, Exam.DoesNotExist) as exc:
             if isinstance(exc, Exam.DoesNotExist):
                 raise serializers.ValidationError({"exam": ["This exam is not available to start."]}) from exc
@@ -166,20 +206,74 @@ class StudentAttemptDetailView(StudentAttemptAccessMixin, APIView):
         return Response(StudentAttemptDetailSerializer(attempt, context={"timing": attempt_timing(attempt)}).data)
 
 
+class StudentAttemptHeartbeatView(StudentAttemptAccessMixin, APIView):
+    """Small, pollable liveness endpoint: the clock and the queue, without the whole attempt payload."""
+
+    def post(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
+        client_session, _ = _session_context(request)
+        get_object_or_404(ExamAttempt.objects.filter(student=request.user), pk=attempt_id)
+        try:
+            return Response(heartbeat(attempt_id, request.user, client_session=client_session))
+        except DjangoValidationError as exc:
+            raise _drf_validation_error(exc) from exc
+
+
+class StudentAttemptClaimView(StudentAttemptAccessMixin, APIView):
+    """Deliberate takeover: continue this attempt in this tab, e.g. after the student switched devices."""
+
+    def post(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
+        # Resolve ownership first: an attempt the caller cannot reach is a 404, whatever they sent.
+        get_object_or_404(ExamAttempt.objects.filter(student=request.user), pk=attempt_id)
+        client_session, _ = _session_context(request)
+        if not client_session:
+            raise serializers.ValidationError({"session": ["A session identifier is required."]})
+        try:
+            return Response(claim_session(attempt_id, request.user, client_session=client_session))
+        except DjangoValidationError as exc:
+            raise _drf_validation_error(exc) from exc
+
+
+class StudentAttemptSignalView(StudentAttemptAccessMixin, APIView):
+    """Records a browser-observed signal (tab hidden, connection lost). Never a verdict, never a timestamp."""
+
+    def post(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
+        kind = (request.data.get("kind") or "").strip()
+        get_object_or_404(ExamAttempt.objects.filter(student=request.user), pk=attempt_id)
+        try:
+            record_client_signal(attempt_id, request.user, kind=kind)
+        except DjangoValidationError as exc:
+            raise _drf_validation_error(exc) from exc
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class StudentAttemptAnswerView(StudentAttemptAccessMixin, APIView):
+    throttle_scope = "exam_write"
+
     def patch(self, request, attempt_id, question_id) -> Response:  # type: ignore[no-untyped-def]
         attempt = self.get_attempt(attempt_id)
         question = self.get_attempt_question(attempt, question_id)
         serializer = StudentAnswerInputSerializer(data=request.data, context={"question": question})
         serializer.is_valid(raise_exception=True)
+        client_session, expected_revision = _session_context(request)
         try:
-            answer = save_answer(attempt.id, request.user, question, serializer.validated_data)
+            answer = save_answer(
+                attempt.id,
+                request.user,
+                question,
+                serializer.validated_data,
+                client_session=client_session,
+                expected_revision=expected_revision,
+            )
+        except AttemptConflict as exc:
+            return _conflict_response(exc)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         return _answer_response(answer.id)
 
 
 class StudentAttemptBatchAnswerView(StudentAttemptAccessMixin, APIView):
+    throttle_scope = "exam_write"
+
     def patch(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
         attempt = self.get_attempt(attempt_id)
         serializer = StudentBatchAnswerSerializer(data=request.data)
@@ -215,8 +309,13 @@ class StudentAttemptBatchAnswerView(StudentAttemptAccessMixin, APIView):
         if item_errors:
             raise serializers.ValidationError({"answers": item_errors})
 
+        client_session, expected_revision = _session_context(request)
         try:
-            answers = save_answers_batch(attempt.id, request.user, updates)
+            answers = save_answers_batch(
+                attempt.id, request.user, updates, client_session=client_session, expected_revision=expected_revision
+            )
+        except AttemptConflict as exc:
+            return _conflict_response(exc)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         answer_ids = [answer.id for answer in answers]
@@ -229,11 +328,23 @@ class StudentAttemptBatchAnswerView(StudentAttemptAccessMixin, APIView):
 
 
 class StudentAttemptFlagView(StudentAttemptAccessMixin, APIView):
+    throttle_scope = "exam_write"
+
     def post(self, request, attempt_id, question_id) -> Response:  # type: ignore[no-untyped-def]
         attempt = self.get_attempt(attempt_id)
         question = self.get_attempt_question(attempt, question_id)
+        client_session, expected_revision = _session_context(request)
         try:
-            answer = set_question_flag(attempt.id, request.user, question, is_flagged=True)
+            answer = set_question_flag(
+                attempt.id,
+                request.user,
+                question,
+                is_flagged=True,
+                client_session=client_session,
+                expected_revision=expected_revision,
+            )
+        except AttemptConflict as exc:
+            return _conflict_response(exc)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         return _answer_response(answer.id)
@@ -241,8 +352,18 @@ class StudentAttemptFlagView(StudentAttemptAccessMixin, APIView):
     def delete(self, request, attempt_id, question_id) -> Response:  # type: ignore[no-untyped-def]
         attempt = self.get_attempt(attempt_id)
         question = self.get_attempt_question(attempt, question_id)
+        client_session, expected_revision = _session_context(request)
         try:
-            answer = set_question_flag(attempt.id, request.user, question, is_flagged=False)
+            answer = set_question_flag(
+                attempt.id,
+                request.user,
+                question,
+                is_flagged=False,
+                client_session=client_session,
+                expected_revision=expected_revision,
+            )
+        except AttemptConflict as exc:
+            return _conflict_response(exc)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         return _answer_response(answer.id)
@@ -252,8 +373,14 @@ class StudentAttemptSubmitView(StudentAttemptAccessMixin, APIView):
     def post(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
         # Do not refresh expiry first: submit_attempt finalizes expired attempts atomically and idempotently.
         attempt = self.get_attempt(attempt_id, refresh_expiry=False)
+        client_session, _ = _session_context(request)
+        trigger = "auto" if str(request.data.get("trigger", "")) == "auto" else "manual"
         try:
-            finalized_attempt, result = submit_attempt(attempt.id, request.user)
+            finalized_attempt, result = submit_attempt(
+                attempt.id, request.user, client_session=client_session, trigger=trigger
+            )
+        except AttemptConflict as exc:
+            return _conflict_response(exc)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
 

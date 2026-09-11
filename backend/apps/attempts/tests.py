@@ -12,7 +12,7 @@ from apps.exams.models import Exam, ExamSettings, Question, QuestionOption
 from apps.results.models import ExamResult
 from apps.users.models import User
 
-from .models import ExamAttempt, StudentAnswer
+from .models import AttemptEvent, ExamAttempt, StudentAnswer
 
 
 class StudentExamApiTests(TestCase):
@@ -98,8 +98,9 @@ class StudentExamApiTests(TestCase):
             configuration={"max_length": 500, "grading_note": "Assess concepts."},
         )
 
-    def start(self, exam: Exam):
-        return self.client.post(f"/api/v1/student/exams/{exam.id}/start/")
+    def start(self, exam: Exam, *, session: str = ""):
+        headers = {"HTTP_X_EXAM_SESSION": session} if session else {}
+        return self.client.post(f"/api/v1/student/exams/{exam.id}/start/", **headers)
 
     @staticmethod
     def response_keys(value: Any) -> set[str]:
@@ -130,6 +131,9 @@ class StudentExamApiTests(TestCase):
         self.assertEqual(len(response.data), 2)
         self.assertNotIn("settings", by_id[str(available.id)])
         self.assertNotIn("teacher", by_id[str(available.id)])
+        # The dashboard names the teacher (a student sees that on paper too) but exposes no teacher
+        # primary key, no settings object, and nothing else that could be probed with.
+        self.assertEqual(by_id[str(available.id)]["teacher_name"], self.teacher.get_full_name())
 
     def test_student_cannot_start_unavailable_archived_or_exhausted_exam(self) -> None:
         archived = self.make_exam(status=Exam.Status.ARCHIVED)
@@ -299,7 +303,10 @@ class StudentExamApiTests(TestCase):
             {"selected_option_ids": [str(question.options.first().id)]},
             format="json",
         )
-        self.assertEqual(response.status_code, 400)
+        # A write to a session that has already been finalized is a conflict, not a validation error,
+        # so clients can branch on the code instead of parsing a message.
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "attempt_finalized")
         attempt.refresh_from_db()
         self.assertEqual(attempt.status, ExamAttempt.Status.EXPIRED)
         self.assertIsNotNone(attempt.submitted_at)
@@ -349,7 +356,8 @@ class StudentExamApiTests(TestCase):
             {"selected_option_ids": [str(multiple_choice.options.get(order=2).id)]},
             format="json",
         )
-        self.assertEqual(no_edit.status_code, 400)
+        self.assertEqual(no_edit.status_code, 409)
+        self.assertEqual(no_edit.data["code"], "attempt_finalized")
 
     def test_incorrect_multiple_choice_receives_zero_and_is_counted_incorrect(self) -> None:
         exam = self.make_exam()
@@ -668,3 +676,303 @@ class StudentExamConductingApiTests(StudentExamApiTests):
         self.assertIsNone(item["attempt"]["result"])
         blocked = self.client.get(f"/api/v1/student/results/{attempt_id}/")
         self.assertEqual(blocked.status_code, 403)
+
+
+class AttemptConcurrencyAndSessionApiTests(StudentExamApiTests):
+    """Server-side guards: nobody overwrites a newer answer, and one attempt has one writer."""
+
+    def test_revision_advances_and_a_stale_write_is_rejected(self) -> None:
+        exam = self.make_exam()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        options = [str(option.id) for option in question.options.order_by("order")]
+
+        first = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [options[0]]},
+            format="json",
+            HTTP_X_EXAM_REVISION="0",
+        )
+        self.assertEqual(first.status_code, 200)
+        detail = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data
+        self.assertEqual(detail["answer_revision"], 1)
+
+        # A retried request built from the old snapshot must not replace the newer answer.
+        stale = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [options[1]]},
+            format="json",
+            HTTP_X_EXAM_REVISION="0",
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.data["code"], "stale_revision")
+        self.assertEqual(stale.data["answer_revision"], 1)
+        kept = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data
+        self.assertEqual(kept["answers"][0]["selected_option_ids"], [options[0]])
+
+        fresh = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [options[1]]},
+            format="json",
+            HTTP_X_EXAM_REVISION="1",
+        )
+        self.assertEqual(fresh.status_code, 200)
+        self.assertEqual(self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data["answer_revision"], 2)
+
+    def test_a_client_that_sends_no_revision_is_still_accepted(self) -> None:
+        """Backwards compatibility: the guard is opt-in per request, so older clients keep working."""
+        exam = self.make_exam()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        response = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [str(question.options.first().id)]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_a_second_window_cannot_write_while_the_first_is_still_active(self) -> None:
+        exam = self.make_exam()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        option = str(question.options.first().id)
+        attempt_id = self.start(exam, session="tab-a").data["id"]
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [option]},
+            format="json",
+            HTTP_X_EXAM_SESSION="tab-a",
+        )
+
+        blocked = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [option]},
+            format="json",
+            HTTP_X_EXAM_SESSION="tab-b",
+        )
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.data["code"], "another_session_active")
+        # A second tab may read freely; only writing is contested.
+        self.assertEqual(self.client.get(f"/api/v1/student/attempts/{attempt_id}/", HTTP_X_EXAM_SESSION="tab-b").status_code, 200)
+
+    def test_claiming_the_session_moves_writing_and_leaves_a_trace(self) -> None:
+        exam = self.make_exam()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        option = str(question.options.first().id)
+        attempt_id = self.start(exam, session="tab-a").data["id"]
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [option]},
+            format="json",
+            HTTP_X_EXAM_SESSION="tab-a",
+        )
+
+        claimed = self.client.post(f"/api/v1/student/attempts/{attempt_id}/claim-session/", {}, format="json", HTTP_X_EXAM_SESSION="tab-b")
+        self.assertEqual(claimed.status_code, 200)
+        self.assertEqual(claimed.data["status"], "in_progress")
+        written = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [option]},
+            format="json",
+            HTTP_X_EXAM_SESSION="tab-b",
+        )
+        self.assertEqual(written.status_code, 200)
+
+        attempt = ExamAttempt.objects.get(pk=attempt_id)
+        self.assertEqual(attempt.client_session, "tab-b")
+        self.assertEqual(attempt.session_switch_count, 1)
+        kinds = list(AttemptEvent.objects.filter(attempt=attempt).values_list("kind", flat=True))
+        self.assertIn(AttemptEvent.Kind.SESSION_SWITCH, kinds)
+
+    def test_heartbeat_returns_the_clock_without_the_answer_sheet(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam, session="tab-a").data["id"]
+
+        beat = self.client.post(f"/api/v1/student/attempts/{attempt_id}/heartbeat/", {}, format="json", HTTP_X_EXAM_SESSION="tab-a")
+        self.assertEqual(beat.status_code, 200)
+        self.assertEqual(set(beat.data), {"server_time", "expires_at", "remaining_seconds", "status", "answer_revision", "session_locked_by_other", "question_count"})
+        self.assertGreater(beat.data["remaining_seconds"], 44 * 60)
+        self.assertFalse(beat.data["session_locked_by_other"])
+        self.assertEqual(beat.data["question_count"], 1)
+        self.assertEqual(ExamAttempt.objects.get(pk=attempt_id).client_session, "tab-a")
+
+    def test_client_signals_are_stored_and_unknown_ones_are_refused(self) -> None:
+        exam = self.make_exam()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+
+        hidden = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "tab_hidden"}, format="json")
+        self.assertEqual(hidden.status_code, 204)
+        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_HIDDEN).count(), 1)
+
+        invented = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "guilty"}, format="json")
+        self.assertEqual(invented.status_code, 400)
+
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+        after_submit = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "tab_hidden"}, format="json")
+        self.assertEqual(after_submit.status_code, 204, "a finalized attempt records nothing more, and does not error")
+        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id).count(), 1)
+
+    def test_auto_submit_is_attributed_to_the_timer(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/", {"trigger": "auto"}, format="json")
+        self.assertTrue(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.AUTO_SUBMITTED).exists())
+
+    def test_other_students_cannot_forge_signals_or_heartbeats(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        self.client.force_authenticate(self.other_student)
+        self.assertEqual(self.client.post(f"/api/v1/student/attempts/{attempt_id}/heartbeat/", {}).status_code, 404)
+        self.assertEqual(self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "tab_hidden"}).status_code, 404)
+        self.assertEqual(self.client.post(f"/api/v1/student/attempts/{attempt_id}/claim-session/", {}).status_code, 404)
+
+
+class AttemptRandomizationAndAnswerSheetTests(StudentExamApiTests):
+    """Option order is a display concern of the attempt, never a grading input."""
+
+    def test_option_order_is_stable_per_attempt_and_grading_is_unaffected(self) -> None:
+        exam = self.make_exam()
+        exam.settings.randomize_options = True
+        exam.settings.save()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_ANSWER, marks=3, correct_indexes={0, 2})
+        correct = [str(option.id) for option in question.options.filter(is_correct=True).order_by("id")]
+
+        attempt = self.start(exam).data
+        first_order = [option["id"] for option in attempt["questions"][0]["options"]]
+        self.assertEqual(set(first_order), {str(option.id) for option in question.options.all()})
+        # True/false keeps its fixed pair so the boolean mapping cannot drift.
+        saved = self.client.patch(
+            f"/api/v1/student/attempts/{attempt['id']}/answers/{question.id}/",
+            {"selected_option_ids": correct},
+            format="json",
+        )
+        self.assertEqual(saved.status_code, 200)
+        submitted = self.client.post(f"/api/v1/student/attempts/{attempt['id']}/submit/").data
+        self.assertEqual(submitted["result"]["score"], "3.00")
+
+        # A reconnect sees exactly the same order as the first view.
+        again = self.client.get(f"/api/v1/student/attempts/{attempt['id']}/").data
+        self.assertEqual([option["id"] for option in again["questions"][0]["options"]], first_order)
+
+    def test_true_false_options_are_never_reordered(self) -> None:
+        exam = self.make_exam()
+        exam.settings.randomize_options = True
+        exam.settings.save()
+        self.add_choice_question(exam, Question.Type.TRUE_FALSE)
+        payload = self.start(exam).data
+        options = payload["questions"][0]["options"]
+        self.assertEqual([option["text"] for option in options], ["True", "False"])
+        self.assertEqual(options[0]["order"], 1)
+
+    def test_two_attempts_may_disagree_but_each_stays_frozen(self) -> None:
+        exam = self.make_exam()
+        exam.settings.max_attempts = 2
+        exam.settings.randomize_options = True
+        exam.settings.save()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_ANSWER, correct_indexes={0, 1, 2})
+        first = self.start(exam).data
+        first_order = [option["id"] for option in first["questions"][0]["options"]]
+        self.client.post(f"/api/v1/student/attempts/{first['id']}/submit/")
+        second = self.start(exam).data
+        second_order = [option["id"] for option in second["questions"][0]["options"]]
+        self.assertEqual(set(first_order), set(second_order))
+        self.assertEqual(
+            ExamAttempt.objects.get(pk=first["id"]).option_order[str(question.id)],
+            first_order,
+            "the snapshot the student saw is the snapshot that was stored",
+        )
+
+    def test_option_order_is_absent_when_randomization_is_off(self) -> None:
+        exam = self.make_exam()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt = self.start(exam)
+        self.assertEqual(ExamAttempt.objects.get(pk=attempt.data["id"]).option_order, {})
+        self.assertEqual([option["id"] for option in attempt.data["questions"][0]["options"]], [str(o.id) for o in question.options.order_by("order")])
+
+    def test_exam_requiring_a_complete_answer_sheet_blocks_an_empty_submit(self) -> None:
+        exam = self.make_exam()
+        exam.settings.allow_unanswered = False
+        exam.settings.save()
+        first = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE, marks=1)
+        attempt_id = self.start(exam).data["id"]
+
+        blocked = self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn("answers", blocked.data["detail"])
+        self.assertEqual(ExamAttempt.objects.get(pk=attempt_id).status, ExamAttempt.Status.IN_PROGRESS)
+
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{first.id}/",
+            {"selected_option_ids": [str(first.options.first().id)]},
+            format="json",
+        )
+        second = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data
+        remaining = [question for question in second["questions"] if question["id"] != str(first.id)][0]
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+        self.assertEqual(ExamAttempt.objects.get(pk=attempt_id).status, ExamAttempt.Status.IN_PROGRESS, "still one question short")
+
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{remaining['id']}/",
+            {"selected_option_ids": [remaining["options"][0]["id"]]},
+            format="json",
+        )
+        self.assertEqual(self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/").status_code, 200)
+
+    def test_navigation_payload_shows_the_answer_sheet_rule(self) -> None:
+        exam = self.make_exam()
+        exam.settings.allow_unanswered = False
+        exam.settings.save()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        payload = self.start(exam).data
+        self.assertFalse(payload["exam"]["navigation"]["allow_unanswered"])
+        self.assertNotIn("show_correct_answers", payload["exam"]["navigation"])
+
+
+class LateStartGuardTests(StudentExamApiTests):
+    """A student who arrives after the clock has effectively run out keeps their attempt."""
+
+    def test_starting_seconds_before_the_closing_time_is_refused(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        exam.start_at = timezone.now() - timedelta(minutes=5)
+        exam.end_at = timezone.now() + timedelta(seconds=30)
+        exam.save()
+
+        response = self.start(exam)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("exam", response.data["detail"])
+        self.assertEqual(ExamAttempt.objects.filter(exam=exam, student=self.student).count(), 0)
+
+    def test_a_wider_window_is_startable_and_keeps_the_exam_end_cap(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        exam.duration_minutes = 45
+        exam.start_at = timezone.now() - timedelta(minutes=1)
+        exam.end_at = timezone.now() + timedelta(minutes=10)
+        exam.save()
+
+        started = self.start(exam)
+        self.assertEqual(started.status_code, 201)
+        # Ten minutes of window beats 45 minutes of duration, and that cap is what the student is told.
+        self.assertLessEqual(started.data["remaining_seconds"], 10 * 60)
+        self.assertGreater(started.data["remaining_seconds"], 9 * 60)
+
+    def test_extension_reopens_the_door_for_a_late_student(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        exam.start_at = timezone.now() - timedelta(minutes=5)
+        exam.end_at = timezone.now() + timedelta(seconds=30)
+        exam.save()
+        self.assertEqual(self.start(exam).status_code, 400)
+
+        teacher = APIClient()
+        teacher.force_authenticate(self.teacher)
+        # The exam is already active; extending it must move the cap that made the start impossible.
+        self.assertEqual(teacher.post(f"/api/v1/exams/{exam.id}/extend/", {"extra_minutes": 20}, format="json").status_code, 200)
+        started = self.start(exam)
+        self.assertEqual(started.status_code, 201)
+        self.assertGreater(started.data["remaining_seconds"], 60)
