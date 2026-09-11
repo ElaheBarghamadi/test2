@@ -101,9 +101,32 @@ The teacher's marking desk (`/teacher/exams/{exam_id}/marking`) is built on that
 
 API authorization and page visibility are different doors, and only one of them used to exist. Every Django endpoint re-checks the bearer role and object owner; nothing in the frontend widens or narrows that. Before this layer, `curl /admin/users` answered `200` with the administrator shell, because the role check ran in the browser after hydration — the markup had already been produced and sent, and only then was the visitor redirected.
 
-`middleware.ts` now decides before rendering, from `lib/auth/page-access.ts` (`/student` → students, `/teacher` → teachers and administrators, `/admin` → administrators only). To ask the question server-side, login also mirrors the session: two HttpOnly cookies, `examora_role` (this app's own record, including the access-token expiry) and `examora_access` (one cookie holding `access~refresh`, joined on `~` because a JWT already contains dots; a mirror written before the separator changed is still readable through a legacy dot fallback). The gate verifies the mirrored token against `GET /api/v1/auth/me/` and takes the role **from that reply**, never from the cookie, so forging `examora_role` buys nothing; a verified role mismatch rewrites the mirror rather than logging anyone out, which is how a demotion lands on the same navigation. The mirror is never forwarded to Django as authorization, so it is not a credential and carries no data.
+`middleware.ts` now decides before rendering, from `lib/auth/page-access.ts` (`/student` → students, `/teacher` → teachers and administrators, `/admin` → administrators only). To ask the question server-side, login also mirrors the session: two HttpOnly cookies, `examora_role` (this app's own record, including the access-token expiry) and `examora_access` (one cookie holding `access~refresh`, joined on `~` because a JWT already contains dots; a mirror written before the separator changed is still readable through a legacy dot fallback).
+
+The credential itself lives in `localStorage`, not `sessionStorage`. That is a deliberate change with a reason worth keeping in the record: `sessionStorage` is per-tab, so a teacher who opened an exam or a marking screen in a second tab had no credential there while the first tab stayed signed in, and because cookies *are* shared the server rendered the page while the client insisted on a login. Sharing `localStorage` makes the credential's reach match the cookie's. The cost is persistence: the tokens now outlive the last tab, which is why `lib/api/token-storage.ts` drops a session nobody has touched for eight hours and re-reads the shared value on every use. A rotated or cleared token propagates through the `storage` event, so one tab logging out logs every tab out, and no tab keeps refreshing with a token the server has already blacklisted. The gate verifies the mirrored token against `GET /api/v1/auth/me/` and takes the role **from that reply**, never from the cookie, so forging `examora_role` buys nothing; a verified role mismatch rewrites the mirror rather than logging anyone out, which is how a demotion lands on the same navigation. The mirror is never forwarded to Django as authorization, so it is not a credential and carries no data.
 
 Three limits are accepted deliberately and should not be read as stronger than they are. A rendered shell is not an authorized read: every value on it still has to pass the API. When the internal API hop is unreachable, the gate falls back to the role hint and renders, rather than locking a school out of its own screens on a network blip. And a role change propagates within the fingerprint cache's TTL (15 seconds) plus the mirror's own lifetime, not instantly. `lib/auth/page-access.ts` is tested as pure logic (`npx vitest run lib/auth/page-access.test.ts`) and the API half by `backend/apps/core/test_access_matrix.py`.
+
+## Dates are Jalali everywhere, including at the point of entry
+
+Every date the app prints goes through `formatDate`/`formatDateTime` with `fa-IR-u-ca-persian`, so a day
+is never shown as a Gregorian number inside a Persian sentence, and the exam calendar is a real Jalali month
+grid. The part that used to break the promise was *entry*: scheduling an exam meant a browser-native
+`datetime-local` control, i.e. a Gregorian grid, and the edit form read the stored instant back as UTC, so a
+Tehran exam appeared in the field three and a half hours early and could be saved at that wrong time.
+
+`lib/utils/persian-civil.ts` is the answer: civil (no-instant) Persian↔Gregorian arithmetic with `Intl` as
+the only calendar oracle, so the picker names months exactly the way the display formats them, and
+`components/ui/persian-date-time-field.tsx` schedules a start and an end on the school's own calendar —
+Persian month names, Persian digits, Saturday first, `امروز`, hour and minute selects. Browsers whose ICU
+has no Persian calendar get a plain native input plus a sentence saying why, never a Gregorian grid wearing
+Persian labels.
+
+None of this touches the API contract. `start_at`/`end_at` are still ISO-8601 instants; `apiDate` in
+`lib/api/mappers.ts` turns a wall clock plus the exam's timezone into that instant, and `dateTimeInput` now
+reads it back as the same wall clock, so editing an exam without touching its schedule no longer moves it.
+The window summary and the validation compare instants computed in the exam's timezone rather than the
+reader's.
 
 ## Permissions and query policy
 

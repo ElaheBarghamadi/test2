@@ -141,6 +141,13 @@ Invalid values return a validation error rather than being silently interpreted.
 }
 ```
 
+`start_at` and `end_at` are instants, not calendar days: the server stores what UTC says and the client
+decides how to name it. The teacher's scheduling screen writes a wall clock read off the Jalali calendar —
+Persian month names, Persian digits, Saturday first — and `apiDate()` converts that wall clock plus the exam's
+timezone into the ISO instant above. Reading an exam back does the reverse, so an exam scheduled for 09:00
+Tehran is prefilled as 09:00 rather than as the UTC slice of the instant. No date field in the API is Jalali,
+and no date shown in the UI is Gregorian.
+
 `randomize_options` shuffles option order per attempt (see *Option order* below); `allow_unanswered`
 set to `false` makes `submit` refuse while any question in the attempt's own snapshot is still blank.
 `question_layout` chooses how the paper is delivered — `paged` (default) shows one question per screen,
