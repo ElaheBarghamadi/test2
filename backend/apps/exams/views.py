@@ -211,8 +211,15 @@ class ExamQuestionListCreateView(QuestionAccessMixin, APIView):
         serializer = QuestionWriteSerializer(data=request.data, context={"exam": exam})
         serializer.is_valid(raise_exception=True)
         question = serializer.save()
+        reused = getattr(serializer, "deduplicated", None)
         question = self.get_question(question.pk)
-        return Response(TeacherQuestionSerializer(question).data, status=status.HTTP_201_CREATED)
+        payload = dict(TeacherQuestionSerializer(question).data)
+        if reused is not None:
+            # The exam already held this exact question, so no second copy was made. 200 rather than 201
+            # says so in the status itself, and the flag lets the builder explain it to the teacher.
+            payload["deduplicated"] = True
+            return Response(payload, status=status.HTTP_200_OK)
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class QuestionBankFilterSerializer(serializers.Serializer):
@@ -297,10 +304,21 @@ class ExamQuestionImportView(QuestionAccessMixin, APIView):
         from .services import copy_questions_into_exam
 
         try:
-            created_ids = copy_questions_into_exam(exam, params.validated_data["question_ids"], request.user)
+            created_ids, skipped = copy_questions_into_exam(exam, params.validated_data["question_ids"], request.user)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         questions = self.get_question_queryset().filter(pk__in=created_ids).order_by("order")
+        if skipped:
+            # Selections that duplicate what the exam already holds are dropped, not inserted twice, and the
+            # response says how many so the teacher is not left counting.
+            return Response(
+                {
+                    "questions": TeacherQuestionSerializer(questions, many=True).data,
+                    "created_count": len(created_ids),
+                    "skipped_duplicates": skipped,
+                },
+                status=status.HTTP_200_OK if created_ids else status.HTTP_201_CREATED,
+            )
         return Response(TeacherQuestionSerializer(questions, many=True).data, status=status.HTTP_201_CREATED)
 
 

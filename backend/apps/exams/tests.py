@@ -949,3 +949,154 @@ class ExamQuestionLayoutApiTests(TeacherExamApiTests):
         # The layout is presentation: it must not widen what the student may read.
         self.assertNotIn("settings", started.data["exam"])
         self.assertNotIn("show_correct_answers", navigation)
+
+
+class QuestionDuplicateTests(TestCase):
+    """Two identical questions in one exam are one question typed twice, so the API stores one.
+
+    This exists because the builder used to re-create every question it had already sent, which left a paper
+    where a student answered the same statement twice for double the marks — and, worse, the delete half of
+    that loop detached the answers of attempts that were already submitted.
+    """
+
+    password = "A-strong-test-password-927"
+
+    def setUp(self) -> None:
+        self.teacher = User.objects.create_user(email="dup.teacher@example.com", password=self.password, role=User.Role.TEACHER)
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.teacher)
+
+    def make_exam(self, **overrides) -> Exam:
+        defaults = {"title": "Dup exam", "subject": "Physics", "duration_minutes": 45, "status": Exam.Status.DRAFT}
+        defaults.update(overrides)
+        return Exam.objects.create(teacher=self.teacher, **defaults)
+
+    @staticmethod
+    def payload(text: str = "What is the unit of force?", **overrides) -> dict:
+        body = {
+            "type": Question.Type.MULTIPLE_CHOICE,
+            "text": text,
+            "instructions": "",
+            "marks": "2.00",
+            "configuration": {},
+            "explanation": "",
+            "options": [
+                {"text": "Newton", "is_correct": True},
+                {"text": "Joule", "is_correct": False},
+            ],
+        }
+        body.update(overrides)
+        return body
+
+    def create(self, exam: Exam, body: dict):
+        return self.client.post(f"/api/v1/exams/{exam.id}/questions/", body, format="json")
+
+    def test_the_same_question_twice_leaves_one_row(self) -> None:
+        exam = self.make_exam()
+        first = self.create(exam, self.payload())
+        self.assertEqual(first.status_code, 201)
+        self.assertNotIn("deduplicated", first.data)
+
+        # Same content, sloppier wording: a stray line, extra spaces, another letter case.
+        second = self.create(exam, self.payload(text="\n  WHAT is the unit of force?   "))
+        self.assertEqual(second.status_code, 200, "a duplicate answers 200, not 201")
+        self.assertTrue(second.data["deduplicated"])
+        self.assertEqual(second.data["id"], first.data["id"])
+        self.assertEqual(Question.objects.filter(exam=exam).count(), 1)
+        exam.refresh_from_db()
+        self.assertEqual(str(exam.total_marks), "2.00", "the reused row is not counted twice")
+
+    def test_a_different_weight_or_key_is_not_a_duplicate(self) -> None:
+        exam = self.make_exam()
+        self.assertEqual(self.create(exam, self.payload()).status_code, 201)
+        self.assertEqual(self.create(exam, self.payload(marks="3.00")).status_code, 201, "a question worth more is a different question")
+        self.assertEqual(
+            self.create(
+                exam,
+                self.payload(options=[{"text": "Newton", "is_correct": False}, {"text": "Joule", "is_correct": True}]),
+            ).status_code,
+            201,
+        )
+        self.assertEqual(Question.objects.filter(exam=exam).count(), 3)
+
+    def test_an_edit_that_would_create_a_twin_is_refused(self) -> None:
+        exam = self.make_exam()
+        keep = self.create(exam, self.payload()).data
+        other = self.create(exam, self.payload(text="A different question", marks="1.00")).data
+        response = self.client.patch(
+            f"/api/v1/questions/{other['id']}/",
+            {
+                "text": "  WHAT is the unit of force? ",
+                "marks": "2.00",
+                "options": [{"text": "Newton", "is_correct": True}, {"text": "Joule", "is_correct": False}],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        # The refusal names itself, so the builder can point at the offending question instead of showing a
+        # sentence the teacher has to interpret.
+        self.assertIn("duplicate", response.data["detail"])
+        self.assertIn("What is the unit of force", str(response.data["detail"]), "the message names the question it duplicates")
+        self.assertEqual(Question.objects.filter(exam=exam).count(), 2, "the refused edit changed nothing")
+
+    def test_import_skips_what_the_exam_already_holds(self) -> None:
+        source_exam = self.make_exam(title="Source")
+        source = self.create(source_exam, self.payload()).data
+        target = self.make_exam(title="Target")
+
+        self.assertEqual(
+            self.client.post(f"/api/v1/exams/{target.id}/questions/import/", {"question_ids": [source["id"]]}, format="json").status_code,
+            201,
+        )
+        response = self.client.post(f"/api/v1/exams/{target.id}/questions/import/", {"question_ids": [source["id"]]}, format="json")
+        self.assertEqual(response.status_code, 201, "nothing new was created, and the response says why")
+        self.assertEqual(response.data["created_count"], 0)
+        self.assertEqual(response.data["skipped_duplicates"], 1)
+        self.assertEqual(Question.objects.filter(exam=target).count(), 1)
+
+    def test_one_import_of_two_identical_sources_makes_one_copy(self) -> None:
+        source_exam = self.make_exam(title="Source")
+        first = self.create(source_exam, self.payload()).data
+        twin = Question.objects.create(
+            exam=source_exam,
+            type=Question.Type.MULTIPLE_CHOICE,
+            text="What is the unit of force?",
+            order=2,
+            marks="2.00",
+        )
+        for index, option in enumerate([("Newton", True), ("Joule", False)], start=1):
+            QuestionOption.objects.create(question=twin, text=option[0], is_correct=option[1], order=index)
+        target = self.make_exam(title="Target")
+
+        response = self.client.post(
+            f"/api/v1/exams/{target.id}/questions/import/", {"question_ids": [first["id"], str(twin.id)]}, format="json"
+        )
+        self.assertEqual(response.status_code, 200, "one copy landed, one selection was a repeat")
+        self.assertEqual(len(response.data["questions"]), 1)
+        self.assertEqual(response.data["skipped_duplicates"], 1)
+
+    def test_a_duplicated_exam_carries_fingerprints_too(self) -> None:
+        exam = self.make_exam()
+        self.create(exam, self.payload())
+        response = self.client.post(f"/api/v1/exams/{exam.id}/duplicate/", {}, format="json")
+        self.assertEqual(response.status_code, 201)
+        copy = Exam.objects.get(pk=response.data["id"])
+        self.assertEqual(Question.objects.filter(exam=copy).count(), 1)
+        self.assertTrue(Question.objects.filter(exam=copy, content_hash="").count() == 0, "the copies are protected as well")
+        self.assertEqual(
+            Question.objects.filter(exam=copy).first().content_hash,
+            Question.objects.filter(exam=exam).first().content_hash,
+        )
+
+    def test_the_migration_fingerprint_agrees_with_the_apps_own(self) -> None:
+        """The migration and the app must not drift into calling the same question two different things."""
+        import importlib
+
+        from apps.exams.content_identity import question_content_hash
+
+        migration = importlib.import_module("apps.exams.migrations.0008_question_content_uniqueness")
+        exam = self.make_exam()
+        question = self.create(exam, self.payload()).data
+        row = Question.objects.get(pk=question["id"])
+        self.assertEqual(migration._identity(row), question_content_hash(row))
+        self.assertEqual(row.content_hash, question_content_hash(row), "the write path stored the same value")

@@ -10,6 +10,7 @@ from django.db import transaction
 from django.db.models import F, Max, Prefetch, Sum
 from django.utils import timezone
 
+from .content_identity import question_content_hash
 from .models import Exam, ExamSettings, Question, QuestionOption
 from apps.notifications.models import Notification
 from apps.notifications.services import notify, notify_exam_audience
@@ -120,6 +121,31 @@ def validate_exam_for_publication(exam: Exam) -> None:
             ]
     if errors:
         raise ValidationError(errors)
+
+
+def refresh_question_hashes(exam: Exam) -> int:
+    """(Re)compute the content fingerprint of every question in an exam.
+
+    Bulk copies write rows without going through the question serializer, so their fingerprints have to be
+    set here. Two rows that turn out to share one fingerprint leave the *later* one unhashed rather than
+    being merged or deleted: a duplicate a student has already answered is history, and history is not this
+    function's to rewrite.
+    """
+    claimed: set[str] = set()
+    updated = 0
+    for question in exam.questions.prefetch_related("options").order_by("order"):
+        identity = question_content_hash(question)
+        if identity in claimed:
+            if question.content_hash:
+                question.content_hash = ""
+                question.save(update_fields=("content_hash", "updated_at"))
+            continue
+        claimed.add(identity)
+        if question.content_hash != identity:
+            question.content_hash = identity
+            question.save(update_fields=("content_hash", "updated_at"))
+            updated += 1
+    return updated
 
 
 def refresh_total_marks(exam: Exam) -> None:
@@ -349,6 +375,7 @@ def duplicate_exam(exam_id, owner) -> Exam:
                 for source_option in source_question.options.all()
             ])
         refresh_total_marks(duplicate)
+        refresh_question_hashes(duplicate)
         return duplicate
 
 
@@ -378,8 +405,11 @@ def close_overdue_exams(*, owner=None) -> int:
     return closed
 
 
-def copy_questions_into_exam(exam: Exam, question_ids: list, teacher) -> list:  # type: ignore[no-untyped-def]
+def copy_questions_into_exam(exam: Exam, question_ids: list, teacher) -> tuple[list, int]:  # type: ignore[no-untyped-def]
     """Insert copies of bank questions at the end of an exam, in the selected order.
+
+    Returns the new question ids and how many selections were dropped as duplicates of what the exam
+    already holds.
 
     Copying rather than linking is deliberate. A question that is *shared* between two exams would
     change the answer sheet of a live exam the moment someone edits it for the other one, and it would
@@ -408,12 +438,24 @@ def copy_questions_into_exam(exam: Exam, question_ids: list, teacher) -> list:  
             raise ValidationError({"question_ids": ["You can only reuse questions from your own exams."]})
 
         next_order = (locked.questions.aggregate(max_order=Max("order"))["max_order"] or 0)
+        # Inserting a question the exam already holds would give the student the same statement twice for
+        # double the marks, so the destination's own fingerprints (recomputed for any legacy row that never
+        # got one) decide what is skipped.
+        present = {(question.content_hash or question_content_hash(question)) for question in locked.questions.prefetch_related("options")}
+        seen: set[str] = set()
+        skipped = 0
         created: list[Question] = []
         for question_id in question_ids:
             source = by_id[str(question_id)]
+            identity = question_content_hash(source)
+            if identity in present or identity in seen:
+                skipped += 1
+                continue
+            seen.add(identity)
             next_order += 1
             copy = Question.objects.create(
                 exam=locked,
+                content_hash=identity,
                 type=source.type,
                 text=source.text,
                 instructions=source.instructions,
@@ -437,7 +479,7 @@ def copy_questions_into_exam(exam: Exam, question_ids: list, teacher) -> list:  
                 copy.tags.add(target_tag)
             created.append(copy)
         refresh_total_marks(locked)
-        return [str(question.pk) for question in created]
+        return [str(question.pk) for question in created], skipped
 
 
 def reorder_questions(exam_id, question_ids: list) -> None:

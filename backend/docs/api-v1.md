@@ -210,11 +210,34 @@ Question routes require the same teacher/admin and ownership rules as the parent
 | Method | URL | Purpose |
 | --- | --- | --- |
 | `GET` | `/exams/{exam_id}/questions/` | List ordered teacher-management questions. |
-| `POST` | `/exams/{exam_id}/questions/` | Append a question to the exam. |
+| `POST` | `/exams/{exam_id}/questions/` | Append a question to the exam; `200` with `"deduplicated": true` when the exam already holds an identical one. |
 | `POST` | `/exams/{exam_id}/questions/reorder/` | Atomically replace the full question order. |
 | `GET` | `/questions/{question_id}/` | Get a teacher-owned question. |
-| `PATCH` | `/questions/{question_id}/` | Update a question and optionally replace options. |
+| `PATCH` | `/questions/{question_id}/` | Update a question and optionally replace options; `400` when the edit would turn it into an identical twin of another question in the same exam. |
 | `DELETE` | `/questions/{question_id}/` | Delete a question and resequence the remaining questions. |
+
+### One copy of an identical question
+
+A question carries `content_hash`: the SHA-256 of what the question *is* — type, wording, per-question
+instructions, explanation, marks, the grading configuration, and the options in order with their key. Wording
+is normalised first (NFKC, trimmed, whitespace collapsed, case folded, and the Arabic/Persian forms of
+`yeh`/`keheh`, Arabic-Indic digits and the zero-width joiner folded onto one shape), so the same question
+typed twice by two pairs of hands is recognised as one question. `order`, difficulty and tags stay outside
+the fingerprint: reordering a paper or re-tagging a question is never "a new question".
+
+- `POST /exams/{exam_id}/questions/` with content the exam already holds returns the existing row with `200`
+  and `"deduplicated": true`; nothing is inserted and `total_marks` does not move.
+- `PATCH /questions/{question_id}/` that would create a twin is refused with `400` and `detail.duplicate`, whose message names the question that already says it.
+  Two rows students have already answered cannot be merged — that history belongs to the attempt, not to the
+  builder.
+- Uniqueness is `UniqueConstraint(exam, content_hash)` excluding the empty hash, so legacy rows predating the
+  column cannot fail it; the migration that filled the column removed only *unanswered* twins.
+- Bank import applies the rule across the selection and against the destination, which is why its response can
+  carry `skipped_duplicates`.
+
+Reuse is still copy-on-insert: a question *shared* between two exams would change a live answer sheet the
+moment someone edited it for the other one. The fingerprint stops a copy from being made twice in the same
+paper; it does not turn exams into link farms.
 
 ### Create/update payload
 
@@ -289,7 +312,7 @@ A question also carries bank-only fields — they never enter grading:
 | `GET` | `/questions/` | Search every question the caller owns. Filters: `search`, `type`, `difficulty`, `tag`, `subject`, `exam`, `archived`, `ordering` (`updated_at`, `difficulty`, `marks`, `answered_count`, `type`, each optionally `-`prefixed). First 200 rows. |
 | `GET` | `/questions/tags/` | The teacher's tags with usage counts, for filter chips. |
 | `POST` | `/questions/{id}/archive/` | Body `{"action": "archive"}` or `{"action": "restore"}`. |
-| `POST` | `/exams/{id}/questions/import/` | Body `{"question_ids": [...]}` — appends **copies** of those questions to the exam, in the given order, and records `copied_from`. |
+| `POST` | `/exams/{id}/questions/import/` | Body `{"question_ids": [...]}` — appends **copies** of those questions to the exam, in the given order, and records `copied_from`. Selections that duplicate what the exam already holds are dropped, and the response then reports `{"questions": [...], "created_count": n, "skipped_duplicates": n}` instead of a bare list. |
 
 Import copies rather than links on purpose: a *shared* question would let an edit made for one exam change
 the answer sheet of a live one and silently re-grade attempts already submitted. Copies preserve each exam's
@@ -444,7 +467,7 @@ as correct.
 
 ### Option order
 
-With `randomize_options`, an attempt snapshots `option_order` — `{question_id: [option ids]}` — at start, and `StudentAttemptQuestionSerializer` emits options in that order for the rest of the attempt's life. It is stable across refresh, reconnect and re-open, and differs per attempt. True/false questions are never reordered (the student's boolean answer maps positionally), and grading always matches option UUIDs, so display order can never change a score. The deadline is server-calculated as the earlier of `started_at + duration_minutes` and exam `end_at` when one exists.
+With `randomize_options`, an attempt snapshots `option_order` — `{question_id: [option ids]}` — at start, and `StudentAttemptQuestionSerializer` emits options in that order for the rest of the attempt's life. It is stable across refresh, reconnect and re-open, and differs per attempt. True/false questions are never reordered: their two options are fixed wording, and the student's boolean answer is keyed on the option's `order` (1 = درست, 2 = نادرست) rather than on the array position the shuffle owns — a client that keyed on position would silently flip half the answers. Grading always matches option UUIDs, so display order can never change a score. The deadline is server-calculated as the earlier of `started_at + duration_minutes` and exam `end_at` when one exists.
 
 Any request that reads or changes an in-progress attempt independently checks the deadline. On expiry, saved work is retained, the attempt is set to `expired`, `submitted_at` is recorded, automatic grading runs, and later modifications are rejected. Submitting an already-expired attempt returns its existing finalized state safely; work is never discarded.
 

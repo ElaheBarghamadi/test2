@@ -146,6 +146,9 @@ class Question(TimeStampedUUIDModel):
     copied_from = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="copies")
     # Hidden from the bank picker; existing exams keep showing and grading it as before.
     is_archived = models.BooleanField(default=False)
+    # Fingerprint of the question's content (see `content_identity`). Two rows in one exam with the same
+    # fingerprint are the same question typed twice, which the write path refuses to store.
+    content_hash = models.CharField(max_length=64, blank=True, default="")
 
     class Meta:
         ordering = ("order",)
@@ -153,9 +156,16 @@ class Question(TimeStampedUUIDModel):
             models.UniqueConstraint(fields=("exam", "order"), name="unique_question_order_per_exam"),
             models.CheckConstraint(condition=models.Q(order__gte=1), name="question_order_positive"),
             models.CheckConstraint(condition=models.Q(marks__gte=Decimal("0")), name="question_marks_non_negative"),
+            models.UniqueConstraint(
+                fields=("exam", "content_hash"),
+                condition=~models.Q(content_hash=""),
+                name="unique_question_content_per_exam",
+                violation_error_message="This exam already holds an identical question.",
+            ),
         ]
         indexes = [
             models.Index(fields=("exam", "order")),
+            models.Index(fields=("exam", "content_hash")),
             models.Index(fields=("exam", "type")),
             models.Index(fields=("type", "difficulty")),
             models.Index(fields=("is_archived", "difficulty")),

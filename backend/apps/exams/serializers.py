@@ -7,6 +7,7 @@ from django.db.models import F, Max
 from rest_framework import serializers
 
 from .models import Exam, ExamSettings, Question, QuestionOption, QuestionTag
+from .content_identity import content_identity, question_content_hash
 from .services import question_definition_errors, refresh_total_marks
 
 
@@ -356,6 +357,36 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
         errors = question_definition_errors(question_type, effective_options, configuration)
         if errors:
             raise serializers.ValidationError(errors)
+
+        # Every question carries a fingerprint of its content, so "the same question again" is detectable
+        # instead of being stored twice. The identity is computed here, from what the write *will* leave
+        # behind, and consumed either by `create` (reuse the twin) or by the check below (a PATCH that turns
+        # one question into a copy of another is refused, because two answered rows cannot be merged).
+        self._content_identity = content_identity(
+            question_type=question_type or "",
+            text=attrs.get("text", instance.text if instance else ""),
+            instructions=attrs.get("instructions", instance.instructions if instance else ""),
+            explanation=attrs.get("explanation", instance.explanation if instance else ""),
+            marks=attrs.get("marks", instance.marks if instance else 1),
+            configuration=configuration or {},
+            options=[
+                {"text": option.get("text"), "is_correct": option.get("is_correct")}
+                for option in effective_options
+            ],
+        )
+        if instance is not None:
+            exam = instance.exam
+            for candidate in exam.questions.prefetch_related("options").exclude(pk=instance.pk):
+                if (candidate.content_hash or question_content_hash(candidate)) == self._content_identity:
+                    # `detail.duplicate`, not a bare message: the client can name the question it has to
+                    # remove, and the response shape matches the other whole-payload refusals in this API.
+                    raise serializers.ValidationError({
+                        "duplicate": (
+                            "این سؤال با سؤال «"
+                            + (candidate.text[:60] or "بدون متن")
+                            + "» در همین آزمون عیناً یکی است. دو نسخه از یک سؤال نگه داشته نمی‌شود؛ یکی را حذف کنید."
+                        )
+                    })
         return attrs
 
     @staticmethod
@@ -428,15 +459,27 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
         options_data = validated_data.pop("options", [])
         tag_names = validated_data.pop("tags", None)
         parent_exam = self.context["exam"]
+        identity = getattr(self, "_content_identity", "")
         with transaction.atomic():
-            # Serialising creates for one exam prevents two writers taking the same next order.
+            # Serialising creates for one exam prevents two writers taking the same next order, and the
+            # duplicate lookup below rides the same lock, so two identical saves in parallel still leave one
+            # question rather than two racing copies.
             exam = Exam.objects.select_for_update().get(pk=parent_exam.pk)
+            if identity:
+                for candidate in exam.questions.prefetch_related("options").all():
+                    if (candidate.content_hash or question_content_hash(candidate)) == identity:
+                        self.deduplicated = candidate
+                        return candidate
             next_order = (exam.questions.aggregate(max_order=Max("order"))["max_order"] or 0) + 1
             question = Question(exam=exam, order=next_order, **validated_data)
+            question.content_hash = identity
             question.full_clean()
             question.save()
             self._apply_tags(question, tag_names)
             self._sync_options(question, options_data)
+            # Options arrive after the row, so the fingerprint is recomputed from what is actually stored.
+            question.content_hash = question_content_hash(question)
+            question.save(update_fields=("content_hash", "updated_at"))
             refresh_total_marks(exam)
             return question
 
@@ -452,6 +495,8 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             if options_data is not None:
                 self._sync_options(question, options_data)
             self._apply_tags(question, tag_names)
+            question.content_hash = question_content_hash(question)
+            question.save(update_fields=("content_hash", "updated_at"))
             refresh_total_marks(question.exam)
             return question
 
