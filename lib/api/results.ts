@@ -1,5 +1,5 @@
 import { apiRequest } from "@/lib/api/client";
-import type { ApiGradingQueueDto, ApiManualGradeResponseDto, ApiTeacherAttemptDetailDto, ApiTeacherOverviewDto, ApiTeacherResultDto, ApiTeacherResultRowDto, ApiTeacherStudentOverviewDto } from "@/lib/api/dtos";
+import type { ApiGradingBoardDto, ApiGradingQuestionPageDto, ApiGradingSaveResultDto, ApiGradingQueueDto, ApiManualGradeResponseDto, ApiTeacherAttemptDetailDto, ApiTeacherOverviewDto, ApiTeacherResultDto, ApiTeacherResultRowDto, ApiTeacherStudentOverviewDto } from "@/lib/api/dtos";
 
 export const resultsApi = {
   teacherOverview: () => apiRequest<ApiTeacherOverviewDto>("/results/teacher/overview/"),
@@ -15,6 +15,12 @@ export const resultsApi = {
     const query = submissionStatus && submissionStatus !== "all" ? `?submission_status=${submissionStatus}` : "";
     return apiRequest<ApiTeacherResultRowDto[]>(`/results/teacher/exams/${examId}/${query}`);
   },
+  /** Marking board: every question of the exam with how much of the cohort still needs a pen. */
+  gradingBoard: (examId: string) => apiRequest<ApiGradingBoardDto>(`/results/teacher/exams/${examId}/grading/`),
+  /** One question across every finalized attempt, plus the key so the rubric is on screen while marking. */
+  gradingQuestion: (examId: string, questionId: string) => apiRequest<ApiGradingQuestionPageDto>(`/results/teacher/exams/${examId}/grading/${questionId}/`),
+  /** Save a whole screen of marks at once; one bad row refuses the batch rather than half-applying it. */
+  saveQuestionGrades: (examId: string, questionId: string, grades: Array<{ attempt_id: string; mark: string | number; feedback?: string }>) => apiRequest<ApiGradingSaveResultDto>(`/results/teacher/exams/${examId}/grading/${questionId}/`, { method: "POST", body: { grades } }),
   teacherAttempt: (attemptId: string) => apiRequest<ApiTeacherAttemptDetailDto>(`/results/teacher/attempts/${attemptId}/`),
   gradeAnswer: (attemptId: string, questionId: string, payload: { manual_score: number; feedback?: string }) => apiRequest<ApiManualGradeResponseDto>(`/results/teacher/attempts/${attemptId}/answers/${questionId}/grade/`, { method: "PATCH", body: payload }),
   updateFeedback: (attemptId: string, feedback: string) => apiRequest<ApiTeacherResultDto>(`/results/teacher/attempts/${attemptId}/feedback/`, { method: "PATCH", body: { feedback } }),

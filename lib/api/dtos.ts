@@ -162,6 +162,12 @@ export interface ApiTeacherAttemptAnswerDto {
   id: string; question_id: string; question_text: string; question_type: ApiQuestionType; question_order: number;
   maximum_score: number | string; selected_option_ids: string[]; selected_option_texts: string[];
   text: string | null; manual_grading_required: boolean; is_flagged: boolean; manual_score: number | string | null; feedback: string; updated_at: string;
+  /**
+   * What the answer is worth and how that was decided, straight from the grading function. A keyed question
+   * used to arrive with no number at all, so the marking screen showed only what was left to do.
+   */
+  awarded_score: number | string;
+  verdict: "correct" | "incorrect" | "unanswered" | "pending" | "manual";
 }
 export interface ApiAttemptSignalDto {
   id: string; kind: string; detail: Record<string, unknown>; created_at: string;
@@ -229,6 +235,58 @@ export interface ApiGradingQueueRowDto {
   result_status: "pending" | "hidden" | "published" | null;
 }
 export interface ApiGradingQueueDto { total: number; queue: ApiGradingQueueRowDto[]; }
+
+/** One question's standing across the cohort, from the marking board. */
+export interface ApiGradingBoardQuestionDto {
+  id: string; order: number; text: string; type: ApiQuestionType; marks: number | string;
+  requires_manual_grading: boolean;
+  attempt_count: number; answered_count: number; blank_count: number;
+  correct_count: number; incorrect_count: number;
+  graded_count: number; pending_count: number;
+  average_score: number | null;
+  /** Nothing left for a pen: keyed questions are always complete, manual ones once every row is marked. */
+  is_complete: boolean;
+}
+export interface ApiGradingBoardDto {
+  exam: { id: string; title: string; total_marks: number | string };
+  attempt_count: number;
+  questions: ApiGradingBoardQuestionDto[];
+  progress: { total: number; graded: number; percent: number };
+}
+
+/** One student's answer to one question, as the per-question marking screen shows it. */
+export interface ApiGradingQuestionRowDto {
+  attempt_id: string; attempt_number: number; student_id: string; student_name: string;
+  grade: string; class_name: string; submitted_at: string | null;
+  answer_id: string | null; selected_option_ids: string[]; selected_option_texts: string[];
+  text: string | null; is_flagged: boolean;
+  awarded_score: number | string; verdict: ApiTeacherAttemptAnswerDto["verdict"];
+  manual_score: number | string | null; feedback: string;
+  /** False on a keyed question: the teacher reads those rows, they do not mark them. */
+  editable: boolean;
+}
+export interface ApiGradingQuestionDto {
+  id: string; order: number; text: string; type: ApiQuestionType; marks: number | string; instructions: string;
+  requires_manual_grading: boolean;
+  /** The answer key is a teacher-only view, and the marking screen is the one place it helps most. */
+  correct_option_ids: string[]; expected_answers: string[]; explanation: string; difficulty: string;
+  grading_notes: string;
+}
+export interface ApiGradingQuestionPageDto {
+  exam: { id: string; title: string; total_marks: number | string };
+  question: ApiGradingQuestionDto;
+  progress: { index: number; total: number; questions: ApiGradingBoardQuestionDto[] };
+  stats: ApiGradingBoardQuestionDto;
+  rows: ApiGradingQuestionRowDto[];
+}
+export interface ApiGradingSaveResultDto {
+  saved: number;
+  results: Array<{ attempt_id: string; result: ApiTeacherResultDto }>;
+  stats: ApiGradingBoardQuestionDto;
+  questions: ApiGradingBoardQuestionDto[];
+  progress: { total: number; graded: number; percent: number };
+  rows: ApiGradingQuestionRowDto[];
+}
 
 export interface ApiTeacherOverviewDto {
   exam_counts: Record<ApiExamStatus, number>;

@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from apps.attempts.grading import grade_answer, requires_manual_grading
 from apps.attempts.models import AttemptEvent, ExamAttempt, StudentAnswer
 
 from .models import ExamResult
@@ -210,6 +211,12 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
     selected_option_texts = serializers.SerializerMethodField()
     text = serializers.SerializerMethodField()
     manual_grading_required = serializers.SerializerMethodField()
+    # What the answer is worth, and how that was decided. `manual_grading_required` alone made the marking
+    # screen a to-do list: the auto-graded half of the sheet carried no number at all, so a teacher could
+    # not see the marks the exam had already awarded. Both come from `apps.attempts.grading`, the same
+    # function `_grade_attempt` uses, so a row and the total cannot disagree.
+    awarded_score = serializers.SerializerMethodField()
+    verdict = serializers.SerializerMethodField()
 
     class Meta:
         model = StudentAnswer
@@ -224,6 +231,8 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
             "selected_option_texts",
             "text",
             "manual_grading_required",
+            "awarded_score",
+            "verdict",
             "is_flagged",
             "manual_score",
             "feedback",
@@ -241,12 +250,23 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
         value = answer.answer_data.get("text") if isinstance(answer.answer_data, dict) else None
         return value if isinstance(value, str) and value else None
 
+    def _mark(self, answer: StudentAnswer):
+        # One `grade_answer` call per row, shared by both fields: a `many=True` list reuses this instance,
+        # and the grade walk touches the prefetched options.
+        cache = self.__dict__.setdefault("_mark_cache", {})
+        key = str(answer.id)
+        if key not in cache:
+            cache[key] = grade_answer(answer.question, answer)
+        return cache[key]
+
     def get_manual_grading_required(self, answer: StudentAnswer) -> bool:
-        if answer.question.type == "written":
-            return True
-        if answer.question.type == "short_answer":
-            return not bool(answer.question.configuration.get("expected_answers", []))
-        return False
+        return requires_manual_grading(answer.question)
+
+    def get_awarded_score(self, answer: StudentAnswer) -> str:
+        return f"{self._mark(answer).awarded:.2f}"
+
+    def get_verdict(self, answer: StudentAnswer) -> str:
+        return self._mark(answer).verdict
 
 
 class ManualGradeSerializer(serializers.Serializer):

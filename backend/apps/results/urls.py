@@ -3,6 +3,8 @@ from django.urls import path
 from .views import (
     TeacherAttemptDetailView,
     TeacherGradingQueueView,
+    TeacherExamGradingBoardView,
+    TeacherExamQuestionGradingView,
     TeacherExamResultsView,
     TeacherManualGradeView,
     TeacherPublishResultsView,
@@ -18,6 +20,12 @@ urlpatterns = [
     path("teacher/students/", TeacherStudentsOverviewView.as_view(), name="teacher-students"),
     path("teacher/exams/<uuid:exam_id>/", TeacherExamResultsView.as_view(), name="teacher-exam-results"),
     path("teacher/exams/<uuid:exam_id>/publish/", TeacherPublishResultsView.as_view(), name="teacher-publish-results"),
+    path("teacher/exams/<uuid:exam_id>/grading/", TeacherExamGradingBoardView.as_view(), name="teacher-grading-board"),
+    path(
+        "teacher/exams/<uuid:exam_id>/grading/<uuid:question_id>/",
+        TeacherExamQuestionGradingView.as_view(),
+        name="teacher-grading-question",
+    ),
     path("teacher/attempts/<uuid:attempt_id>/", TeacherAttemptDetailView.as_view(), name="teacher-attempt-detail"),
     path("teacher/attempts/<uuid:attempt_id>/answers/<uuid:question_id>/grade/", TeacherManualGradeView.as_view(), name="teacher-manual-grade"),
     path("teacher/attempts/<uuid:attempt_id>/feedback/", TeacherResultFeedbackView.as_view(), name="teacher-result-feedback"),

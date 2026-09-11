@@ -10,7 +10,7 @@ from rest_framework.test import APIClient
 
 from apps.exams.models import Exam, ExamSettings, Question, QuestionOption
 from apps.results.models import ExamResult
-from apps.users.models import User
+from apps.users.models import StudentProfile, User
 
 from .models import AttemptEvent, ExamAttempt, StudentAnswer
 
@@ -1185,3 +1185,247 @@ class RefusedWriteIsRecordedTests(StudentExamApiTests):
         self.assertEqual(
             AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.QUESTION_LOCKED).count(), 1
         )
+
+
+class CohortGradingApiTests(TestCase):
+    """Marking one question across the class, and the marks the exam already awarded on its own.
+
+    Two ways through the same paper: finishing one student's sheet, and applying one rubric to thirty
+    people. Both read the shared verdict function, so a number on a row is the number in the total — which
+    is what these assertions hold.
+    """
+
+    def setUp(self) -> None:
+        self.teacher = User.objects.create_user(
+            email="marker@example.com", password="ChangeMe123!", role=User.Role.TEACHER, first_name="مریم", last_name="رضایی"
+        )
+        self.other_teacher = User.objects.create_user(
+            email="other-marker@example.com", password="ChangeMe123!", role=User.Role.TEACHER
+        )
+        self.student = User.objects.create_user(
+            email="writer@example.com", password="ChangeMe123!", role=User.Role.STUDENT, first_name="سارا", last_name="احمدی"
+        )
+        self.second_student = User.objects.create_user(
+            email="writer2@example.com", password="ChangeMe123!", role=User.Role.STUDENT, first_name="نگار", last_name="محمدی"
+        )
+        # A profile is created with the account, so the class fields are set rather than inserted.
+        StudentProfile.objects.update_or_create(user=self.student, defaults={"grade": "12", "class_name": "12-A"})
+        # A profile is created with the account, so the class fields are set rather than inserted.
+        StudentProfile.objects.update_or_create(user=self.second_student, defaults={"grade": "12", "class_name": "12-B"})
+        self.teacher_client = APIClient()
+        self.teacher_client.force_authenticate(self.teacher)
+        self.other_client = APIClient()
+        self.other_client.force_authenticate(self.other_teacher)
+        self.exam = Exam.objects.create(
+            title="Cohort assessment",
+            description="Manual and automatic marks together.",
+            subject="Biology",
+            teacher=self.teacher,
+            status=Exam.Status.ACTIVE,
+            duration_minutes=45,
+        )
+        self.exam.settings.result_visibility = ExamSettings.ResultVisibility.PENDING
+        self.exam.settings.save()
+        self.keyed = Question.objects.create(
+            exam=self.exam, type=Question.Type.MULTIPLE_CHOICE, text="Which is a unit of power?", order=1, marks=2
+        )
+        self.right_option = QuestionOption.objects.create(question=self.keyed, text="وات", is_correct=True, order=1)
+        self.wrong_option = QuestionOption.objects.create(question=self.keyed, text="ژول", is_correct=False, order=2)
+        self.written = Question.objects.create(
+            exam=self.exam,
+            type=Question.Type.WRITTEN,
+            text="Explain diffusion.",
+            order=2,
+            marks=4,
+            configuration={"max_length": 500},
+        )
+
+    def client_for(self, user: User) -> APIClient:
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def finalize(self, student: User, *, option: QuestionOption | None, text: str) -> ExamAttempt:
+        client = self.client_for(student)
+        started = client.post(f"/api/v1/student/exams/{self.exam.id}/start/")
+        self.assertEqual(started.status_code, 201)
+        attempt_id = started.data["id"]
+        if option is not None:
+            saved = client.patch(
+                f"/api/v1/student/attempts/{attempt_id}/answers/{self.keyed.id}/",
+                {"selected_option_ids": [str(option.id)]},
+                format="json",
+            )
+            self.assertEqual(saved.status_code, 200)
+        answered = client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{self.written.id}/",
+            {"text": text},
+            format="json",
+        )
+        self.assertEqual(answered.status_code, 200)
+        submitted = client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+        self.assertEqual(submitted.status_code, 200)
+        return ExamAttempt.objects.get(pk=attempt_id)
+
+    def question_url(self, question: Question) -> str:
+        return f"/api/v1/results/teacher/exams/{self.exam.id}/grading/{question.id}/"
+
+    def test_the_sheet_shows_what_the_exam_awarded_by_itself(self) -> None:
+        attempt = self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        detail = self.teacher_client.get(f"/api/v1/results/teacher/attempts/{attempt.id}/")
+        self.assertEqual(detail.status_code, 200)
+        keyed, written = detail.data["answers"]
+        # A keyed question used to carry no number here at all, which turned the marking screen into a to-do
+        # list instead of the student's paper.
+        self.assertEqual((keyed["verdict"], keyed["awarded_score"], keyed["maximum_score"]), ("correct", "2.00", "2.00"))
+        self.assertFalse(keyed["manual_grading_required"])
+        self.assertEqual((written["verdict"], written["awarded_score"]), ("pending", "0.00"))
+        self.assertTrue(written["manual_grading_required"])
+
+        second = self.finalize(self.second_student, option=self.wrong_option, text="A shorter answer.")
+        rows = self.teacher_client.get(f"/api/v1/results/teacher/attempts/{second.id}/").data["answers"]
+        self.assertEqual(rows[0]["verdict"], "incorrect")
+        self.assertEqual(rows[0]["awarded_score"], "0.00")
+
+    def test_board_counts_the_cohort_per_question(self) -> None:
+        self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        self.finalize(self.second_student, option=self.wrong_option, text="Another answer.")
+        board = self.teacher_client.get(f"/api/v1/results/teacher/exams/{self.exam.id}/grading/")
+        self.assertEqual(board.status_code, 200)
+        keyed, written = board.data["questions"]
+        self.assertEqual(board.data["attempt_count"], 2)
+        self.assertFalse(keyed["requires_manual_grading"])
+        self.assertEqual((keyed["answered_count"], keyed["correct_count"], keyed["incorrect_count"]), (2, 1, 1))
+        self.assertTrue(keyed["is_complete"])
+        self.assertEqual(keyed["average_score"], 1.0)
+        self.assertTrue(written["requires_manual_grading"])
+        self.assertEqual((written["graded_count"], written["pending_count"]), (0, 2))
+        self.assertFalse(written["is_complete"])
+        self.assertEqual(board.data["progress"], {"total": 2, "graded": 0, "percent": 0})
+
+    def test_one_question_lists_every_attempt_with_the_key_and_the_editable_flag(self) -> None:
+        first = self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        second = self.finalize(self.second_student, option=self.wrong_option, text="Another answer.")
+        page = self.teacher_client.get(self.question_url(self.written))
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.data["question"]["marks"], "4.00")
+        self.assertEqual(page.data["question"]["text"], "Explain diffusion.")
+        self.assertTrue(page.data["question"]["requires_manual_grading"])
+        self.assertEqual((page.data["progress"]["index"], page.data["progress"]["total"]), (2, 2))
+        self.assertEqual(len(page.data["rows"]), 2)
+        self.assertEqual({row["attempt_id"] for row in page.data["rows"]}, {str(first.id), str(second.id)})
+        for row in page.data["rows"]:
+            self.assertTrue(row["editable"])
+            self.assertIsNone(row["manual_score"])
+            self.assertEqual(row["verdict"], "pending")
+        profile_row = next(row for row in page.data["rows"] if row["student_id"] == str(self.student.id))
+        self.assertEqual((profile_row["grade"], profile_row["class_name"]), ("12", "12-A"))
+        self.assertEqual(profile_row["text"], "Movement of particles.")
+
+        # The keyed question is the same screen read-only: the distribution, not a form.
+        keyed_page = self.teacher_client.get(self.question_url(self.keyed))
+        self.assertEqual(keyed_page.data["question"]["correct_option_ids"], [str(self.right_option.id)])
+        self.assertTrue(all(row["editable"] is False for row in keyed_page.data["rows"]))
+        self.assertTrue(all(row["verdict"] in {"correct", "incorrect"} for row in keyed_page.data["rows"]))
+
+    def test_batch_save_marks_every_row_and_regrades_each_attempt(self) -> None:
+        first = self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        second = self.finalize(self.second_student, option=self.wrong_option, text="Another answer.")
+        saved = self.teacher_client.post(
+            self.question_url(self.written),
+            {
+                "grades": [
+                    {"attempt_id": str(first.id), "mark": "4.00", "feedback": "کامل."},
+                    {"attempt_id": str(second.id), "mark": "1.00"},
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.data["saved"], 2)
+        # 2 auto + 4 manual for the first student, 0 + 1 for the second.
+        self.assertEqual({row["result"]["score"] for row in saved.data["results"]}, {"6.00", "1.00"})
+        self.assertEqual(saved.data["stats"]["pending_count"], 0)
+        self.assertTrue(saved.data["stats"]["is_complete"])
+        self.assertEqual(saved.data["progress"], {"total": 2, "graded": 2, "percent": 100})
+        marks = {row["attempt_id"]: row["manual_score"] for row in saved.data["rows"]}
+        self.assertEqual(marks, {str(first.id): "4.00", str(second.id): "1.00"})
+        feedback = {row["attempt_id"]: row["feedback"] for row in saved.data["rows"]}
+        self.assertEqual(feedback[str(first.id)], "کامل.")
+        self.assertEqual(ExamResult.objects.filter(attempt__in=[first, second], pending_manual_grading_count=0).count(), 2)
+
+    def test_one_bad_row_refuses_the_whole_screen(self) -> None:
+        first = self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        second = self.finalize(self.second_student, option=self.wrong_option, text="Another answer.")
+        refused = self.teacher_client.post(
+            self.question_url(self.written),
+            {"grades": [{"attempt_id": str(first.id), "mark": "3.00"}, {"attempt_id": str(second.id), "mark": "9.00"}]},
+            format="json",
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertEqual(len(refused.data["detail"]["rows"]), 1)
+        # Nothing landed, so the teacher fixes the row and resends the screen without double-applying.
+        page = self.teacher_client.get(self.question_url(self.written))
+        self.assertTrue(all(row["manual_score"] is None for row in page.data["rows"]))
+        self.assertEqual(StudentAnswer.objects.filter(question=self.written, manual_score__isnull=False).count(), 0)
+
+    def test_a_row_from_another_exam_is_refused(self) -> None:
+        self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        foreign = Exam.objects.create(
+            title="Other exam", description="", subject="Other", teacher=self.teacher, status=Exam.Status.ACTIVE, duration_minutes=30
+        )
+        foreign_attempt = ExamAttempt.objects.create(
+            exam=foreign, student=self.student, attempt_number=1, status=ExamAttempt.Status.SUBMITTED
+        )
+        refused = self.teacher_client.post(
+            self.question_url(self.written), {"grades": [{"attempt_id": str(foreign_attempt.id), "mark": "1.00"}]}, format="json"
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("not part of the exam", str(refused.data))
+
+    def test_an_already_keyed_question_cannot_be_graded_by_hand_here(self) -> None:
+        self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        refused = self.teacher_client.post(
+            self.question_url(self.keyed),
+            {"grades": [{"attempt_id": str(ExamAttempt.objects.first().id), "mark": "1.00"}]},
+            format="json",
+        )
+        self.assertEqual(refused.status_code, 400)
+
+    def test_an_empty_grades_list_is_refused(self) -> None:
+        self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        refused = self.teacher_client.post(self.question_url(self.written), {"grades": []}, format="json")
+        self.assertEqual(refused.status_code, 400)
+
+    def test_another_teacher_cannot_open_the_board_or_a_question(self) -> None:
+        self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        self.assertEqual(self.other_client.get(f"/api/v1/results/teacher/exams/{self.exam.id}/grading/").status_code, 404)
+        self.assertEqual(self.other_client.get(self.question_url(self.written)).status_code, 404)
+        self.assertEqual(
+            self.other_client.post(
+                self.question_url(self.written),
+                {"grades": [{"attempt_id": str(ExamAttempt.objects.first().id), "mark": "1.00"}]},
+                format="json",
+            ).status_code,
+            404,
+        )
+
+    def test_a_student_cannot_reach_the_marking_endpoints(self) -> None:
+        attempt = self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        client = self.client_for(self.student)
+        self.assertEqual(client.get(f"/api/v1/results/teacher/exams/{self.exam.id}/grading/").status_code, 403)
+        self.assertEqual(
+            client.post(
+                self.question_url(self.written), {"grades": [{"attempt_id": str(attempt.id), "mark": "4.00"}]}, format="json"
+            ).status_code,
+            403,
+        )
+
+    def test_the_key_never_reaches_a_student(self) -> None:
+        attempt = self.finalize(self.student, option=self.right_option, text="Movement of particles.")
+        client = self.client_for(self.student)
+        self.assertEqual(client.get(f"/api/v1/results/teacher/exams/{self.exam.id}/grading/").status_code, 403)
+        detail = client.get(f"/api/v1/student/attempts/{attempt.id}/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertNotIn("correct_option_ids", str(detail.data))
+        self.assertNotIn("awarded_score", str(detail.data))

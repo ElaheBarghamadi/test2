@@ -17,6 +17,14 @@ from apps.users.models import StudentProfile, User
 
 from .models import AttemptEvent, ExamAttempt, StudentAnswer
 
+from .grading import (
+    VERDICT_CORRECT,
+    VERDICT_PENDING,
+    VERDICT_UNANSWERED,
+    answer_has_value,
+    grade_answer,
+)
+
 
 class AudienceContext:
     """Per-request cache of the facts the audience rule needs.
@@ -293,28 +301,9 @@ def unanswered_question_ids(attempt: ExamAttempt) -> list[str]:
         question = questions.get(question_id)
         if question is None:
             continue
-        if not _answer_has_value(question, answers.get(question_id)):
+        if not answer_has_value(question, answers.get(question_id)):
             missing.append(question_id)
     return missing
-
-
-def _answer_has_value(question: Question, answer: StudentAnswer | None) -> bool:
-    if answer is None:
-        return False
-    if question.type in {
-        Question.Type.MULTIPLE_CHOICE,
-        Question.Type.MULTIPLE_ANSWER,
-        Question.Type.TRUE_FALSE,
-    }:
-        return bool(answer._selected_option_ids)  # type: ignore[attr-defined]
-    text = answer.answer_data.get("text") if isinstance(answer.answer_data, dict) else None
-    return isinstance(text, str) and bool(text.strip())
-
-
-def _answer_choice_ids(answer: StudentAnswer | None) -> set[str]:
-    if answer is None:
-        return set()
-    return {str(option_id) for option_id in answer._selected_option_ids}  # type: ignore[attr-defined]
 
 
 def record_attempt_event(attempt: ExamAttempt, kind: str, *, detail: dict[str, Any] | None = None) -> None:
@@ -486,44 +475,22 @@ def _grade_attempt(attempt: ExamAttempt, *, finalized_at: datetime) -> "ExamResu
             # A teacher should not delete content from a live exam; skipped here prevents a broken old row from crashing finalization.
             continue
         total_marks += question.marks
-        answer = answers_by_question.get(question_id)
-        if not _answer_has_value(question, answer):
+        # One rule in one place: `apps.attempts.grading` is also what the teacher's marking screens read, so
+        # the number shown on a question cannot disagree with the number in the total.
+        mark = grade_answer(question, answers_by_question.get(question_id))
+        if mark.verdict == VERDICT_UNANSWERED:
             unanswered_count += 1
             continue
-
-        if question.type == Question.Type.WRITTEN:
+        if mark.requires_manual:
             manual_count += 1
-            if answer.manual_score is None:
+            if mark.verdict == VERDICT_PENDING:
                 pending_manual_count += 1
             else:
-                score += answer.manual_score
+                score += mark.awarded
             continue
-
-        if question.type == Question.Type.SHORT_ANSWER:
-            expected_answers = question.configuration.get("expected_answers", [])
-            if not expected_answers:
-                manual_count += 1
-                if answer.manual_score is None:
-                    pending_manual_count += 1
-                else:
-                    score += answer.manual_score
-                continue
-            answer_text = str(answer.answer_data.get("text", "")).strip()
-            case_sensitive = bool(question.configuration.get("case_sensitive", False))
-            comparable_answer = answer_text if case_sensitive else answer_text.casefold()
-            comparable_expected = {
-                item.strip() if case_sensitive else item.strip().casefold() for item in expected_answers
-            }
-            is_correct = comparable_answer in comparable_expected
-        else:
-            selected_ids = _answer_choice_ids(answer)
-            correct_ids = {str(option.id) for option in question.options.all() if option.is_correct}
-            # Multiple-answer uses deliberate full-credit-only exact-set matching; other choice types do too.
-            is_correct = selected_ids == correct_ids
-
-        if is_correct:
+        if mark.verdict == VERDICT_CORRECT:
             correct_count += 1
-            score += question.marks
+            score += mark.awarded
         else:
             incorrect_count += 1
 

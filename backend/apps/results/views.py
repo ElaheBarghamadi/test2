@@ -11,6 +11,7 @@ from rest_framework import serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.attempts.grading import grade_answer, requires_manual_grading, selected_option_ids, AnswerMark
 from apps.attempts.models import ExamAttempt, StudentAnswer
 from apps.attempts.services import _grade_attempt, attempt_timing
 from apps.exams.models import Exam, Question
@@ -223,7 +224,9 @@ class TeacherAttemptDetailView(TeacherResultsAccessMixin, APIView):
         answers = (
             StudentAnswer.objects.filter(attempt=attempt)
             .select_related("question")
-            .prefetch_related("selected_options")
+            # The sheet shows a mark per question, which means the answer key has to be at hand; without
+            # this prefetch every row would re-query its options.
+            .prefetch_related("selected_options", "question__options")
             .order_by("question__order")
         )
         result = getattr(attempt, "result", None)
@@ -280,25 +283,294 @@ class TeacherManualGradeView(TeacherResultsAccessMixin, APIView):
                 answer.feedback = serializer.validated_data["feedback"]
             answer.full_clean()
             answer.save(update_fields=("manual_score", "feedback", "updated_at"))
-            before = getattr(attempt, "result", None)
-            was_open = before.pending_manual_grading_count if before else 0
             result = _grade_attempt(attempt, finalized_at=timezone.now())
-            if was_open and result.pending_manual_grading_count == 0:
-                # The queue for this student just emptied: tell them the number they were waiting for exists.
-                from apps.notifications.models import Notification
-                from apps.notifications.services import notify
-
-                notify(
-                    [attempt.student],
-                    kind=Notification.Kind.GRADING_COMPLETED,
-                    title="تصحیح دستی کامل شد",
-                    body=f"نمرهٔ «{attempt.exam.title}» نهایی شد.",
-                    link=f"/student/results/{attempt.pk}",
-                    exam=attempt.exam,
-                    attempt=attempt,
-                )
+            # The queue for this student may have just emptied: tell them the number they waited for exists.
+            _notify_grading_completed(attempt, result)
             answer.refresh_from_db()
             return Response({"answer": TeacherAttemptAnswerSerializer(answer).data, "result": TeacherResultSerializer(result).data})
+
+
+FINALIZED_STATUSES = (ExamAttempt.Status.SUBMITTED, ExamAttempt.Status.EXPIRED)
+
+
+def _notify_grading_completed(attempt: ExamAttempt, result: ExamResult) -> None:
+    """Tell the student their number is final, once, when the last open answer of the sheet closes."""
+    if result.pending_manual_grading_count:
+        return
+    from apps.notifications.models import Notification
+    from apps.notifications.services import notify
+
+    notify(
+        [attempt.student],
+        kind=Notification.Kind.GRADING_COMPLETED,
+        title="تصحیح دستی کامل شد",
+        body=f"نمرهٔ «{attempt.exam.title}» نهایی شد.",
+        link=f"/student/results/{attempt.pk}",
+        exam=attempt.exam,
+        attempt=attempt,
+    )
+
+
+class TeacherExamGradingBoardView(TeacherResultsAccessMixin, APIView):
+    """One exam's marking board: every question with how much of the cohort still needs a pen.
+
+    The counts are computed from the same verdict function that grading uses, so a question the teacher
+    marks complete here cannot still be sitting in another student's queue.
+    """
+
+    def get(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
+        exam = self.get_exam(exam_id)
+        return Response(_grading_board(exam, _finalized_attempts(self.attempts(), exam)))
+
+
+def _finalized_attempts(queryset, exam):  # type: ignore[no-untyped-def]
+    return (
+        queryset.filter(exam=exam, status__in=FINALIZED_STATUSES)
+        .select_related("student", "student__student_profile", "result")
+        .order_by("student__first_name", "student__last_name", "attempt_number")
+    )
+
+
+def _grading_board(exam: Exam, attempts) -> dict:  # type: ignore[type-arg]
+    from apps.exams.models import Question
+
+    questions = list(Question.objects.filter(exam=exam).prefetch_related("options").order_by("order"))
+    attempts = list(attempts)
+    answers = (
+        StudentAnswer.objects.filter(attempt__in=attempts, question__in=questions)
+        .select_related("attempt", "question")
+        .prefetch_related("selected_options", "question__options")
+    )
+    marks: dict[tuple[str, str], AnswerMark] = {}
+    for answer in answers:
+        marks[(str(answer.attempt_id), str(answer.question_id))] = grade_answer(answer.question, answer)
+
+    rows = []
+    total_pending = 0
+    total_manual = 0
+    for question in questions:
+        requires_manual = requires_manual_grading(question)
+        answered = 0
+        correct = incorrect = graded = pending = 0
+        awarded_total = Decimal("0.00")
+        for attempt in attempts:
+            mark = marks.get((str(attempt.id), str(question.id)))
+            if mark is None:
+                continue
+            answered += 1
+            awarded_total += mark.awarded
+            if mark.verdict == "unanswered":
+                answered -= 1  # a blank is not an answer; it stays out of every count below
+                continue
+            if requires_manual:
+                if mark.verdict == "pending":
+                    pending += 1
+                else:
+                    graded += 1
+            elif mark.verdict == "correct":
+                correct += 1
+            else:
+                incorrect += 1
+        total_pending += pending
+        total_manual += graded + pending
+        rows.append(
+            {
+                "id": str(question.id),
+                "order": question.order,
+                "text": question.text,
+                "type": question.type,
+                "marks": str(question.marks),
+                "requires_manual_grading": requires_manual,
+                "attempt_count": len(attempts),
+                "answered_count": answered,
+                "blank_count": len(attempts) - answered,
+                "correct_count": correct,
+                "incorrect_count": incorrect,
+                "graded_count": graded,
+                "pending_count": pending,
+                "average_score": float((awarded_total / answered).quantize(Decimal("0.01"))) if answered else None,
+                # "Complete" for a keyed question means there is nothing to do; for a manual one it means
+                # every answered sheet has a number on it.
+                "is_complete": pending == 0,
+            }
+        )
+    return {
+        "exam": {"id": str(exam.id), "title": exam.title, "total_marks": str(exam.total_marks)},
+        "attempt_count": len(attempts),
+        "questions": rows,
+        "progress": {
+            "total": total_manual,
+            "graded": total_manual - total_pending,
+            "percent": round((total_manual - total_pending) * 100 / total_manual) if total_manual else 100,
+        },
+    }
+
+
+class TeacherExamQuestionGradingView(TeacherResultsAccessMixin, APIView):
+    """One question across the whole cohort — the other way through the same marks.
+
+    Sheet-by-sheet marking is right for finishing one student; this is right for one rubric applied to
+    thirty people, which is how a written answer actually gets marked consistently. `POST` saves the whole
+    screen at once: every row is validated before anything is written, then each touched attempt is
+    re-graded in the same transaction, so a typo in row nine cannot leave rows one to eight half-applied.
+    """
+
+    def _question(self, exam: Exam, question_id):  # type: ignore[no-untyped-def]
+        return get_object_or_404(Question.objects.filter(exam=exam).prefetch_related("options"), pk=question_id)
+
+    def get(self, request, exam_id, question_id) -> Response:  # type: ignore[no-untyped-def]
+        exam = self.get_exam(exam_id)
+        question = self._question(exam, question_id)
+        attempts = _finalized_attempts(self.attempts(), exam)
+        board = _grading_board(exam, attempts)
+        return Response(
+            {
+                "exam": board["exam"],
+                "question": _question_detail(question),
+                "progress": {
+                    "index": next(
+                        (index + 1 for index, row in enumerate(board["questions"]) if row["id"] == str(question.id)), 1
+                    ),
+                    "total": len(board["questions"]),
+                    "questions": board["questions"],
+                },
+                "stats": next((row for row in board["questions"] if row["id"] == str(question.id)), {}),
+                "rows": _question_rows(exam, question, attempts),
+            }
+        )
+
+    def post(self, request, exam_id, question_id) -> Response:  # type: ignore[no-untyped-def]
+        exam = self.get_exam(exam_id)
+        question = self._question(exam, question_id)
+        if not requires_manual_grading(question):
+            raise serializers.ValidationError(
+                {"question": ["This answer is automatically graded and cannot be manually overridden."]}
+            )
+        grades = request.data.get("grades") if isinstance(request.data, dict) else None
+        if not isinstance(grades, list) or not grades:
+            raise serializers.ValidationError({"grades": ["Send at least one row."]})
+        if len(grades) > 500:
+            raise serializers.ValidationError({"grades": ["Too many rows in one request."]})
+
+        attempts = {str(attempt.id): attempt for attempt in _finalized_attempts(self.attempts(), exam)}
+        answers = {
+            str(answer.attempt_id): answer
+            for answer in StudentAnswer.objects.filter(
+                attempt__in=list(attempts.values()), question=question
+            ).select_related("attempt", "question").prefetch_related("selected_options", "question__options")
+        }
+        entry = ManualGradeSerializer
+
+        # Validate the whole screen first: the teacher sees every bad row at once instead of saving,
+        # hitting an error, fixing one row, saving again.
+        errors: list[dict[str, object]] = []
+        prepared: list[tuple[StudentAnswer, Decimal, str | None]] = []
+        for index, item in enumerate(grades):
+            if not isinstance(item, dict):
+                errors.append({"index": index, "error": "Each row must be an object."})
+                continue
+            attempt = attempts.get(str(item.get("attempt_id", "")))
+            if attempt is None:
+                errors.append({"index": index, "error": "This attempt is not part of the exam."})
+                continue
+            answer = answers.get(str(attempt.id))
+            if answer is None:
+                errors.append({"index": index, "error": "The student did not submit an answer for this question."})
+                continue
+            payload = {"manual_score": item.get("mark"), "feedback": item.get("feedback", "")}
+            serializer = entry(data=payload, context={"answer": answer})
+            if not serializer.is_valid():
+                errors.append({"index": index, "attempt_id": str(attempt.id), "error": serializer.errors})
+                continue
+            prepared.append((answer, serializer.validated_data["manual_score"], serializer.validated_data.get("feedback")))
+        if errors:
+            raise serializers.ValidationError({"rows": errors})
+
+        results = []
+        with transaction.atomic():
+            touched: dict[str, ExamAttempt] = {}
+            for answer, manual_score, feedback in prepared:
+                answer.manual_score = manual_score
+                if feedback is not None:
+                    answer.feedback = feedback
+                answer.full_clean()
+                answer.save(update_fields=("manual_score", "feedback", "updated_at"))
+                touched[str(answer.attempt_id)] = answer.attempt
+            for attempt in touched.values():
+                result = _grade_attempt(attempt, finalized_at=timezone.now())
+                _notify_grading_completed(attempt, result)
+                results.append({"attempt_id": str(attempt.id), "result": TeacherResultSerializer(result).data})
+
+        board = _grading_board(exam, _finalized_attempts(self.attempts(), exam))
+        return Response(
+            {
+                "saved": len(prepared),
+                "results": results,
+                "stats": next((row for row in board["questions"] if row["id"] == str(question.id)), {}),
+                "questions": board["questions"],
+                "progress": board["progress"],
+                "rows": _question_rows(exam, question, _finalized_attempts(self.attempts(), exam)),
+            }
+        )
+
+
+def _question_detail(question: Question) -> dict:  # type: ignore[type-arg]
+    configuration = question.configuration or {}
+    return {
+        "id": str(question.id),
+        "order": question.order,
+        "text": question.text,
+        "type": question.type,
+        "marks": str(question.marks),
+        "instructions": question.instructions,
+        "requires_manual_grading": requires_manual_grading(question),
+        # The key is shown while marking so the teacher grades against the same standard the machine would
+        # have used. It stays inside teacher endpoints only: no student payload carries it.
+        "correct_option_ids": [str(option.id) for option in question.options.all() if option.is_correct],
+        "expected_answers": configuration.get("expected_answers", []),
+        "explanation": question.explanation,
+        "difficulty": question.difficulty,
+        "grading_notes": configuration.get("grading_notes", ""),
+    }
+
+
+def _question_rows(exam: Exam, question: Question, attempts) -> list[dict]:  # type: ignore[type-arg]
+    answers = {
+        str(answer.attempt_id): answer
+        for answer in StudentAnswer.objects.filter(attempt__in=attempts, question=question)
+        .select_related("attempt", "question")
+        .prefetch_related("selected_options", "question__options")
+    }
+    rows = []
+    for attempt in attempts:
+        answer = answers.get(str(attempt.id))
+        selected = selected_option_ids(answer)
+        mark = grade_answer(question, answer)
+        profile = getattr(attempt.student, "student_profile", None)
+        rows.append(
+            {
+                "attempt_id": str(attempt.id),
+                "attempt_number": attempt.attempt_number,
+                "student_id": str(attempt.student_id),
+                "student_name": attempt.student.get_full_name(),
+                "grade": getattr(profile, "grade", "") or "",
+                "class_name": getattr(profile, "class_name", "") or "",
+                "submitted_at": attempt.submitted_at,
+                "answer_id": str(answer.id) if answer else None,
+                "selected_option_ids": selected,
+                "selected_option_texts": (
+                    [option.text for option in answer.selected_options.all()] if answer is not None else []
+                ),
+                "text": (answer.answer_data or {}).get("text") if answer is not None else None,
+                "is_flagged": bool(answer.is_flagged) if answer is not None else False,
+                "awarded_score": f"{mark.awarded:.2f}",
+                "verdict": mark.verdict,
+                "manual_score": None if answer is None or answer.manual_score is None else str(answer.manual_score),
+                "feedback": answer.feedback if answer is not None else "",
+                "editable": bool(answer is not None and mark.requires_manual),
+            }
+        )
+    return rows
 
 
 class TeacherResultFeedbackView(TeacherResultsAccessMixin, APIView):
