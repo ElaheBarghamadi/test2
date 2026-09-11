@@ -28,7 +28,22 @@ interface BaseQuestion {
   points: number;
   required?: boolean;
   explanation?: string;
+  /** Bank metadata: how findable and reusable a question is. Never a grading input. */
+  difficulty?: QuestionDifficulty;
+  tags?: string[];
+  isArchived?: boolean;
+  /** Exams that already hold a copy of this bank question. */
+  usageCount?: number;
+  /** Attempts that have answered this exact question row. */
+  answeredCount?: number;
+  copiedFromId?: string | null;
+  /** Owning exam, surfaced so the bank can point back at the one place a question is edited. */
+  examId?: string;
+  examTitle?: string;
+  examStatus?: string;
 }
+
+export type QuestionDifficulty = "easy" | "medium" | "hard";
 
 export interface MultipleChoiceQuestion extends BaseQuestion {
   type: "single_choice";
@@ -79,6 +94,10 @@ export interface ExamSettings {
   totalMarks: number;
   allowBackNavigation: boolean;
   randomizeQuestions: boolean;
+  /** Shuffle option order per attempt. Grading matches on option identity, never position. */
+  randomizeOptions: boolean;
+  /** False = the student cannot submit a blank answer; enforced by the server, warned about by the UI. */
+  allowUnanswered: boolean;
   showResultImmediately: boolean;
   resultVisibility: ResultVisibility;
   showCorrectAnswers: boolean;
@@ -166,6 +185,10 @@ export interface ExamAttempt {
   saveStatus: SaveStatus;
   lastSavedAt?: string;
   answerRevision: number;
+  /** Revision the server last accepted; every write echoes it so a stale request cannot win. */
+  serverRevision?: number;
+  /** Another window owns this attempt right now; writes are refused until the student takes over. */
+  sessionConflict?: "another_session" | "finalized" | null;
   connectionStatus: "online" | "offline";
   submissionError?: string;
   /** Attempt 1-based index and the exam's allowed total, shown in the session header. */
@@ -174,6 +197,39 @@ export interface ExamAttempt {
   /** Dirty fields are client transport metadata, never displayed as exam content. */
   pendingAnswerQuestionIds?: string[];
   pendingFlagQuestionIds?: string[];
+}
+
+/** One server-recorded session/activity signal. An observation for the teacher, never a verdict. */
+export interface AttemptSignal {
+  id: string;
+  kind: "session_switch" | "tab_hidden" | "tab_visible" | "disconnected" | "reconnected" | "auto_submitted" | "exam_closed" | "stale_write_rejected";
+  at: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface NotificationItem {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  link: string;
+  isRead: boolean;
+  createdAt: string;
+}
+
+export interface GradingQueueRow {
+  attemptId: string;
+  attemptNumber: number;
+  studentId: string;
+  studentName: string;
+  examId: string;
+  examTitle: string;
+  submittedAt: string | null;
+  gradedCount: number;
+  manualCount: number;
+  openCount: number;
+  progress: number;
+  resultStatus: "pending" | "hidden" | "published" | null;
 }
 
 export interface ExamResult {
@@ -187,6 +243,10 @@ export interface ExamResult {
   incorrect: number;
   unanswered: number;
   pendingManualGrading: number;
+  /** Total answers that needed the teacher's pen; `manual - pending` is "17 / 24 graded". */
+  manualGradingCount?: number;
+  /** Set when the number was recomputed after students had already seen it. */
+  wasRevised?: boolean;
   passingPercentage: number;
   /** null while the score is not final or when the teacher left the pass mark unset. */
   passed: boolean | null;

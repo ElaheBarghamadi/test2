@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronDown, ChevronUp, CircleCheck, Copy, Eye, GripVertical, ListPlus, Plus, Save, Trash2, TriangleAlert } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, CircleCheck, Copy, Eye, GripVertical, ListPlus, Plus, Save, Trash2, TriangleAlert, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Question, QuestionOption, QuestionType } from "@/lib/types/domain";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
@@ -35,7 +35,7 @@ function cloneQuestion(question: Question, id = question.id): Question {
 }
 
 export function blankQuestion(type: QuestionType, order: number): Question {
-  const base = { id: `question-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`, order, stem: "", points: 1, required: true };
+  const base = { id: `question-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`, order, stem: "", points: 1, required: true, difficulty: "medium" as const, tags: [] as string[] };
   if (type === "single_choice") return { ...base, type, options: createOptions(), correctOptionId: "" };
   if (type === "multiple_choice") return { ...base, type, options: createOptions(), correctOptionIds: [] };
   if (type === "true_false") return { ...base, type, correctAnswer: true };
@@ -43,6 +43,41 @@ export function blankQuestion(type: QuestionType, order: number): Question {
   return { ...base, type, placeholder: "پاسخ تشریحی خود را بنویسید...", maxLength: 1200, gradingNote: "" };
 }
 function createOptions(): QuestionOption[] { return [{ id: "option-1", label: "", value: "option-1" }, { id: "option-2", label: "", value: "option-2" }]; }
+
+/** Difficulty and tags are bank metadata: they make a question findable, never gradable. */
+function BankFields({ question, onChange }: { question: Question; onChange: (question: Question) => void }) {
+  const [draftTag, setDraftTag] = useState("");
+  const tags = question.tags ?? [];
+  function addTag(value: string) {
+    const name = value.trim().replace(/,$/, "").trim();
+    if (!name) return;
+    if (tags.some((tag) => tag.toLowerCase() === name.toLowerCase())) { setDraftTag(""); return; }
+    onChange({ ...question, tags: [...tags, name.slice(0, 60)] });
+    setDraftTag("");
+  }
+  function removeTag(name: string) { onChange({ ...question, tags: tags.filter((tag) => tag !== name) }); }
+  return <section className="mt-5 rounded-2xl border bg-muted/35 p-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h3 className="text-sm font-black">برچسب و سطح سؤال</h3>
+        <p className="mt-1 text-xs text-muted-foreground">فقط برای بانک سؤال است؛ بر نمرهٔ دانش‌آموز تأثیری ندارد.</p>
+      </div>
+      <label className="text-xs font-bold text-muted-foreground">سطح
+        <select value={question.difficulty ?? "medium"} onChange={(event) => onChange({ ...question, difficulty: event.target.value as Question["difficulty"] })} className="mr-2 h-9 rounded-xl border bg-background px-2 text-sm font-bold text-foreground">
+          <option value="easy">آسان</option><option value="medium">متوسط</option><option value="hard">سخت</option>
+        </select>
+      </label>
+    </div>
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      {tags.map((tag) => <span key={tag} className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-bold text-primary">
+        {tag}
+        <button type="button" onClick={() => removeTag(tag)} aria-label={`حذف برچسب ${tag}`} className="grid h-4 w-4 place-items-center rounded-full hover:bg-primary/20"><X className="h-2.5 w-2.5"/></button>
+      </span>)}
+      <input value={draftTag} onChange={(event) => setDraftTag(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === ",") { event.preventDefault(); addTag(draftTag); } }} onBlur={() => addTag(draftTag)} placeholder="برچسب جدید و Enter" aria-label="افزودن برچسب" className="h-9 min-w-40 flex-1 rounded-xl border bg-background px-3 text-sm"/>
+    </div>
+    {typeof question.usageCount === "number" && question.usageCount > 0 && <p className="mt-2 text-[11px] font-bold text-muted-foreground">از این سؤال در {toPersianNumber(question.usageCount)} آزمون دیگر کپی شده است.</p>}
+  </section>;
+}
 
 /** Everything Django's publish gate refuses, phrased for the teacher. One source for list + editor. */
 export function questionIssues(question: Question): string[] {
@@ -111,6 +146,7 @@ function QuestionEditor({ question, onChange, onPreview, onDuplicate, onDelete, 
       {question.type === "true_false" && <TrueFalseEditor question={question} onChange={onChange}/>}
       {question.type === "short_answer" && <ShortAnswerEditor question={question} onChange={onChange}/>}
       {question.type === "essay" && <WrittenEditor question={question} onChange={onChange}/>}
+      <BankFields question={question} onChange={onChange}/>
       <label className="mt-5 block text-sm font-bold">توضیح یا بازخورد (اختیاری)<Textarea className="mt-2 min-h-20" value={question.explanation ?? ""} onChange={(event) => onChange({ ...question, explanation: event.target.value })} placeholder="توضیحی که بعداً می‌تواند به دانش‌آموز نمایش داده شود..."/></label>
       <div className="mt-5 flex items-center justify-between border-t pt-5"><span className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground">{issues.length === 0 ? <><CircleCheck className="h-4 w-4 text-emerald-600"/>آماده برای انتشار</> : <><TriangleAlert className="h-4 w-4 text-amber-600"/>نیازمند تکمیل</>}</span><Badge variant="neutral">به‌صورت خودکار ذخیره می‌شود</Badge></div>
       {issues.length > 0 && <ul className="mt-3 space-y-1 rounded-2xl border border-amber-500/25 bg-amber-500/[.07] p-3 text-xs leading-6 text-amber-900 dark:text-amber-300">{issues.map((issue) => <li key={issue} className="flex gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"/>{issue}</li>)}</ul>}

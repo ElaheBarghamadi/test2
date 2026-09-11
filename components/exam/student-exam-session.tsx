@@ -10,6 +10,7 @@ import { ExamStartWorkspace } from "@/components/exam/exam-start-workspace";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useExamAttemptStore } from "@/lib/state/exam-attempt-store";
+import { useExamSession } from "@/hooks/use-exam-session";
 import type { Exam, ExamAttempt } from "@/lib/types/domain";
 
 type Mode = "start" | "review";
@@ -22,6 +23,7 @@ export function StudentExamSession({ examId, mode }: { examId: string; mode: Mod
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const examSession = useExamSession(true);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
@@ -31,12 +33,14 @@ export function StudentExamSession({ examId, mode }: { examId: string; mode: Mod
       if (!item) { setError("این آزمون برای حساب شما در دسترس نیست یا پایان یافته است."); return; }
       setPreview(toStudentDashboardExam(item));
       if (item.attempt) {
-        const next = toStudentAttempt(await attemptsApi.detail(item.attempt.id));
+        // Reading with this tab's identity is what lets a refresh re-establish ownership quietly: the
+        // server only refuses *writes* from an unknown session, never a reload.
+        const next = toStudentAttempt(await attemptsApi.detail(item.attempt.id, { examSession }));
         hydrateRemote(next.attempt); setSession(next);
       } else { setSession(null); }
     } catch (requestError) { setError(apiErrorMessage(requestError, "بارگذاری اطلاعات آزمون انجام نشد.")); }
     finally { setLoading(false); }
-  }, [examId, hydrateRemote]);
+  }, [examId, examSession, hydrateRemote]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -44,7 +48,7 @@ export function StudentExamSession({ examId, mode }: { examId: string; mode: Mod
   }, [examId, loading, mode, preview, router, session]);
 
   const start = async () => {
-    const next = toStudentAttempt(await attemptsApi.start(examId));
+    const next = toStudentAttempt(await attemptsApi.start(examId, { examSession }));
     hydrateRemote(next.attempt); setSession(next); setPreview(next.exam);
   };
 

@@ -17,6 +17,17 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 
+  /** Machine-readable reason when the server sends one (attempt conflicts, etc.). */
+  get code(): string | null {
+    const code = this.payload?.code;
+    return typeof code === "string" ? code : null;
+  }
+
+  /** Seconds the server asked us to wait, for a 429. */
+  get retryAfterSeconds(): number | null {
+    return typeof this.payload?.retry_after === "number" ? this.payload.retry_after : null;
+  }
+
   get fieldErrors(): Record<string, string[]> {
     const detail = this.payload?.detail;
     if (!detail || typeof detail !== "object" || Array.isArray(detail)) return {};
@@ -29,18 +40,41 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Status-specific fallbacks, so a failure is never reduced to one generic sentence. The server's own
+ * message always wins when there is one; these only cover transports that produced no useful text
+ * (a proxy timeout, a 500 from an upstream, an HTML error page).
+ */
+const STATUS_COPY: Record<number, string> = {
+  400: "درخواست پذیرفته نشد؛ مقادیر واردشده را بررسی کنید.",
+  401: "نشست شما منقضی شده است. برای ادامه دوباره وارد شوید.",
+  403: "دسترسی به این اطلاعات برای شما مجاز نیست.",
+  404: "این مورد پیدا نشد؛ ممکن است حذف یا تغییر کرده باشد.",
+  409: "این اقدام با وضعیت فعلی سرور در تضاد است. صفحه را تازه‌سازی کنید.",
+  422: "دادهٔ ارسالی با قوانین سرور هم‌خوانی ندارد.",
+  429: "درخواست‌ها بیش از حد مجاز شده است؛ کمی صبر کنید و دوباره تلاش کنید.",
+  500: "سرور با خطا مواجه شد. تلاش شما محفوظ است؛ کمی بعد دوباره امتحان کنید.",
+  502: "سرویس در دسترس نیست. کمی بعد دوباره تلاش کنید.",
+  503: "سرویس موقتاً از دسترس خارج است. کمی بعد دوباره تلاش کنید.",
+};
+
 export function apiErrorMessage(error: unknown, fallback = "درخواست انجام نشد. لطفاً دوباره تلاش کنید.") {
   if (!(error instanceof ApiError)) return error instanceof Error ? error.message : fallback;
   const detail = error.payload?.detail;
-  if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) return detail.map(String).join(" ");
-  if (detail && typeof detail === "object") {
-    return Object.values(detail as Record<string, unknown>)
-      .flatMap((value) => (Array.isArray(value) ? value : [value]))
-      .map(String)
-      .join(" ");
-  }
-  return error.message || fallback;
+  const message = typeof detail === "string" && detail.trim()
+    ? detail
+    : Array.isArray(detail)
+      ? detail.map(String).join(" ")
+      : detail && typeof detail === "object"
+        ? Object.values(detail as Record<string, unknown>)
+          .flatMap((value) => (Array.isArray(value) ? value : [value]))
+          .map(String)
+          .join(" ")
+        : "";
+  // A 429 also carries the server's own wait time; the client uses it to schedule the next attempt
+  // instead of hammering the endpoint that just refused it.
+  if (error.status === 429) return message || STATUS_COPY[429];
+  return message || STATUS_COPY[error.status] || error.message || fallback;
 }
 
 interface ApiRequestOptions extends Omit<RequestInit, "body" | "headers"> {

@@ -9,11 +9,12 @@ import { toStudentDashboardExam } from "@/lib/api/mappers";
 import { PageContainer, PageHeader } from "@/components/layout/page-header";
 import { PageTransition } from "@/components/shared/page-transition";
 import { StatCard } from "@/components/dashboard/stat-card";
+import { ExamCalendar } from "@/components/shared/exam-calendar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuthStore } from "@/lib/state/auth-store";
-import { cn, formatDate, formatDateTime, formatTime, toPersianNumber } from "@/lib/utils";
+import { cn, formatDateTime, formatTime, toPersianNumber } from "@/lib/utils";
 import type { Exam } from "@/lib/types/domain";
 
 const availabilityLabel = {
@@ -54,8 +55,10 @@ export function StudentDashboardWorkspace() {
   const inProgress = useMemo(() => exams.filter((exam) => exam.availability === "in_progress"), [exams]);
   const available = useMemo(() => exams.filter((exam) => exam.availability === "available"), [exams]);
   const upcoming = useMemo(() => exams.filter((exam) => exam.availability === "upcoming").sort((a, b) => a.startAt.localeCompare(b.startAt)), [exams]);
-  const completed = useMemo(() => exams.filter((exam) => exam.availability === "completed").sort((a, b) => (b.attemptId === undefined ? 0 : 1) - (a.attemptId === undefined ? 0 : 1)), [exams]);
-  const passedCount = completed.filter((exam) => exam.resultSummary?.passed === true).length;
+  const finished = useMemo(() => exams.filter((exam) => exam.availability === "completed").sort((a, b) => (b.attemptId === undefined ? 0 : 1) - (a.attemptId === undefined ? 0 : 1)), [exams]);
+  const resultsReady = finished.filter((exam) => exam.resultSummary);
+  const resultsWaiting = finished.filter((exam) => !exam.resultSummary);
+  const passedCount = resultsReady.filter((exam) => exam.resultSummary?.passed === true).length;
   const hero = inProgress[0] ?? available[0];
   const name = user?.fullName.split(" ")[0] || "دانش‌آموز";
 
@@ -63,7 +66,7 @@ export function StudentDashboardWorkspace() {
     <PageHeader eyebrow="فضای یادگیری شما" title={`سلام، ${name} 👋`} description="آزمون‌ها، زمان باقی‌مانده و وضعیت نتیجه مستقیماً از سرویس آموزشی دریافت می‌شود." breadcrumbs={[{ label: "دانش‌آموز" }, { label: "نمای کلی" }]} action={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className={cn("h-4 w-4", loading && "animate-spin")}/>به‌روزرسانی</Button>}/>
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <StatCard icon={FileText} label="آزمون‌های در دسترس" value={toPersianNumber(available.length + inProgress.length)} detail="آمادهٔ شروع یا در جریان" tone="indigo"/>
-      <StatCard icon={CheckCircle2} label="تکمیل‌شده" value={toPersianNumber(completed.length)} detail={passedCount ? `${toPersianNumber(passedCount)} مورد با حکم قبولی` : "تلاش‌های نهایی‌شده"} tone="teal"/>
+      <StatCard icon={CheckCircle2} label="تکمیل‌شده" value={toPersianNumber(finished.length)} detail={passedCount ? `${toPersianNumber(passedCount)} مورد با حکم قبولی` : `${toPersianNumber(resultsWaiting.length)} مورد در انتظار نتیجه`} tone="teal"/>
       <StatCard icon={Clock3} label="در حال پاسخ‌گویی" value={toPersianNumber(inProgress.length)} detail="با زمان در جریان سرور" tone="violet"/>
       <StatCard icon={CalendarDays} label="پیش‌رو" value={toPersianNumber(upcoming.length)} detail="طبق زمان‌بندی معلم" tone="amber"/>
     </div>
@@ -80,14 +83,18 @@ export function StudentDashboardWorkspace() {
 
         {upcoming.length > 0 && <ExamGroup title="آزمون‌های پیش‌رو" description="با رسیدن زمان شروع، همین کارت فعال می‌شود."><div className="grid gap-3">{upcoming.map((exam) => <ExamRow key={exam.id} exam={exam}/>)}</div></ExamGroup>}
 
-        <ExamGroup title="تلاش‌های تکمیل‌شده" description="نمره فقط پس از انتشار نتیجهٔ معلم نمایش داده می‌شود.">
-          {completed.length ? <div className="grid gap-3">{completed.map((exam) => <ExamRow key={exam.id} exam={exam}/>)}</div> : <Card><CardContent className="p-5 text-sm text-muted-foreground">هنوز تلاش نهایی‌شده‌ای ندارید.</CardContent></Card>}
+        <ExamGroup title="نتیجه آماده است" description="این تلاش‌ها نمرهٔ منتشرشده دارند.">
+          {resultsReady.length ? <div className="grid gap-3">{resultsReady.map((exam) => <ExamRow key={exam.id} exam={exam}/>)}</div> : <Card><CardContent className="p-5 text-sm text-muted-foreground">هنوز نتیجهٔ منتشرشده‌ای ندارید.</CardContent></Card>}
+        </ExamGroup>
+
+        <ExamGroup title="در انتظار نتیجه" description="پاسخ‌ها ثبت شده‌اند و منتظر انتشار آموزگار هستند.">
+          {resultsWaiting.length ? <div className="grid gap-3">{resultsWaiting.map((exam) => <ExamRow key={exam.id} exam={exam}/>)}</div> : <Card><CardContent className="p-5 text-sm text-muted-foreground">تلاش بی‌نتیجه‌ای ندارید.</CardContent></Card>}
         </ExamGroup>
       </section>
 
       <aside className="space-y-6">
         <Card><CardHeader><CardTitle>دسترسی امن آزمون</CardTitle><CardDescription>اطلاعات هر آزمون تنها هنگام شروع و از سرور دریافت می‌شود.</CardDescription></CardHeader><CardContent><div className="rounded-2xl bg-primary/5 p-4 text-sm leading-7 text-muted-foreground"><ShieldCheck className="ml-2 inline h-4 w-4 text-emerald-600 align-text-bottom"/>زمان، ترتیب سؤال‌ها و نمرهٔ نهایی در سرور محاسبه می‌شود؛ کلید پاسخ برای دانش‌آموز ارسال نمی‌شود.</div>{refreshedAt && <p className="mt-3 text-[11px] text-muted-foreground">آخرین به‌روزرسانی: {formatDateTime(refreshedAt.toISOString())}</p>}</CardContent></Card>
-        <Card><CardHeader><CardTitle>تقویم آزمون‌ها</CardTitle></CardHeader><CardContent>{upcoming.length ? <div className="space-y-3">{upcoming.slice(0, 4).map((exam) => <div key={exam.id} className="flex items-center gap-3"><div className="rounded-xl bg-violet-500/10 px-2 py-1.5 text-center text-xs font-black text-violet-700 dark:text-violet-300">{formatDate(exam.startAt)}</div><div className="min-w-0"><p className="truncate text-xs font-extrabold">{exam.title}</p><p className="mt-1 text-[11px] text-muted-foreground">{toPersianNumber(exam.settings.durationMinutes)} دقیقه · {toPersianNumber(exam.questionCount)} سؤال</p></div></div>)}</div> : <p className="text-sm text-muted-foreground">رویداد پیش‌رویی ثبت نشده است.</p>}</CardContent></Card>
+        <ExamCalendar exams={[...upcoming, ...available, ...inProgress]} role="student"/>
       </aside>
     </div>
   </PageContainer></PageTransition>;
@@ -133,7 +140,7 @@ function ExamRow({ exam }: { exam: Exam }) {
   const action = exam.availability === "in_progress" ? "ادامهٔ آزمون" : exam.availability === "available" ? "شروع آزمون" : exam.availability === "completed" ? (result ? "مشاهدهٔ نتیجه" : "وضعیت تلاش") : "مشاهدهٔ جزئیات";
   return <Card><CardContent className="flex flex-wrap items-center gap-4 p-4">
     <div className="min-w-0 flex-1">
-      <div className="flex flex-wrap items-center gap-2"><Badge variant={meta.variant}>{meta.label}</Badge><span className="text-[11px] font-bold text-muted-foreground">{exam.subject}</span></div>
+      <div className="flex flex-wrap items-center gap-2"><Badge variant={meta.variant}>{meta.label}</Badge><span className="text-[11px] font-bold text-muted-foreground">{exam.subject}{exam.teacherName ? ` · ${exam.teacherName}` : ""}</span></div>
       <p className="mt-2 truncate text-sm font-extrabold">{exam.title}</p>
       <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
         <span>{exam.availability === "upcoming" ? formatDateTime(exam.startAt) : `${toPersianNumber(exam.settings.durationMinutes)} دقیقه`}</span>

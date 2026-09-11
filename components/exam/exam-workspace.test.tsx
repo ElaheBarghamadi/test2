@@ -6,12 +6,18 @@ import type { Exam, ExamAttempt } from "@/lib/types/domain";
 
 const submit = vi.fn();
 const detail = vi.fn();
+const heartbeat = vi.fn();
+const claimSession = vi.fn();
+const recordSignal = vi.fn();
 const push = vi.fn();
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace: vi.fn(), back: vi.fn() }) }));
 vi.mock("@/lib/api/attempts", () => ({
   attemptsApi: {
     detail: (...args: unknown[]) => detail(...args),
+    heartbeat: (...args: unknown[]) => heartbeat(...args),
+    claimSession: (...args: unknown[]) => claimSession(...args),
+    recordSignal: (...args: unknown[]) => recordSignal(...args),
     saveAnswer: vi.fn().mockResolvedValue({}),
     saveAnswers: vi.fn().mockResolvedValue([]),
     setFlag: vi.fn().mockResolvedValue({}),
@@ -28,7 +34,7 @@ const exam: Exam = {
   schedule: { startAt: "2026-03-20T05:30:00Z", endAt: "2026-03-20T07:30:00Z", timezone: "Asia/Tehran" },
   questionCount: 1, participantCount: 0, teacherName: "", accent: "indigo",
   createdAt: "2026-03-01T05:30:00Z", updatedAt: "2026-03-01T05:30:00Z",
-  settings: { durationMinutes: 45, totalMarks: 2, allowBackNavigation: true, randomizeQuestions: false, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 2, passingPercentage: 50 },
+  settings: { durationMinutes: 45, totalMarks: 2, allowBackNavigation: true, randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 2, passingPercentage: 50 },
   questions: [{ id: "q1", order: 1, stem: "کدام‌یک واحد توان است؟", type: "single_choice", points: 2, required: true, options: [{ id: "o1", label: "وات", value: "o1" }, { id: "o2", label: "ژول", value: "o2" }] }],
 };
 
@@ -46,6 +52,10 @@ function attemptFixture(overrides: Partial<ExamAttempt> = {}): ExamAttempt {
 beforeEach(() => {
   submit.mockReset().mockResolvedValue({ attempt: { id: "attempt-1", status: "submitted" }, result_available: false });
   detail.mockReset();
+  // Default clock answer: "you are out of time", which is what the expiry tests are about.
+  heartbeat.mockReset().mockResolvedValue({ server_time: "2026-03-20T06:15:00Z", expires_at: null, remaining_seconds: 0, status: "expired", answer_revision: 4, session_locked_by_other: false, question_count: 1 });
+  claimSession.mockReset();
+  recordSignal.mockReset().mockResolvedValue(undefined);
   push.mockReset();
 });
 
@@ -68,12 +78,14 @@ describe("ExamWorkspace session handling", () => {
 
     render(<ExamWorkspace exam={exam}/>);
 
-    await waitFor(() => expect(submit).toHaveBeenCalledWith("attempt-1"));
+    // Submit carries the tab identity so the server can attribute the finalization, plus the trigger.
+    await waitFor(() => expect(submit).toHaveBeenCalledWith("attempt-1", expect.objectContaining({ trigger: "auto" })));
     await waitFor(() => expect(push).toHaveBeenCalledWith("/student/results/attempt-1"));
   });
 
   it("keeps writing when the teacher extended the exam while the clock ran out", async () => {
     useExamAttemptStore.setState({ attempt: attemptFixture() });
+    heartbeat.mockResolvedValue({ server_time: "2026-03-20T06:14:00Z", expires_at: "2026-03-20T06:24:00Z", remaining_seconds: 600, status: "in_progress", answer_revision: 4, session_locked_by_other: false, question_count: 1 });
     detail.mockResolvedValue({
       id: "attempt-1", attempt_number: 1, attempt_limit: 2, status: "in_progress", started_at: "2026-03-20T05:30:00Z",
       submitted_at: null, last_activity_at: "2026-03-20T06:14:00Z", server_time: "2026-03-20T06:14:00Z",
@@ -85,7 +97,7 @@ describe("ExamWorkspace session handling", () => {
 
     render(<ExamWorkspace exam={exam}/>);
 
-    await waitFor(() => expect(detail).toHaveBeenCalledWith("attempt-1"));
+    await waitFor(() => expect(heartbeat).toHaveBeenCalled());
     expect(submit).not.toHaveBeenCalled();
     // The server clock wins: the session is live again with the granted minutes.
     await waitFor(() => expect(useExamAttemptStore.getState().attempt?.status).toBe("in_progress"));
@@ -95,9 +107,10 @@ describe("ExamWorkspace session handling", () => {
   it("never treats a failed clock read as the end of the exam", async () => {
     useExamAttemptStore.setState({ attempt: attemptFixture({ connectionStatus: "offline" }) });
     detail.mockRejectedValue(new Error("offline"));
+    heartbeat.mockRejectedValue(new Error("offline"));
 
     render(<ExamWorkspace exam={exam}/>);
-    await waitFor(() => expect(detail).toHaveBeenCalled());
+    await waitFor(() => expect(heartbeat).toHaveBeenCalled());
 
     expect(submit).not.toHaveBeenCalled();
     expect(push).not.toHaveBeenCalled();
@@ -106,6 +119,8 @@ describe("ExamWorkspace session handling", () => {
   it("warns before closing the tab mid-exam and stays silent once time is up", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     useExamAttemptStore.setState({ attempt: attemptFixture({ status: "in_progress", remainingSeconds: 300 }) });
+    // The server agrees the window is still open, so the session keeps reporting activity signals.
+    heartbeat.mockResolvedValue({ server_time: "2026-03-20T05:35:00Z", expires_at: "2026-03-20T06:15:00Z", remaining_seconds: 295, status: "in_progress", answer_revision: 0, session_locked_by_other: false, question_count: 1 });
     detail.mockResolvedValue({
       id: "attempt-1", attempt_number: 1, attempt_limit: 2, status: "in_progress", started_at: "2026-03-20T05:30:00Z",
       submitted_at: null, last_activity_at: "2026-03-20T05:30:00Z", server_time: "2026-03-20T05:30:00Z",
@@ -119,6 +134,14 @@ describe("ExamWorkspace session handling", () => {
     window.dispatchEvent(duringExam);
     expect(duringExam.defaultPrevented).toBe(true);
 
+    // A tab switch is reported for the teacher's activity log, tagged with this tab's session id.
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(recordSignal).toHaveBeenCalledWith("attempt-1", "tab_hidden", expect.objectContaining({ examSession: expect.any(String) })));
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(recordSignal).toHaveBeenCalledWith("attempt-1", "tab_visible", expect.objectContaining({ examSession: expect.any(String) })));
+
     unmount();
     useExamAttemptStore.setState({ attempt: attemptFixture({ status: "submitted" }) });
     render(<ExamWorkspace exam={exam}/>);
@@ -130,7 +153,7 @@ describe("ExamWorkspace session handling", () => {
 
   it("shows which attempt of the allowed budget the student is writing", () => {
     useExamAttemptStore.setState({ attempt: attemptFixture({ status: "in_progress", remainingSeconds: 300 }) });
-    detail.mockResolvedValue({ id: "attempt-1", status: "in_progress" });
+    heartbeat.mockResolvedValue({ server_time: "2026-03-20T05:30:00Z", expires_at: "2026-03-20T06:15:00Z", remaining_seconds: 300, status: "in_progress", answer_revision: 0, session_locked_by_other: false, question_count: 1 });
     render(<ExamWorkspace exam={exam}/>);
     expect(screen.getByText(/تلاش ۱ از ۲/)).toBeTruthy();
   });

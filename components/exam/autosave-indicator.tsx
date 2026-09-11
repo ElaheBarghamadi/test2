@@ -9,4 +9,4 @@ const statusCopy: Record<SaveStatus, { label: string; icon: typeof CheckCircle2;
   saved_locally: { label: "محلی ذخیره شد", icon: CloudOff, style: "text-amber-700 dark:text-amber-400" },
   error: { label: "ذخیره انجام نشد", icon: TriangleAlert, style: "text-destructive" },
 };
-export function AutosaveIndicator({ status, className }: { status: SaveStatus; className?: string }) { const copy = statusCopy[status]; const Icon = copy.icon; return <span className={cn("inline-flex items-center gap-1.5 text-[11px] font-bold", copy.style, className)}><Icon className={cn("h-3.5 w-3.5", status === "saving" && "animate-spin")}/>{copy.label}</span>; }
+export function AutosaveIndicator({ status, className }: { status: SaveStatus; className?: string }) { const copy = statusCopy[status]; const Icon = copy.icon; return <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 text-[11px] font-bold", copy.style, className)}><Icon className={cn("h-3.5 w-3.5", status === "saving" && "animate-spin")}/>{copy.label}</span>; }

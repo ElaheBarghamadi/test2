@@ -12,6 +12,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Dialog } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { questionIssues } from "@/components/teacher/question-builder";
+import { apiErrorMessage } from "@/lib/api/client";
 import { useTeacherExams } from "@/hooks/use-teacher-exams";
 import { useToastStore } from "@/lib/state/toast-store";
 import { formatDateTime, toPersianNumber } from "@/lib/utils";
@@ -26,12 +27,14 @@ const statusMap: Record<Exam["status"], [string, "success" | "default" | "warnin
 const typeLabel: Record<string, string> = { single_choice: "چندگزینه‌ای", multiple_choice: "چندپاسخی", true_false: "درست/نادرست", short_answer: "کوتاه", essay: "تشریحی" };
 const EXTENSIONS = [5, 10, 15, 30];
 
+function attemptCountOf(exam: Exam) { return exam.attemptCount ?? 0; }
+
 export function TeacherExamDetailWorkspace({ examId }: { examId: string }) {
   const { exams, loading, detailLoadingId, initialized, duplicateExam, completeExam, archiveExam, restoreExam, startExam, extendExam, error, clearError, loadExam } = useTeacherExams();
   const toast = useToastStore((state) => state.push);
   const [previewOpen, setPreviewOpen] = useState(false); const [completeOpen, setCompleteOpen] = useState(false); const [archiveOpen, setArchiveOpen] = useState(false);
   const [startOpen, setStartOpen] = useState(false); const [extendOpen, setExtendOpen] = useState(false); const [previewIndex, setPreviewIndex] = useState(0);
-  const [busy, setBusy] = useState<null | "start" | "extend">(null);
+  const [busy, setBusy] = useState<null | "start" | "extend" | "complete" | "archive">(null);
   useEffect(() => { void loadExam(examId); }, [examId, loadExam]);
   const exam = useMemo(() => exams.find((item) => item.id === examId), [exams, examId]);
   const blocking = useMemo(() => (exam ? exam.questions.map((question, index) => ({ index, issues: questionIssues(question) })).filter((item) => item.issues.length) : []), [exam]);
@@ -51,8 +54,33 @@ export function TeacherExamDetailWorkspace({ examId }: { examId: string }) {
     } finally { setBusy(null); }
   }
   async function duplicate() { const copy = await duplicateExam(currentExam.id); if (copy) toast({ title: "کپی آزمون ساخته شد", description: "نسخهٔ جدید به‌صورت پیش‌نویس آماده است.", variant: "success" }); }
-  async function complete() { await completeExam(currentExam.id); setCompleteOpen(false); toast({ title: "آزمون پایان یافت", description: "دانش‌آموزان دیگر نمی‌توانند تلاش جدیدی شروع کنند.", variant: "success" }); }
-  async function archive() { await archiveExam(currentExam.id); setArchiveOpen(false); toast({ title: "آزمون بایگانی شد", description: "برای بازیابی، فیلتر بایگانی‌شده را انتخاب کنید.", variant: "success" }); }
+  // Ending is now consequential for students mid-answer, so both actions surface the server's reason
+  // instead of a silent success, and tell the teacher exactly what closes.
+  async function complete() {
+    setBusy("complete");
+    const before = attemptCountOf(currentExam);
+    try {
+      await completeExam(currentExam.id);
+      setCompleteOpen(false);
+      toast({ title: "آزمون پایان یافت", description: before ? `${toPersianNumber(before)} تلاش ثبت‌شده محفوظ است و نشست‌های باز همین حالا نمره گرفتند.` : "دانش‌آموزان دیگر نمی‌توانند تلاش جدیدی شروع کنند.", variant: "success" });
+    } catch (reason) {
+      toast({ title: "پایان آزمون انجام نشد", description: apiErrorMessage(reason), variant: "error" });
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function archive() {
+    setBusy("archive");
+    try {
+      await archiveExam(currentExam.id);
+      setArchiveOpen(false);
+      toast({ title: "آزمون بایگانی شد", description: "پاسخ‌ها و نتایج حفظ شده‌اند؛ برای بازیابی، فیلتر بایگانی‌شده را انتخاب کنید.", variant: "success" });
+    } catch (reason) {
+      toast({ title: "بایگانی آزمون انجام نشد", description: apiErrorMessage(reason), variant: "error" });
+    } finally {
+      setBusy(null);
+    }
+  }
   async function restore() { await restoreExam(currentExam.id); toast({ title: "آزمون بازیابی شد", variant: "success" }); }
 
   return <><div className="grid gap-6 xl:grid-cols-[1.24fr_.76fr]"><section className="space-y-6">
@@ -111,8 +139,8 @@ export function TeacherExamDetailWorkspace({ examId }: { examId: string }) {
 
   <Dialog open={extendOpen} onClose={() => busy === null && setExtendOpen(false)} title="تمدید زمان آزمون" description={`مدت فعلی ${toPersianNumber(exam.settings.durationMinutes)} دقیقه است. تمدید، پنجرهٔ پاسخ‌گویی تلاش‌های در جریان را هم باز می‌کند.`} size="sm"><div className="mt-4 grid grid-cols-4 gap-2">{EXTENSIONS.map((minutes) => <Button key={minutes} variant="outline" onClick={() => void run("extend", minutes)} disabled={busy === "extend"}>+{toPersianNumber(minutes)}</Button>)}</div><div className="mt-5 flex justify-end"><Button variant="ghost" onClick={() => setExtendOpen(false)}>بستن</Button></div></Dialog>
 
-  <Dialog open={completeOpen} onClose={() => setCompleteOpen(false)} title="پایان آزمون؟" description="دسترسی دانش‌آموزان برای شروع آزمون بسته می‌شود. این اقدام قابل بازگشت نیست." size="sm"><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={() => setCompleteOpen(false)}>انصراف</Button><Button data-autofocus onClick={() => void complete()}><CheckCircle2 className="h-4 w-4"/>تأیید پایان آزمون</Button></div></Dialog>
-  <Dialog open={archiveOpen} onClose={() => setArchiveOpen(false)} title="بایگانی آزمون؟" description="این آزمون از فهرست‌های فعال پنهان می‌شود، اما سؤال‌ها و نتایج آن حفظ خواهند شد." size="sm"><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={() => setArchiveOpen(false)}>انصراف</Button><Button variant="destructive" data-autofocus onClick={() => void archive()}><Archive className="h-4 w-4"/>تأیید بایگانی</Button></div></Dialog>
+  <Dialog open={completeOpen} onClose={() => setCompleteOpen(false)} title="پایان آزمون؟" description={`دسترسی شروع آزمون بسته می‌شود${attemptCountOf(currentExam) ? ` و ${toPersianNumber(attemptCountOf(currentExam))} تلاش ثبت‌شده دست‌نخورده می‌ماند` : ""}. نشست‌های در جریان همین حالا بسته می‌شوند و پاسخ‌های ذخیره‌شدهٔ آن‌ها نمره می‌گیرد؛ برای ادامهٔ دانش‌آموزی که در حال نوشتن است، «تمدید زمان» گزینهٔ کم‌خطرتری است.`} size="sm"><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={() => setCompleteOpen(false)}>انصراف</Button><Button data-autofocus onClick={() => void complete()} disabled={busy === "complete"}>{busy === "complete" ? "در حال پایان…" : "تأیید پایان آزمون"}<CheckCircle2 className="h-4 w-4"/></Button></div></Dialog>
+  <Dialog open={archiveOpen} onClose={() => setArchiveOpen(false)} title="بایگانی آزمون؟" description={`این آزمون از فهرست‌های فعال پنهان می‌شود؛ سؤال‌ها و نتایج حفظ می‌شوند.${currentExam.status === "active" ? " نشست‌های در جریان بسته و نمره می‌گیرند." : ""} ${toPersianNumber(attemptCountOf(currentExam))} تلاش ثبت‌شده در این آزمون وجود دارد.`} size="sm"><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={() => setArchiveOpen(false)}>انصراف</Button><Button variant="destructive" data-autofocus onClick={() => void archive()} disabled={busy === "archive"}>{busy === "archive" ? "در حال بایگانی…" : "تأیید بایگانی"}<Archive className="h-4 w-4"/></Button></div></Dialog>
   </>;
 }
 function DetailSkeleton() { return <div className="grid gap-6 xl:grid-cols-[1.24fr_.76fr]"><Card className="p-6"><Skeleton className="h-7 w-1/3"/><Skeleton className="mt-8 h-32"/><Skeleton className="mt-4 h-24"/></Card><Card className="p-6"><Skeleton className="h-7 w-1/2"/><Skeleton className="mt-8 h-48"/></Card></div>; }

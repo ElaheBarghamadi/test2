@@ -25,6 +25,8 @@ const OTHER_ID = "9b8c7d6e-5f4a-4321-9876-ba9876543210";
 const settings: ApiExamSettingsDto = {
   allow_previous_questions: true,
   randomize_questions: false,
+  randomize_options: false,
+  allow_unanswered: true,
   result_visibility: "pending",
   show_correct_answers: false,
   max_attempts: 2,
@@ -74,6 +76,11 @@ describe("toTeacherExam", () => {
     expect(exam.questions).toEqual([]);
   });
 
+  it("carries the two new rules through the read path", () => {
+    const exam = toTeacherExam(listDto({ settings: { ...settings, randomize_options: true, allow_unanswered: false } }));
+    expect(exam.settings).toMatchObject({ randomizeOptions: true, allowUnanswered: false });
+  });
+
   it("keeps datetime-local values intact for the edit form", () => {
     expect(toTeacherExam(listDto()).schedule).toMatchObject({ startAt: "2026-03-20T05:30", endAt: "2026-03-20T07:30" });
   });
@@ -91,6 +98,12 @@ describe("toTeacherExam", () => {
   it("falls back to the question marks when no total was returned at all", () => {
     const dto = { ...detailDto([choiceQuestion({ marks: 3 }), choiceQuestion({ id: OTHER_ID, marks: 2, order: 2 })]), total_marks: null } as unknown as ApiTeacherExamDto;
     expect(toTeacherExam(dto).settings.totalMarks).toBe(5);
+  });
+
+  it("treats a missing allow_unanswered as the permissive server default", () => {
+    const legacy = { ...listDto(), settings: { ...settings, allow_unanswered: undefined } } as unknown as ApiTeacherExamListDto;
+    expect(toTeacherExam(legacy).settings.allowUnanswered).toBe(true);
+    expect(toTeacherExam(legacy).settings.randomizeOptions).toBe(false);
   });
 });
 
@@ -148,7 +161,7 @@ describe("toExamWritePayload", () => {
   const draft: ExamDraft = {
     title: "  آزمون شیمی  ", description: "", subject: "شیمی", grade: "۱۱", className: "۲", instructions: "",
     schedule: { startAt: "2026-03-20T09:00", endAt: "2026-03-20T11:00", timezone: "Asia/Tehran" },
-    settings: { durationMinutes: 90, totalMarks: 20, allowBackNavigation: false, randomizeQuestions: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: true, attemptLimit: 3, passingPercentage: 45 },
+    settings: { durationMinutes: 90, totalMarks: 20, allowBackNavigation: false, randomizeQuestions: true, randomizeOptions: true, allowUnanswered: false, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: true, attemptLimit: 3, passingPercentage: 45 },
     questions: [],
   };
 
@@ -166,6 +179,8 @@ describe("toExamWritePayload", () => {
     expect(payload.settings).toEqual({
       allow_previous_questions: false,
       randomize_questions: true,
+      randomize_options: true,
+      allow_unanswered: false,
       result_visibility: "pending",
       show_correct_answers: true,
       max_attempts: 3,
@@ -179,7 +194,7 @@ describe("toStudentDashboardExam", () => {
     return {
       id: SERVER_ID, title: "آزمون زیست", description: "فصل ۲", subject: "زیست", grade: "۱۲", class_name: "۳",
       duration_minutes: 45, total_marks: "12.00", start_at: "2026-03-20T05:30:00Z", end_at: "2026-03-20T07:30:00Z",
-      question_count: 6, max_attempts: 2, attempts_used: 1, passing_percentage: 50, result_visibility: "pending",
+      question_count: 6, max_attempts: 2, attempts_used: 1, passing_percentage: 50, result_visibility: "pending", allow_unanswered: true, teacher_name: "الاهه برغمدی",
       availability: "in_progress", attempt: { id: OTHER_ID, status: "in_progress", started_at: "2026-03-20T05:30:00Z", submitted_at: null, attempt_number: 1, remaining_seconds: 1234, result: null },
       ...overrides,
     };
@@ -187,7 +202,7 @@ describe("toStudentDashboardExam", () => {
 
   it("exposes the live attempt so the dashboard can offer a real resume", () => {
     const exam = toStudentDashboardExam(availableDto());
-    expect(exam).toMatchObject({ availability: "in_progress", attemptId: OTHER_ID, attemptNumber: 1, remainingSeconds: 1234, attemptsUsed: 1, questionCount: 6 });
+    expect(exam).toMatchObject({ availability: "in_progress", attemptId: OTHER_ID, attemptNumber: 1, remainingSeconds: 1234, attemptsUsed: 1, questionCount: 6, teacherName: "الاهه برغمدی" });
     expect(exam.settings).toMatchObject({ attemptLimit: 2, totalMarks: 12, passingPercentage: 50, resultVisibility: "pending" });
     expect(exam.resultSummary).toBeNull();
   });
@@ -216,14 +231,14 @@ describe("toStudentDashboardExam", () => {
 describe("toStudentAttempt", () => {
   function attemptDto(overrides: Partial<ApiAttemptDto> = {}): ApiAttemptDto {
     return {
-      id: OTHER_ID, attempt_number: 2, attempt_limit: 3, status: "in_progress",
+      id: OTHER_ID, attempt_number: 2, attempt_limit: 3, answer_revision: 7, status: "in_progress",
       started_at: "2026-03-20T05:30:00Z", submitted_at: null, last_activity_at: "2026-03-20T05:35:00Z",
       server_time: "2026-03-20T05:36:00Z", expires_at: "2026-03-20T06:15:00Z", remaining_seconds: 2340,
       exam: {
         id: SERVER_ID, title: "آزمون ریاضی", description: "", subject: "ریاضی", grade: "۱۲", class_name: "۱",
         instructions: "دقت کنید", duration_minutes: 45, start_at: "2026-03-20T05:30:00Z", end_at: "2026-03-20T06:15:00Z",
         total_marks: "6.00", question_count: 3, passing_percentage: "55.00", result_visibility: "immediate",
-        navigation: { allow_previous_questions: false, randomize_questions: true },
+        navigation: { allow_previous_questions: false, randomize_questions: true, allow_unanswered: false },
       },
       questions: [
         { id: "q1", type: "multiple_choice", text: "یک گزینه", instructions: "", marks: 2, order: 1, options: [{ id: SERVER_ID, text: "الف", order: 1 }, { id: OTHER_ID, text: "ب", order: 2 }] },
@@ -251,8 +266,8 @@ describe("toStudentAttempt", () => {
 
   it("carries the attempt budget and the server countdown into the session", () => {
     const { attempt, exam } = toStudentAttempt(attemptDto());
-    expect(attempt).toMatchObject({ id: OTHER_ID, attemptNumber: 2, attemptLimit: 3, remainingSeconds: 2340, saveStatus: "saved", answerRevision: 0 });
-    expect(exam.settings).toMatchObject({ attemptLimit: 3, passingPercentage: 55, totalMarks: 6, resultVisibility: "immediate", allowBackNavigation: false, randomizeQuestions: true });
+    expect(attempt).toMatchObject({ id: OTHER_ID, attemptNumber: 2, attemptLimit: 3, remainingSeconds: 2340, saveStatus: "saved", answerRevision: 7, serverRevision: 7, sessionConflict: null });
+    expect(exam.settings).toMatchObject({ attemptLimit: 3, passingPercentage: 55, totalMarks: 6, resultVisibility: "immediate", allowBackNavigation: false, randomizeQuestions: true, allowUnanswered: false, randomizeOptions: false });
     expect(exam.attemptId).toBe(OTHER_ID);
     expect(exam.attemptNumber).toBe(2);
     expect(attempt.answers.q3.value).toBe(true);
@@ -265,16 +280,16 @@ describe("toStudentAttempt", () => {
 
 describe("toStudentResult", () => {
   const { attempt, exam } = toStudentAttempt({
-    id: OTHER_ID, attempt_number: 1, attempt_limit: 1, status: "submitted", started_at: "2026-03-20T05:30:00Z",
+    id: OTHER_ID, attempt_number: 1, attempt_limit: 1, answer_revision: 3, status: "submitted", started_at: "2026-03-20T05:30:00Z",
     submitted_at: "2026-03-20T06:00:00Z", last_activity_at: "2026-03-20T06:00:00Z", server_time: "2026-03-20T06:00:00Z",
     expires_at: "2026-03-20T06:15:00Z", remaining_seconds: 0,
-    exam: { id: SERVER_ID, title: "آزمون", description: "", subject: "", grade: "", class_name: "", instructions: "", duration_minutes: 45, start_at: null, end_at: null, total_marks: "10.00", question_count: 0, passing_percentage: 0, result_visibility: "pending", navigation: { allow_previous_questions: true, randomize_questions: false } },
+    exam: { id: SERVER_ID, title: "آزمون", description: "", subject: "", grade: "", class_name: "", instructions: "", duration_minutes: 45, start_at: null, end_at: null, total_marks: "10.00", question_count: 0, passing_percentage: 0, result_visibility: "pending", navigation: { allow_previous_questions: true, randomize_questions: false, allow_unanswered: true } },
     questions: [], answers: [],
   });
 
   const base: ApiStudentResultDto = {
     id: "r1", status: "published", score: "6.00", percentage: 60, maximum_score: 10, correct_count: 3,
-    incorrect_count: 1, unanswered_count: 1, pending_manual_grading_count: 0, passing_percentage: 55,
+    incorrect_count: 1, unanswered_count: 1, pending_manual_grading_count: 0, manual_grading_count: 0, revised_at: null, passing_percentage: 55,
     passed: true, attempt_number: 1, submitted_at: "2026-03-20T06:00:00Z", is_final: true, feedback: "خوب بود", published_at: null,
   };
 

@@ -12,7 +12,7 @@ function previewExam(overrides: Partial<Exam> = {}): Exam {
     schedule: { startAt: "2026-03-20T05:30:00Z", endAt: "2026-03-20T07:30:00Z", timezone: "Asia/Tehran" },
     questionCount: 5, participantCount: 0, teacherName: "الاهه برغمدی", accent: "indigo",
     createdAt: "2026-03-01T05:30:00Z", updatedAt: "2026-03-01T05:30:00Z",
-    settings: { durationMinutes: 45, totalMarks: 10, allowBackNavigation: true, randomizeQuestions: false, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 2, passingPercentage: 50 },
+    settings: { durationMinutes: 45, totalMarks: 10, allowBackNavigation: true, randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 2, passingPercentage: 50 },
     questions: [], availability: "available", attemptsUsed: 0,
     ...overrides,
   };

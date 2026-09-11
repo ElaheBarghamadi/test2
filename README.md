@@ -134,11 +134,27 @@ Read [`backend/docs/api-v1.md`](backend/docs/api-v1.md) for the actual endpoints
 
 ## Teacher workflow
 
-The teacher workspace supports server-backed search/filter/sort, duplication/archive/restore, a five-step exam builder, typed question editing, scheduling, draft save/publish, participant reporting, manual text grading, controlled result publication, and CSV export. Question authoring is full CRUD: options can be added, re-worded, duplicated, reordered, and removed (the builder offers between two and ten rows, matching the server's minimum of two), each type marks its own answer key, short answers keep a list of accepted responses with case sensitivity, and every rule the publish gate enforces is previewed inline before saving. `start now` and `extend time` live on the exam detail screen and refuse themselves with the server's reason when the status or the clock does not allow it, and the detail screen states plainly when an exam is live and how many attempts are already recorded. It keeps the Persian/RTL design system and discriminated `Question` union intact.
+The teacher workspace supports server-backed search/filter/sort, duplication/archive/restore, a five-step exam builder, typed question editing, scheduling, draft save/publish, participant reporting, manual text grading, controlled result publication, and CSV export. Question authoring is full CRUD: options can be added, re-worded, duplicated, reordered, and removed (the builder offers between two and ten rows, matching the server's minimum of two), each type marks its own answer key, short answers keep a list of accepted responses with case sensitivity, and every rule the publish gate enforces is previewed inline before saving. `start now` and `extend time` live on the exam detail screen and refuse themselves with the server's reason when the status or the clock does not allow it, and the detail screen states plainly when an exam is live and how many attempts are already recorded. It keeps the Persian/RTL design system and discriminated `Question` union intact. A separate question bank searches every question the teacher owns (text, type, difficulty, tag, archived state), shows where each one is used, and inserts copies of the selected rows into another exam in one action — copying, never sharing, so no live answer sheet can change under a class. The results screen adds a grading queue ordered by progress (`17 / 24 graded`), a per-row verdict column against the exam's pass mark, and a session-signals panel that reports what the platform observed without treating it as proof.
 
 ## Student exam workflow
 
-The student space is driven by server state end to end: the dashboard groups exams into ready/upcoming/in-progress/completed with the real remaining time, the start screen states the marks, the pass mark, the attempt budget, and the release policy before the clock begins, and the session itself autosaves each answer, keeps flags, survives a dropped connection by queueing writes, and re-reads the deadline from the server every minute and on tab focus so a teacher extension cannot be missed. When the countdown reaches zero the session confirms the deadline with the server, flushes queued answers, and submits itself; leaving mid-exam asks for confirmation first. Results show the published score, the pass verdict, and whether any answer still awaits manual grading.
+The student space is driven by server state end to end: the dashboard groups exams into ready/upcoming/in-progress/completed with the real remaining time, the start screen states the marks, the pass mark, the attempt budget, and the release policy before the clock begins, and the session itself autosaves each answer, keeps flags, survives a dropped connection by queueing writes, and re-reads the deadline from the server every minute and on tab focus so a teacher extension cannot be missed. When the countdown reaches zero the session confirms the deadline with the server, flushes queued answers, and submits itself; leaving mid-exam asks for confirmation first. Results show the published score, the pass verdict, and whether any answer still awaits manual grading. A second browser window can read but not write, so a duplicated tab cannot clobber answers, and `ادامه در این پنجره` moves the attempt deliberately. A calendar of the school's own month (Persian calendar via `Intl`, keyed to `Asia/Tehran`) and an in-app notification bell sit on both dashboards.
+
+## Reliability model (read this before changing the exam engine)
+
+- The server owns every exam-critical value: status, start/end window, remaining time, attempt state,
+  submission, grading, results and the pass/fail verdict. The client counts down locally but re-reads the
+  deadline from `POST /api/v1/student/attempts/{id}/heartbeat/` every minute and on tab focus.
+- An attempt's deadline is **snapshotted** when it starts. Editing `duration_minutes` mid-exam must not
+  change a running student's window; only `extend` does, explicitly.
+- Answers are guarded, not merged: `X-Exam-Revision` (refuses an out-of-date write and returns the current
+  revision so the client can re-base) and `X-Exam-Session` (one window writes at a time; a second one reads
+  and can take over deliberately). Both headers are optional, so an older client is never locked out.
+- Teacher content edits are non-destructive by construction: option rows keep their primary keys, removing
+  an answered option or deleting/re-typing an answered question is refused, and re-grading never
+  un-publishes a result.
+- `manage.py close_overdue_exams` is the scheduler-free way to end exams whose window has passed; the
+  teacher exam list runs the same idempotent transition for its own scope.
 
 ## Tests
 
@@ -148,5 +164,12 @@ npm test          # Vitest + React Testing Library (jsdom) for the frontend
 
 ```bash
 cd backend
+./.venv/bin/python manage.py migrate     # required after pulling: new constraints and columns
 ./.venv/bin/python manage.py test        # needs DJANGO_SECRET_KEY in the environment
 ```
+
+Set `DJANGO_SECRET_KEY`, and outside local development also `DJANGO_DEBUG=false`,
+`DJANGO_ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, a real `EMAIL_*` configuration, and optionally the
+`DJANGO_THROTTLE_*` rate overrides (see `backend/docs/api-v1.md`). `manage.py close_overdue_exams` ends
+exams whose window has passed and is safe to run from cron, though the teacher list already reconciles
+its own scope lazily.

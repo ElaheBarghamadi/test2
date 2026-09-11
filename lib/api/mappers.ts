@@ -7,12 +7,13 @@ import type {
   ApiStudentQuestionDto,
   ApiQuestionWritePayload,
   ApiRole,
+  ApiNotificationPageDto,
   ApiStudentResultDto,
   ApiTeacherExamDto,
   ApiTeacherExamListDto,
   ApiUserDto,
 } from "@/lib/api/dtos";
-import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamDraft, ExamResult, Question, Role, User } from "@/lib/types/domain";
+import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamDraft, ExamResult, NotificationItem, Question, Role, User } from "@/lib/types/domain";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Only a real server UUID may be echoed back as an option id; rows the builder has not saved yet must be created. */
@@ -20,6 +21,14 @@ const existingId = (value: string) => (UUID_PATTERN.test(value) ? value : undefi
 const accentFor = (id: string): Exam["accent"] => ["indigo", "violet", "teal", "amber"][id.charCodeAt(0) % 4] as Exam["accent"];
 const number = (value: number | string | null | undefined, fallback = 0) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
 const isoOrNow = (value: string | null | undefined) => value || new Date().toISOString();
+
+/** The in-app bell: a thin, flat DTO, mapped here so the store never reads snake_case. */
+export function toNotificationPage(dto: ApiNotificationPageDto): { unreadCount: number; results: NotificationItem[] } {
+  return {
+    unreadCount: dto.unread_count,
+    results: dto.results.map((row) => ({ id: row.id, kind: row.kind, title: row.title, body: row.body, link: row.link ?? "", isRead: row.is_read, createdAt: row.created_at })),
+  };
+}
 
 export function toUser(dto: ApiUserDto): User {
   const fullName = dto.full_name?.trim() || `${dto.first_name} ${dto.last_name}`.trim() || dto.email;
@@ -35,7 +44,12 @@ function apiVisibility(value: Exam["settings"]["resultVisibility"]): ApiExamSett
 
 /** Teacher mapper may include correct answers because it is used only in teacher-owned views. */
 export function toTeacherQuestion(dto: ApiQuestionDto): Question {
-  const base = { id: dto.id, order: dto.order, stem: dto.text, helpText: dto.instructions || undefined, points: number(dto.marks), explanation: dto.explanation || undefined };
+  const base = {
+    id: dto.id, order: dto.order, stem: dto.text, helpText: dto.instructions || undefined, points: number(dto.marks), explanation: dto.explanation || undefined,
+    difficulty: dto.difficulty ?? "medium", tags: (dto.tags ?? []).map((tag) => tag.name), isArchived: dto.is_archived === true,
+    usageCount: dto.usage_count ?? 0, answeredCount: dto.answered_count ?? 0, copiedFromId: dto.copied_from ?? null,
+    examId: dto.exam, examTitle: dto.exam_title, examStatus: dto.exam_status,
+  };
   const options = (dto.options || []).map((option) => ({ id: option.id, label: option.text, value: option.id, isCorrect: option.is_correct }));
   const config = dto.configuration || {};
   switch (dto.type) {
@@ -75,6 +89,9 @@ function toExamSettings(dto: ApiExamSettingsDto, totalMarks = 0): Exam["settings
     totalMarks,
     allowBackNavigation: dto.allow_previous_questions,
     randomizeQuestions: dto.randomize_questions,
+    randomizeOptions: dto.randomize_options === true,
+    // Absent on a payload from before the rule existed; the server default is permissive.
+    allowUnanswered: dto.allow_unanswered !== false,
     showResultImmediately: dto.result_visibility === "immediate",
     resultVisibility: frontendVisibility(dto.result_visibility),
     showCorrectAnswers: dto.show_correct_answers,
@@ -129,6 +146,8 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
       randomize_questions: draft.settings.randomizeQuestions,
       result_visibility: apiVisibility(draft.settings.resultVisibility),
       show_correct_answers: draft.settings.showCorrectAnswers,
+      randomize_options: draft.settings.randomizeOptions,
+      allow_unanswered: draft.settings.allowUnanswered,
       max_attempts: draft.settings.attemptLimit,
       passing_percentage: draft.settings.passingPercentage,
     },
@@ -136,7 +155,13 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
 }
 
 export function toQuestionWritePayload(question: Question): ApiQuestionWritePayload {
-  const base = { text: question.stem.trim(), instructions: question.helpText?.trim() || "", marks: question.points, explanation: question.explanation?.trim() || "" };
+  const base = {
+    text: question.stem.trim(), instructions: question.helpText?.trim() || "", marks: question.points, explanation: question.explanation?.trim() || "",
+    ...(question.difficulty ? { difficulty: question.difficulty } : {}),
+    // An explicit list (including an empty one) replaces the teacher's tags for this question.
+    ...(question.tags ? { tags: question.tags.map((tag) => tag.trim()).filter(Boolean) } : {}),
+    ...(question.isArchived !== undefined ? { is_archived: question.isArchived } : {}),
+  };
   switch (question.type) {
     case "single_choice": return { ...base, type: "multiple_choice", configuration: {}, options: question.options.map((option) => ({ id: existingId(option.id), text: option.label.trim(), is_correct: option.id === question.correctOptionId })) };
     case "multiple_choice": return { ...base, type: "multiple_answer", configuration: {}, options: question.options.map((option) => ({ id: existingId(option.id), text: option.label.trim(), is_correct: question.correctOptionIds?.includes(option.id) ?? false })) };
@@ -176,11 +201,12 @@ export function toStudentDashboardExam(dto: ApiAvailableExamDto): Exam {
     questionCount: dto.question_count, participantCount: 0,
     settings: {
       durationMinutes: dto.duration_minutes, totalMarks: number(dto.total_marks), allowBackNavigation: true,
-      randomizeQuestions: false, showResultImmediately: dto.result_visibility === "immediate", resultVisibility: dto.result_visibility,
+      randomizeQuestions: false, randomizeOptions: false, allowUnanswered: dto.allow_unanswered !== false,
+      showResultImmediately: dto.result_visibility === "immediate", resultVisibility: dto.result_visibility,
       showCorrectAnswers: false, attemptLimit: dto.max_attempts,
       passingPercentage: number(result?.passing_percentage ?? dto.passing_percentage),
     },
-    questions: [], teacherName: "", accent: accentFor(dto.id), createdAt: startAt, updatedAt: startAt,
+    questions: [], teacherName: dto.teacher_name ?? "", accent: accentFor(dto.id), createdAt: startAt, updatedAt: startAt,
     availability: dto.availability, attemptsUsed: dto.attempts_used,
     attemptId: dto.attempt?.id, attemptNumber: dto.attempt?.attempt_number,
     remainingSeconds: dto.attempt?.remaining_seconds ?? null,
@@ -213,14 +239,17 @@ export function toStudentAttempt(dto: ApiAttemptDto): { exam: Exam; attempt: Exa
   const exam: Exam = {
     id: dto.exam.id, title: dto.exam.title, description: dto.exam.description, subject: dto.exam.subject, grade: dto.exam.grade, className: dto.exam.class_name,
     instructions: dto.exam.instructions || undefined, status: "active", startAt, endAt, schedule: { startAt, endAt, timezone: "Asia/Tehran" }, questionCount: questions.length,
-    participantCount: 0, settings: { durationMinutes: dto.exam.duration_minutes, totalMarks: number(dto.exam.total_marks, totalMarks), allowBackNavigation: dto.exam.navigation.allow_previous_questions, randomizeQuestions: dto.exam.navigation.randomize_questions, showResultImmediately: dto.exam.result_visibility === "immediate", resultVisibility: dto.exam.result_visibility, showCorrectAnswers: false, attemptLimit: dto.attempt_limit, passingPercentage: number(dto.exam.passing_percentage) },
+    participantCount: 0, settings: { durationMinutes: dto.exam.duration_minutes, totalMarks: number(dto.exam.total_marks, totalMarks), allowBackNavigation: dto.exam.navigation.allow_previous_questions, randomizeQuestions: dto.exam.navigation.randomize_questions, randomizeOptions: false, allowUnanswered: dto.exam.navigation.allow_unanswered !== false, showResultImmediately: dto.exam.result_visibility === "immediate", resultVisibility: dto.exam.result_visibility, showCorrectAnswers: false, attemptLimit: dto.attempt_limit, passingPercentage: number(dto.exam.passing_percentage) },
     questions, teacherName: "", accent: accentFor(dto.exam.id), createdAt: dto.started_at, updatedAt: dto.server_time,
     attemptId: dto.id, attemptNumber: dto.attempt_number,
   };
+  // The server's revision seeds the client counter: a refresh must resume guarded writes, not restart
+  // them from zero, or every reload would look like a stale request.
   return { exam, attempt: {
     id: dto.id, examId: dto.exam.id, studentId: "", status: dto.status, startedAt: dto.started_at, lastTickAt: dto.server_time,
     remainingSeconds: Math.max(0, dto.remaining_seconds), answers, currentQuestionIndex: 0, saveStatus: "saved", lastSavedAt: dto.server_time,
-    answerRevision: 0, connectionStatus: typeof navigator === "undefined" || navigator.onLine ? "online" : "offline",
+    answerRevision: dto.answer_revision ?? 0, serverRevision: dto.answer_revision ?? 0, sessionConflict: null,
+    connectionStatus: typeof navigator === "undefined" || navigator.onLine ? "online" : "offline",
     attemptNumber: dto.attempt_number, attemptLimit: dto.attempt_limit,
   } };
 }
@@ -230,7 +259,8 @@ export function toStudentResult(dto: ApiStudentResultDto, attempt: ExamAttempt, 
     id: dto.id, examId: exam.id, status: dto.status === "published" ? "published" : "pending",
     score: number(dto.score), maximumScore: number(dto.maximum_score, exam.settings.totalMarks), percentage: number(dto.percentage),
     correct: dto.correct_count, incorrect: dto.incorrect_count, unanswered: dto.unanswered_count,
-    pendingManualGrading: dto.pending_manual_grading_count, passingPercentage: number(dto.passing_percentage), passed: dto.passed,
+    pendingManualGrading: dto.pending_manual_grading_count, manualGradingCount: dto.manual_grading_count ?? dto.pending_manual_grading_count,
+    wasRevised: Boolean(dto.revised_at), passingPercentage: number(dto.passing_percentage), passed: dto.passed,
     attemptNumber: dto.attempt_number || attempt.attemptNumber || 1,
     submittedAt: dto.submitted_at || attempt.startedAt || new Date().toISOString(), feedback: dto.feedback || "",
   };
