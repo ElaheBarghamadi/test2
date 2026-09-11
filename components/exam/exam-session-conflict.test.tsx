@@ -33,7 +33,7 @@ const exam: Exam = {
   schedule: { startAt: "2026-03-20T05:30:00Z", endAt: "2026-03-20T07:30:00Z", timezone: "Asia/Tehran" },
   questionCount: 1, participantCount: 0, teacherName: "", accent: "indigo",
   createdAt: "2026-03-01T05:30:00Z", updatedAt: "2026-03-01T05:30:00Z",
-  settings: { durationMinutes: 45, totalMarks: 2, allowBackNavigation: true, randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 1, passingPercentage: 0 },
+  settings: { durationMinutes: 45, totalMarks: 2, allowBackNavigation: true, questionLayout: "paged", randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 1, passingPercentage: 0 },
   questions: [{ id: "q1", order: 1, stem: "سؤال", type: "single_choice", points: 2, required: true, options: [{ id: "o1", label: "الف", value: "o1" }] }],
 };
 

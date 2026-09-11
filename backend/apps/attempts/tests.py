@@ -790,10 +790,14 @@ class AttemptConcurrencyAndSessionApiTests(StudentExamApiTests):
 
         beat = self.client.post(f"/api/v1/student/attempts/{attempt_id}/heartbeat/", {}, format="json", HTTP_X_EXAM_SESSION="tab-a")
         self.assertEqual(beat.status_code, 200)
-        self.assertEqual(set(beat.data), {"server_time", "expires_at", "remaining_seconds", "status", "answer_revision", "session_locked_by_other", "question_count"})
+        # The key set is the contract: the heartbeat exists to be small, so a field is only added here when
+        # the runner would otherwise have to fetch the whole answer sheet to learn it (answer_frontier is
+        # the navigation frontier, which the runner shows as a locked question).
+        self.assertEqual(set(beat.data), {"server_time", "expires_at", "remaining_seconds", "status", "answer_revision", "answer_frontier", "session_locked_by_other", "question_count"})
         self.assertGreater(beat.data["remaining_seconds"], 44 * 60)
         self.assertFalse(beat.data["session_locked_by_other"])
         self.assertEqual(beat.data["question_count"], 1)
+        self.assertEqual(beat.data["answer_frontier"], 0)
         self.assertEqual(ExamAttempt.objects.get(pk=attempt_id).client_session, "tab-a")
 
     def test_client_signals_are_stored_and_unknown_ones_are_refused(self) -> None:
@@ -976,3 +980,208 @@ class LateStartGuardTests(StudentExamApiTests):
         started = self.start(exam)
         self.assertEqual(started.status_code, 201)
         self.assertGreater(started.data["remaining_seconds"], 60)
+
+
+class NoReturnNavigationRuleApiTests(StudentExamApiTests):
+    """The teacher's "no going back" switch, enforced by the server and scoped to the paged layout.
+
+    `allow_previous_questions` used to be a label the student's browser chose to honour: a second tab, a
+    reload or a direct request could keep editing a question that had already been passed. These tests pin
+    the server-side frontier, and the two cases where the rule deliberately does *not* apply.
+    """
+
+    def build(self, *, allow_previous: bool, layout: str, questions: int = 3) -> tuple[Exam, list[Question]]:
+        exam = self.make_exam()
+        exam.settings.allow_previous_questions = allow_previous
+        exam.settings.question_layout = layout
+        exam.settings.save(update_fields=("allow_previous_questions", "question_layout", "updated_at"))
+        created = [
+            self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE, marks=1) for _ in range(questions)
+        ]
+        return exam, created
+
+    def answer(self, attempt_id: str, question: Question, option_index: int = 0, **headers):
+        option = str(question.options.order_by("order")[option_index].id)
+        return self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [option]},
+            format="json",
+            **headers,
+        )
+
+    def test_a_passed_answer_is_final_in_a_paged_exam(self) -> None:
+        exam, (first, second, _third) = self.build(allow_previous=False, layout=ExamSettings.QuestionLayout.PAGED)
+        attempt_id = self.start(exam).data["id"]
+
+        self.assertEqual(self.answer(attempt_id, first).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, second).status_code, 200)
+
+        refused = self.answer(attempt_id, first, option_index=1)
+        self.assertEqual(refused.status_code, 409, refused.data)
+        self.assertEqual(refused.data["code"], "question_locked")
+        self.assertEqual(refused.data["question_ids"], [str(first.id)])
+        # The first answer keeps its original value: a refusal must not also destroy what was saved.
+        kept = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data
+        self.assertEqual(
+            kept["answers"][0]["selected_option_ids"], [str(first.options.order_by("order")[0].id)]
+        )
+        self.assertEqual(kept["answer_frontier"], 1)
+        self.assertEqual(
+            StudentAnswer.objects.get(attempt_id=attempt_id, question=first).selected_options.count(), 1
+        )
+
+    def test_the_frontier_only_moves_forward_and_the_current_answer_stays_editable(self) -> None:
+        exam, (first, second, _third) = self.build(allow_previous=False, layout=ExamSettings.QuestionLayout.PAGED)
+        attempt_id = self.start(exam).data["id"]
+        self.assertEqual(self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data["answer_frontier"], 0)
+
+        self.assertEqual(self.answer(attempt_id, first).status_code, 200)
+        # Before anything later is answered, correcting the current question is still allowed.
+        self.assertEqual(self.answer(attempt_id, first, option_index=2).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, second).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, second, option_index=2).status_code, 200)
+
+    def test_returning_is_allowed_when_the_teacher_allows_it(self) -> None:
+        exam, (first, second, _third) = self.build(allow_previous=True, layout=ExamSettings.QuestionLayout.PAGED)
+        attempt_id = self.start(exam).data["id"]
+        self.assertEqual(self.answer(attempt_id, first).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, second).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, first, option_index=1).status_code, 200)
+        self.assertEqual(
+            self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data["answers"][0]["selected_option_ids"],
+            [str(first.options.order_by("order")[1].id)],
+        )
+
+    def test_one_page_layout_is_exempt_because_nothing_was_passed(self) -> None:
+        exam, (first, second, _third) = self.build(
+            allow_previous=False, layout=ExamSettings.QuestionLayout.SINGLE_PAGE
+        )
+        attempt_id = self.start(exam).data["id"]
+        self.assertEqual(self.answer(attempt_id, first).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, second).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, first, option_index=1).status_code, 200)
+        # The frontier still advances (it is the attempt's own record), it simply is not enforced here.
+        self.assertEqual(self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data["answer_frontier"], 1)
+
+    def test_a_batch_holding_one_passed_question_writes_nothing(self) -> None:
+        exam, (first, second, third) = self.build(allow_previous=False, layout=ExamSettings.QuestionLayout.PAGED)
+        attempt_id = self.start(exam).data["id"]
+        self.assertEqual(self.answer(attempt_id, second).status_code, 200)
+
+        refused = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/",
+            {
+                "answers": [
+                    {"question_id": str(first.id), "selected_option_ids": [str(first.options.first().id)]},
+                    {"question_id": str(third.id), "selected_option_ids": [str(third.options.first().id)]},
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(refused.status_code, 409, refused.data)
+        self.assertEqual(refused.data["question_ids"], [str(first.id)])
+        # All-or-nothing, so the legitimate half of the batch is untouched rather than half-applied...
+        self.assertEqual(StudentAnswer.objects.filter(attempt_id=attempt_id, question=third).count(), 0)
+        # ...and dropping the refused id makes the rest land, which is exactly the client's recovery.
+        retried = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/",
+            {"answers": [{"question_id": str(third.id), "selected_option_ids": [str(third.options.first().id)]}]},
+            format="json",
+        )
+        self.assertEqual(retried.status_code, 200, retried.data)
+
+    def test_flagging_a_passed_question_is_still_allowed(self) -> None:
+        exam, (first, second, _third) = self.build(allow_previous=False, layout=ExamSettings.QuestionLayout.PAGED)
+        attempt_id = self.start(exam).data["id"]
+        self.assertEqual(self.answer(attempt_id, first).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, second).status_code, 200)
+        # A flag marks a question for the student's own review; it changes no answer, so the rule leaves it
+        # alone and the teacher's view of "what did they touch" stays complete.
+        flagged = self.client.post(f"/api/v1/student/attempts/{attempt_id}/flagged-questions/{first.id}/")
+        self.assertEqual(flagged.status_code, 200, flagged.data)
+        self.assertTrue(flagged.data["is_flagged"])
+
+    def test_the_rule_follows_the_attempt_snapshot_and_not_question_order(self) -> None:
+        exam, (first, second, _third) = self.build(allow_previous=False, layout=ExamSettings.QuestionLayout.PAGED)
+        attempt_id = self.start(exam).data["id"]
+        # Rewrite the snapshot to reverse order: `first` is now the *last* question this student sees.
+        ExamAttempt.objects.filter(pk=attempt_id).update(
+            question_order=[str(question.id) for question in reversed(exam.questions.order_by("order"))]
+        )
+        self.assertEqual(self.answer(attempt_id, first).status_code, 200)
+        # In `Question.order` terms second > first, so an order-based rule would accept this. Measured
+        # against the snapshot, `second` sits at index 1 and is already behind the frontier.
+        refused = self.answer(attempt_id, second)
+        self.assertEqual(refused.status_code, 409, refused.data)
+        self.assertEqual(refused.data["question_ids"], [str(second.id)])
+
+    def test_a_refused_edit_is_recorded_for_the_teacher(self) -> None:
+        exam, (first, second, _third) = self.build(allow_previous=False, layout=ExamSettings.QuestionLayout.PAGED)
+        attempt_id = self.start(exam).data["id"]
+        self.assertEqual(self.answer(attempt_id, first).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, second).status_code, 200)
+        self.assertEqual(self.answer(attempt_id, first, option_index=1).status_code, 409)
+        events = AttemptEvent.objects.filter(
+            attempt_id=attempt_id, kind=AttemptEvent.Kind.QUESTION_LOCKED
+        )
+        self.assertEqual(events.count(), 1)
+        self.assertEqual(events.first().detail["question_ids"], [str(first.id)])
+        # An observation, never a penalty: nothing here touches the score or the clock.
+        timing = self.client.post(f"/api/v1/student/attempts/{attempt_id}/heartbeat/").data
+        self.assertEqual(timing["status"], "in_progress")
+
+
+class RefusedWriteIsRecordedTests(StudentExamApiTests):
+    """A rejected write must leave a trace, even though the write itself is rolled back.
+
+    Both refusal paths create their activity row inside the transaction that the conflict unwinds, so an
+    event written there disappears with it. These assertions are the reason that is now done in the view,
+    after the rollback.
+    """
+
+    def test_a_stale_write_lands_in_the_activity_log(self) -> None:
+        exam = self.make_exam()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        options = [str(option.id) for option in question.options.order_by("order")]
+
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [options[0]]},
+            format="json",
+            HTTP_X_EXAM_REVISION="0",
+        )
+        refused = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [options[1]]},
+            format="json",
+            HTTP_X_EXAM_REVISION="0",
+        )
+        self.assertEqual(refused.status_code, 409)
+        events = AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.STALE_WRITE_REJECTED)
+        self.assertEqual(events.count(), 1, "the refused write left no trace for the teacher")
+        self.assertEqual(events.first().detail["expected"], 0)
+        self.assertEqual(events.first().detail["current"], 1)
+
+    def test_a_locked_write_lands_in_the_activity_log(self) -> None:
+        exam = self.make_exam()
+        exam.settings.allow_previous_questions = False
+        exam.settings.save(update_fields=("allow_previous_questions", "updated_at"))
+        first = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        second = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        for question in (first, second):
+            self.client.patch(
+                f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+                {"selected_option_ids": [str(question.options.order_by("order")[0].id)]},
+                format="json",
+            )
+        refused = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{first.id}/",
+            {"selected_option_ids": [str(first.options.order_by("order")[1].id)]},
+            format="json",
+        )
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(
+            AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.QUESTION_LOCKED).count(), 1
+        )

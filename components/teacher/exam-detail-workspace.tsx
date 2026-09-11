@@ -117,7 +117,8 @@ export function TeacherExamDetailWorkspace({ examId }: { examId: string }) {
     </CardContent></Card>
 
     <Card><CardHeader><CardTitle>تنظیمات آزمون</CardTitle></CardHeader><CardContent className="space-y-3 text-sm"><div className="grid gap-2 text-xs text-muted-foreground">{[
-      { label: "بازگشت به سؤال‌ها", value: exam.settings.allowBackNavigation ? "مجاز" : "غیرفعال" },
+      { label: "چیدمان سؤال‌ها", value: exam.settings.questionLayout === "single_page" ? "همه سؤال‌ها در یک صفحه" : "صفحه‌به‌صفحه" },
+      { label: "بازگشت به سؤال‌ها", value: exam.settings.questionLayout === "single_page" ? "بی‌اثر در چیدمان یک‌صفحه‌ای" : exam.settings.allowBackNavigation ? "مجاز" : "غیرفعال" },
       { label: "ترتیب سؤال‌ها", value: exam.settings.randomizeQuestions ? "تصادفی" : "ثابت" },
       { label: "نمایش نتیجه", value: exam.settings.resultVisibility === "immediate" ? "فوری" : exam.settings.resultVisibility === "pending" ? "پس از بررسی" : "انتشار دستی" },
       { label: "نمایش پاسخ درست", value: exam.settings.showCorrectAnswers ? "بله" : "خیر" },

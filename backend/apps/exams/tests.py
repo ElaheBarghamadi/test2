@@ -883,3 +883,69 @@ class ExamListCounterAccuracyTests(TeacherExamApiTests):
         self.assertEqual(row["participant_count"], 4)
         self.assertEqual(row["question_count"], detail["question_count"])
         self.assertEqual(row["attempt_count"], detail["attempt_count"])
+
+
+class ExamQuestionLayoutApiTests(TeacherExamApiTests):
+    """The teacher's "one page or one question per page" choice is stored, read back and validated."""
+
+    def test_layout_defaults_to_paged_and_round_trips(self) -> None:
+        self.authenticate(self.teacher)
+        created = self.create_exam_via_api(settings={"question_layout": "single_page"})
+        self.assertEqual(created.status_code, 201, created.data)
+        exam_id = created.data["id"]
+        self.assertEqual(created.data["settings"]["question_layout"], "single_page")
+        self.assertEqual(
+            self.client.get(f"/api/v1/exams/{exam_id}/").data["settings"]["question_layout"], "single_page"
+        )
+        row = next(item for item in self.client.get("/api/v1/exams/").data if item["id"] == exam_id)
+        self.assertEqual(row["settings"]["question_layout"], "single_page")
+
+        other = self.create_exam()
+        detail = self.client.get(f"/api/v1/exams/{other.id}/").data
+        self.assertEqual(detail["settings"]["question_layout"], "paged")
+
+    def test_layout_is_patchable_and_case_or_padding_tolerant(self) -> None:
+        exam = self.create_exam()
+        self.authenticate(self.teacher)
+        response = self.client.patch(
+            f"/api/v1/exams/{exam.id}/", {"settings": {"question_layout": " SINGLE_PAGE "}}, format="json"
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        exam.refresh_from_db()
+        self.assertEqual(exam.settings.question_layout, ExamSettings.QuestionLayout.SINGLE_PAGE)
+
+    def test_unknown_layout_is_rejected_without_touching_stored_value(self) -> None:
+        exam = self.create_exam()
+        exam.settings.question_layout = ExamSettings.QuestionLayout.SINGLE_PAGE
+        exam.settings.save(update_fields=("question_layout", "updated_at"))
+        self.authenticate(self.teacher)
+        response = self.client.patch(
+            f"/api/v1/exams/{exam.id}/", {"settings": {"question_layout": "carousel"}}, format="json"
+        )
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("question_layout", response.data["detail"]["settings"])
+        exam.refresh_from_db()
+        self.assertEqual(exam.settings.question_layout, ExamSettings.QuestionLayout.SINGLE_PAGE)
+
+    def test_layout_reaches_the_student_navigation_payload(self) -> None:
+        # No grade/class on the exam, otherwise the audience rule hides it from a profile-less student.
+        exam = self.create_exam(status=Exam.Status.ACTIVE, grade="", class_name="")
+        exam.settings.question_layout = ExamSettings.QuestionLayout.SINGLE_PAGE
+        exam.settings.allow_previous_questions = False
+        exam.settings.save(update_fields=("question_layout", "allow_previous_questions", "updated_at"))
+        question = Question.objects.create(exam=exam, type=Question.Type.MULTIPLE_CHOICE, text="Q1", order=1, marks=1)
+        QuestionOption.objects.create(question=question, text="yes", is_correct=True, order=1)
+        QuestionOption.objects.create(question=question, text="no", is_correct=False, order=2)
+        self.authenticate(self.student)
+        listed = self.client.get("/api/v1/student/exams/").data
+        row = next(item for item in listed if item["id"] == str(exam.id))
+        self.assertEqual(row["question_layout"], "single_page")
+
+        started = self.client.post(f"/api/v1/student/exams/{exam.id}/start/", {}, format="json")
+        self.assertEqual(started.status_code, 201, started.data)
+        navigation = started.data["exam"]["navigation"]
+        self.assertEqual(navigation["question_layout"], "single_page")
+        self.assertFalse(navigation["allow_previous_questions"])
+        # The layout is presentation: it must not widen what the student may read.
+        self.assertNotIn("settings", started.data["exam"])
+        self.assertNotIn("show_correct_answers", navigation)

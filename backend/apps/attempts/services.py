@@ -11,7 +11,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from apps.exams.models import Exam, Question, QuestionOption
+from apps.exams.models import Exam, ExamSettings, Question, QuestionOption
 from apps.organizations.models import SchoolMembership
 from apps.users.models import StudentProfile, User
 
@@ -187,10 +187,16 @@ def apply_option_order(attempt: ExamAttempt, payloads: list[dict[str, Any]]) -> 
 class AttemptConflict(Exception):
     """A write was rejected because another session, or a newer revision, already owns the attempt."""
 
-    def __init__(self, message: str, *, code: str = "conflict", **extra: Any) -> None:
+    def __init__(
+        self, message: str, *, code: str = "conflict", event: tuple[str, dict[str, Any]] | None = None, **extra: Any
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.extra = extra
+        # `(kind, detail)` to record *after* the caller's transaction has rolled back. Creating the row
+        # inside that block would undo it along with the refused write, and the teacher's activity log
+        # would silently never show the attempt to overwrite.
+        self.event = event
 
 
 def _locked_attempt(attempt_id: Any) -> ExamAttempt:
@@ -357,6 +363,10 @@ def heartbeat(attempt_id: Any, student: User, *, client_session: str = "") -> di
             **timing,
             "status": attempt.status,
             "answer_revision": attempt.answer_revision,
+            # The heartbeat is the only other place the client learns about the attempt while it writes, so
+            # the navigation frontier rides along: the runner can lock a passed question within one poll
+            # instead of waiting for a full detail read.
+            "answer_frontier": int(attempt.answer_frontier or 0),
             "session_locked_by_other": other_session,
             "question_count": len(attempt_question_ids(attempt)),
         }
@@ -597,14 +607,14 @@ def _ensure_active_locked_attempt(
             last_activity_at=attempt.last_activity_at,
         )
     if expected_revision is not None and expected_revision < attempt.answer_revision:
-        record_attempt_event(
-            attempt,
+        event = (
             AttemptEvent.Kind.STALE_WRITE_REJECTED,
-            detail={"expected": expected_revision, "current": attempt.answer_revision},
+            {"expected": expected_revision, "current": attempt.answer_revision},
         )
         raise AttemptConflict(
             "That answer is out of date, so it was not saved over the newer one.",
             code="stale_revision",
+            event=event,
             answer_revision=attempt.answer_revision,
         )
     return attempt
@@ -642,6 +652,23 @@ def _save_answer_for_locked_attempt(
     return answer
 
 
+def _answers_beyond_window(attempt: ExamAttempt, index_by_question: dict[str, int]) -> list[str]:
+    """The ids in this write that the attempt's navigation rule no longer permits, given the frontier.
+
+    The rule is the teacher's `allow_previous_questions`, and it applies to the paged layout only: when
+    the whole sheet is on one page there is no "going back" to forbid, and refusing edits there would
+    simply stop a student from filling in a blank. Returns the ids that are *below* the frontier, i.e.
+    already passed - the caller refuses them as a conflict so the client can reconcile and resend.
+    """
+    settings = attempt.exam.settings
+    if settings.allow_previous_questions or settings.question_layout != ExamSettings.QuestionLayout.PAGED:
+        return []
+    frontier = int(attempt.answer_frontier or 0)
+    # Only the ids in this request are considered: reporting a question the student did not touch would
+    # tell the client to discard an edit it never made.
+    return [question_id for question_id, index in index_by_question.items() if index < frontier]
+
+
 def save_answer(
     attempt_id: Any,
     student: User,
@@ -650,12 +677,17 @@ def save_answer(
     *,
     client_session: str = "",
     expected_revision: int | None = None,
+    question_index: int | None = None,
 ) -> StudentAnswer:
     with transaction.atomic():
         attempt = _ensure_active_locked_attempt(
             attempt_id, student, client_session=client_session, expected_revision=expected_revision
         )
+        if question_index is not None:
+            _enforce_answer_window(attempt, {str(question.id): question_index})
         answer = _save_answer_for_locked_attempt(attempt, question, answer_data)
+        if question_index is not None:
+            _advance_answer_frontier(attempt, question_index)
         _touch_attempt(attempt, client_session=client_session)
         return answer
 
@@ -667,15 +699,60 @@ def save_answers_batch(
     *,
     client_session: str = "",
     expected_revision: int | None = None,
+    index_by_question: dict[str, int] | None = None,
 ) -> list[StudentAnswer]:
-    """All-or-nothing batch autosave; a partial failure rolls the whole batch back."""
+    """All-or-nothing batch autosave; a partial failure rolls the whole batch back.
+
+    The window rule is checked once, before anything is written, and the whole batch is refused if it
+    contains a passed question: the caller then drops exactly those ids and resends the rest. Refusing
+    rather than silently skipping is deliberate - a saved-but-unreported answer would leave the student
+    looking at a value the server never took. The frontier is only advanced by the accepted writes, and
+    because the batch is applied in snapshot order, the earliest edit in a queued offline flush always
+    lands before the frontier moves past it.
+    """
     with transaction.atomic():
         attempt = _ensure_active_locked_attempt(
             attempt_id, student, client_session=client_session, expected_revision=expected_revision
         )
-        answers = [_save_answer_for_locked_attempt(attempt, question, answer_data) for question, answer_data in updates]
+        indexes = index_by_question or {}
+        # Restricted to the questions in this batch, so a refused flush names only what was actually sent.
+        requested = {str(question.id): indexes[str(question.id)] for question, _ in updates if str(question.id) in indexes}
+        _enforce_answer_window(attempt, requested)
+        answers = [
+            _save_answer_for_locked_attempt(attempt, question, answer_data)
+            for question, answer_data in sorted(updates, key=lambda item: indexes.get(str(item[0].id), 0))
+        ]
+        for question, _data in updates:
+            index = indexes.get(str(question.id))
+            if index is not None:
+                _advance_answer_frontier(attempt, index)
         _touch_attempt(attempt, client_session=client_session)
         return answers
+
+
+def _enforce_answer_window(attempt: ExamAttempt, index_by_question: dict[str, int]) -> None:
+    """Refuse a write that reaches behind the frontier, and say exactly which ids are the problem.
+
+    Raised instead of silently skipped on purpose: the caller retries with the reported ids dropped, so a
+    queued offline flush still lands its allowed half. A skipped-but-unreported write would leave the
+    student looking at a value the server never took.
+    """
+    passed = _answers_beyond_window(attempt, index_by_question)
+    if not passed:
+        return
+    raise AttemptConflict(
+        "This answer can no longer be changed: the exam does not allow returning to a question.",
+        code="question_locked",
+        event=(AttemptEvent.Kind.QUESTION_LOCKED, {"question_ids": passed[:20]}),
+        question_ids=passed,
+    )
+
+
+def _advance_answer_frontier(attempt: ExamAttempt, index: int) -> None:
+    """Monotone by construction: a write can only ever push the frontier forward."""
+    if index > int(attempt.answer_frontier or 0):
+        attempt.answer_frontier = index
+        attempt.save(update_fields=("answer_frontier", "updated_at"))
 
 
 def _touch_attempt(attempt: ExamAttempt, *, client_session: str = "") -> ExamAttempt:

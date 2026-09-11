@@ -120,6 +120,7 @@ const SIGNAL_LABELS: Record<string, string> = {
   auto_submitted: "ارسال خودکار در پایان زمان",
   exam_closed: "نهایی‌شدن با پایان آزمون توسط آموزگار",
   stale_write_rejected: "رد درخواست ذخیرهٔ کهنه",
+  question_locked: "رد ویرایش سؤالی که از آن رد شده‌اید (بازگشت ممکن نیست)",
 };
 function signalLabel(kind: string) { return SIGNAL_LABELS[kind] ?? kind; }
 

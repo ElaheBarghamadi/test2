@@ -24,11 +24,22 @@ export function useExamAutosave(
   exam: Exam,
   markSaved: (revision: number, serverRevision?: number) => void,
   markSaveFailed: (revision: number) => void,
-  options?: { examSession?: string; retry?: () => void; onConflict?: (conflict: NonNullable<Awaited<ReturnType<typeof examAttemptService.saveAnswers>>["conflict"]>) => void },
+  options?: {
+    examSession?: string;
+    retry?: () => void;
+    onConflict?: (conflict: NonNullable<Awaited<ReturnType<typeof examAttemptService.saveAnswers>>["conflict"]>) => void;
+    /**
+     * Called when the server refused writes because those questions have been passed. The caller restores
+     * the saved answers for them; the hook neither retries (the rule will refuse again) nor reports a
+     * failure, because nothing went wrong - the exam's own rule was applied.
+     */
+    onQuestionsLocked?: (questionIds: string[]) => Promise<void> | void;
+  },
 ) {
   const examSession = options?.examSession;
   const onConflict = options?.onConflict;
   const retry = options?.retry;
+  const onQuestionsLocked = options?.onQuestionsLocked;
 
   useEffect(() => {
     if (!attempt || attempt.status !== "in_progress") return;
@@ -40,8 +51,16 @@ export function useExamAutosave(
     const timeout = window.setTimeout(() => {
       void examAttemptService
         .saveAnswers({ attempt, exam, revision, signal: controller.signal, examSession })
-        .then((result) => {
+        .then(async (result) => {
           if (result.conflict) {
+            if (result.conflict.code === "question_locked") {
+              // The rule, not a fault: hand the refused ids back to the caller, then keep going with
+              // whatever else was queued. Marking this a save failure would advertise a lost answer that
+              // was never allowed to exist.
+              await onQuestionsLocked?.(result.conflict.questionIds);
+              if (retry) window.setTimeout(() => retry(), 0);
+              return;
+            }
             onConflict?.(result.conflict);
             if (result.conflict.code === "attempt_finalized") {
               // The server owns the final state now and has graded what was saved; nothing left to flush.
@@ -70,5 +89,5 @@ export function useExamAutosave(
     };
     // `attempt.saveStatus === "error"` is deliberately in the dependency set: it is what re-arms the
     // timer after a failure without waiting for the student to type something else.
-  }, [attempt?.answerRevision, attempt?.connectionStatus, attempt?.saveStatus, attempt?.status, attempt?.id, attempt?.answers, attempt?.pendingAnswerQuestionIds, attempt?.pendingFlagQuestionIds, exam, examSession, markSaved, markSaveFailed, onConflict, retry]);
+  }, [attempt?.answerRevision, attempt?.connectionStatus, attempt?.saveStatus, attempt?.status, attempt?.id, attempt?.answers, attempt?.pendingAnswerQuestionIds, attempt?.pendingFlagQuestionIds, exam, examSession, markSaved, markSaveFailed, onConflict, onQuestionsLocked, retry]);
 }

@@ -92,6 +92,7 @@ function toExamSettings(dto: ApiExamSettingsDto, totalMarks = 0): Exam["settings
     randomizeOptions: dto.randomize_options === true,
     // Absent on a payload from before the rule existed; the server default is permissive.
     allowUnanswered: dto.allow_unanswered !== false,
+    questionLayout: dto.question_layout === "single_page" ? "single_page" : "paged",
     showResultImmediately: dto.result_visibility === "immediate",
     resultVisibility: frontendVisibility(dto.result_visibility),
     showCorrectAnswers: dto.show_correct_answers,
@@ -143,6 +144,7 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
     start_at: apiDate(draft.schedule.startAt, draft.schedule.timezone), end_at: apiDate(draft.schedule.endAt, draft.schedule.timezone),
     settings: {
       allow_previous_questions: draft.settings.allowBackNavigation,
+      question_layout: draft.settings.questionLayout,
       randomize_questions: draft.settings.randomizeQuestions,
       result_visibility: apiVisibility(draft.settings.resultVisibility),
       show_correct_answers: draft.settings.showCorrectAnswers,
@@ -200,7 +202,9 @@ export function toStudentDashboardExam(dto: ApiAvailableExamDto): Exam {
     status, startAt, endAt, schedule: { startAt, endAt, timezone: "Asia/Tehran" },
     questionCount: dto.question_count, participantCount: 0,
     settings: {
-      durationMinutes: dto.duration_minutes, totalMarks: number(dto.total_marks), allowBackNavigation: true,
+      durationMinutes: dto.duration_minutes, totalMarks: number(dto.total_marks),
+      allowBackNavigation: dto.allow_previous_questions !== false,
+      questionLayout: dto.question_layout === "single_page" ? "single_page" : "paged",
       randomizeQuestions: false, randomizeOptions: false, allowUnanswered: dto.allow_unanswered !== false,
       showResultImmediately: dto.result_visibility === "immediate", resultVisibility: dto.result_visibility,
       showCorrectAnswers: false, attemptLimit: dto.max_attempts,
@@ -239,7 +243,7 @@ export function toStudentAttempt(dto: ApiAttemptDto): { exam: Exam; attempt: Exa
   const exam: Exam = {
     id: dto.exam.id, title: dto.exam.title, description: dto.exam.description, subject: dto.exam.subject, grade: dto.exam.grade, className: dto.exam.class_name,
     instructions: dto.exam.instructions || undefined, status: "active", startAt, endAt, schedule: { startAt, endAt, timezone: "Asia/Tehran" }, questionCount: questions.length,
-    participantCount: 0, settings: { durationMinutes: dto.exam.duration_minutes, totalMarks: number(dto.exam.total_marks, totalMarks), allowBackNavigation: dto.exam.navigation.allow_previous_questions, randomizeQuestions: dto.exam.navigation.randomize_questions, randomizeOptions: false, allowUnanswered: dto.exam.navigation.allow_unanswered !== false, showResultImmediately: dto.exam.result_visibility === "immediate", resultVisibility: dto.exam.result_visibility, showCorrectAnswers: false, attemptLimit: dto.attempt_limit, passingPercentage: number(dto.exam.passing_percentage) },
+    participantCount: 0, settings: { durationMinutes: dto.exam.duration_minutes, totalMarks: number(dto.exam.total_marks, totalMarks), allowBackNavigation: dto.exam.navigation.allow_previous_questions, questionLayout: dto.exam.navigation.question_layout === "single_page" ? "single_page" : "paged", randomizeQuestions: dto.exam.navigation.randomize_questions, randomizeOptions: false, allowUnanswered: dto.exam.navigation.allow_unanswered !== false, showResultImmediately: dto.exam.result_visibility === "immediate", resultVisibility: dto.exam.result_visibility, showCorrectAnswers: false, attemptLimit: dto.attempt_limit, passingPercentage: number(dto.exam.passing_percentage) },
     questions, teacherName: "", accent: accentFor(dto.exam.id), createdAt: dto.started_at, updatedAt: dto.server_time,
     attemptId: dto.id, attemptNumber: dto.attempt_number,
   };
@@ -249,6 +253,9 @@ export function toStudentAttempt(dto: ApiAttemptDto): { exam: Exam; attempt: Exa
     id: dto.id, examId: dto.exam.id, studentId: "", status: dto.status, startedAt: dto.started_at, lastTickAt: dto.server_time,
     remainingSeconds: Math.max(0, dto.remaining_seconds), answers, currentQuestionIndex: 0, saveStatus: "saved", lastSavedAt: dto.server_time,
     answerRevision: dto.answer_revision ?? 0, serverRevision: dto.answer_revision ?? 0, sessionConflict: null,
+    // Where the server has seen this attempt write to. The runner mirrors it so the "no going back" rule
+    // looks the same on screen as it does at the API, and a reload resumes it rather than resetting it.
+    answerFrontier: dto.answer_frontier ?? 0,
     connectionStatus: typeof navigator === "undefined" || navigator.onLine ? "online" : "offline",
     attemptNumber: dto.attempt_number, attemptLimit: dto.attempt_limit,
   } };

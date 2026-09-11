@@ -35,7 +35,7 @@ const exam: Exam = {
   schedule: { startAt: "2026-03-20T05:30:00Z", endAt: "2026-03-20T07:30:00Z", timezone: "Asia/Tehran" },
   questionCount: 1, participantCount: 0, teacherName: "", accent: "indigo",
   createdAt: "2026-03-01T05:30:00Z", updatedAt: "2026-03-01T05:30:00Z",
-  settings: { durationMinutes: 45, totalMarks: 2, allowBackNavigation: true, randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 1, passingPercentage: 50 },
+  settings: { durationMinutes: 45, totalMarks: 2, allowBackNavigation: true, questionLayout: "paged", randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 1, passingPercentage: 50 },
   questions: [{ id: "q1", order: 1, stem: "سؤال", type: "single_choice", points: 2, required: true, options: [{ id: "o1", label: "الف", value: "o1" }, { id: "o2", label: "ب", value: "o2" }] }],
 };
 
@@ -104,6 +104,16 @@ describe("guarded autosave", () => {
     expect(result.conflict).toBeInstanceOf(AttemptWriteConflict);
     expect(result.conflict?.code).toBe("another_session_active");
     expect(result.serverRevision).toBeUndefined();
+  });
+
+  it("names the questions the no-return rule refused, without retrying them", async () => {
+    // A stale revision can be fixed by resending; a locked question cannot, and retrying it would fight
+    // the rule forever. So this code is reported once, with the ids the caller has to discard.
+    saveAnswer.mockRejectedValue(new ApiError(409, { detail: "locked", code: "question_locked", question_ids: ["q1"] }, "conflict"));
+    const result = await examAttemptService.saveAnswers({ attempt: attemptFixture(), exam, revision: 5, examSession: "tab-a" });
+    expect(result.conflict?.code).toBe("question_locked");
+    expect(result.conflict?.questionIds).toEqual(["q1"]);
+    expect(saveAnswer).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces a second stale conflict instead of looping", async () => {
@@ -187,6 +197,46 @@ describe("attempt store concurrency", () => {
     expect(useExamAttemptStore.getState().attempt?.sessionConflict).toBe("another_session");
     useExamAttemptStore.getState().setSessionConflict(null);
     expect(useExamAttemptStore.getState().attempt?.sessionConflict).toBeNull();
+  });
+
+  it("drops a refused question from the queue and takes back what the server holds", () => {
+    useExamAttemptStore.setState({ attempt: attemptFixture({
+      answerFrontier: 0,
+      answers: {
+        q1: { questionId: "q1", value: "o2", flagged: true, updatedAt: "2026-03-20T05:32:00Z" },
+        q2: { questionId: "q2", value: "o1", flagged: false, updatedAt: "2026-03-20T05:33:00Z" },
+      },
+      pendingAnswerQuestionIds: ["q1", "q2"],
+      pendingFlagQuestionIds: ["q1"],
+    }) });
+    useExamAttemptStore.getState().reconcileAnswers(
+      { q1: { questionId: "q1", value: "o1", flagged: false, updatedAt: "2026-03-20T05:31:00Z" } },
+      ["q1"],
+      1,
+    );
+    const attempt = useExamAttemptStore.getState().attempt;
+    // The refused edit is replaced by the stored answer, and nothing else moves.
+    expect(attempt?.answers.q1.value).toBe("o1");
+    expect(attempt?.answers.q2.value).toBe("o1");
+    expect(attempt?.pendingAnswerQuestionIds).toEqual(["q2"]);
+    expect(attempt?.pendingFlagQuestionIds).toEqual([]);
+    expect(attempt?.saveStatus).toBe("saved");
+    expect(attempt?.answerFrontier).toBe(1);
+  });
+
+  it("treats a refused question the server never stored as still unanswered", () => {
+    useExamAttemptStore.setState({ attempt: attemptFixture({ answers: { q1: { questionId: "q1", value: "o2", flagged: false, updatedAt: "2026-03-20T05:32:00Z" } }, pendingAnswerQuestionIds: ["q1"] }) });
+    useExamAttemptStore.getState().reconcileAnswers({}, ["q1"]);
+    expect(useExamAttemptStore.getState().attempt?.answers.q1.value).toBeNull();
+    expect(useExamAttemptStore.getState().attempt?.pendingAnswerQuestionIds).toEqual([]);
+  });
+
+  it("moves the frontier forward and never back", () => {
+    useExamAttemptStore.setState({ attempt: attemptFixture({ answerFrontier: 2 }) });
+    useExamAttemptStore.getState().setAnswerFrontier(1);
+    expect(useExamAttemptStore.getState().attempt?.answerFrontier).toBe(2);
+    useExamAttemptStore.getState().setAnswerFrontier(3);
+    expect(useExamAttemptStore.getState().attempt?.answerFrontier).toBe(3);
   });
 
   it("hydrating a remote attempt clears a stale conflict without discarding queued edits", () => {

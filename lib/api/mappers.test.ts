@@ -161,7 +161,7 @@ describe("toExamWritePayload", () => {
   const draft: ExamDraft = {
     title: "  آزمون شیمی  ", description: "", subject: "شیمی", grade: "۱۱", className: "۲", instructions: "",
     schedule: { startAt: "2026-03-20T09:00", endAt: "2026-03-20T11:00", timezone: "Asia/Tehran" },
-    settings: { durationMinutes: 90, totalMarks: 20, allowBackNavigation: false, randomizeQuestions: true, randomizeOptions: true, allowUnanswered: false, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: true, attemptLimit: 3, passingPercentage: 45 },
+    settings: { durationMinutes: 90, totalMarks: 20, allowBackNavigation: false, questionLayout: "paged", randomizeQuestions: true, randomizeOptions: true, allowUnanswered: false, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: true, attemptLimit: 3, passingPercentage: 45 },
     questions: [],
   };
 
@@ -178,6 +178,9 @@ describe("toExamWritePayload", () => {
     expect(payload.title).toBe("آزمون شیمی");
     expect(payload.settings).toEqual({
       allow_previous_questions: false,
+      // The layout rides on the same settings object, so a payload that dropped it would silently turn a
+      // one-page exam back into a paged one on the next save.
+      question_layout: "paged",
       randomize_questions: true,
       randomize_options: true,
       allow_unanswered: false,
@@ -194,7 +197,8 @@ describe("toStudentDashboardExam", () => {
     return {
       id: SERVER_ID, title: "آزمون زیست", description: "فصل ۲", subject: "زیست", grade: "۱۲", class_name: "۳",
       duration_minutes: 45, total_marks: "12.00", start_at: "2026-03-20T05:30:00Z", end_at: "2026-03-20T07:30:00Z",
-      question_count: 6, max_attempts: 2, attempts_used: 1, passing_percentage: 50, result_visibility: "pending", allow_unanswered: true, teacher_name: "الاهه برغمدی",
+      question_count: 6, max_attempts: 2, attempts_used: 1, passing_percentage: 50, result_visibility: "pending", allow_unanswered: true,
+      allow_previous_questions: true, question_layout: "paged", teacher_name: "الاهه برغمدی",
       availability: "in_progress", attempt: { id: OTHER_ID, status: "in_progress", started_at: "2026-03-20T05:30:00Z", submitted_at: null, attempt_number: 1, remaining_seconds: 1234, result: null },
       ...overrides,
     };
@@ -205,6 +209,16 @@ describe("toStudentDashboardExam", () => {
     expect(exam).toMatchObject({ availability: "in_progress", attemptId: OTHER_ID, attemptNumber: 1, remainingSeconds: 1234, attemptsUsed: 1, questionCount: 6, teacherName: "الاهه برغمدی" });
     expect(exam.settings).toMatchObject({ attemptLimit: 2, totalMarks: 12, passingPercentage: 50, resultVisibility: "pending" });
     expect(exam.resultSummary).toBeNull();
+  });
+
+  it("states the delivery rules before an attempt exists", () => {
+    const exam = toStudentDashboardExam(availableDto());
+    expect(exam.settings).toMatchObject({ allowBackNavigation: true, questionLayout: "paged" });
+    const strict = toStudentDashboardExam(availableDto({ allow_previous_questions: false, question_layout: "single_page" }));
+    // The start screen quotes these two, so the pair has to survive the mapping: a one-page exam never
+    // loses its right to edit, and a missing field still means the server default rather than a refusal.
+    expect(strict.settings).toMatchObject({ allowBackNavigation: false, questionLayout: "single_page" });
+    expect(toStudentDashboardExam(availableDto({ allow_previous_questions: undefined, question_layout: undefined }))).toMatchObject({ settings: { allowBackNavigation: true, questionLayout: "paged" } });
   });
 
   it("maps a published result into a score and a pass verdict", () => {
@@ -238,7 +252,7 @@ describe("toStudentAttempt", () => {
         id: SERVER_ID, title: "آزمون ریاضی", description: "", subject: "ریاضی", grade: "۱۲", class_name: "۱",
         instructions: "دقت کنید", duration_minutes: 45, start_at: "2026-03-20T05:30:00Z", end_at: "2026-03-20T06:15:00Z",
         total_marks: "6.00", question_count: 3, passing_percentage: "55.00", result_visibility: "immediate",
-        navigation: { allow_previous_questions: false, randomize_questions: true, allow_unanswered: false },
+        navigation: { allow_previous_questions: false, randomize_questions: true, allow_unanswered: false, question_layout: "single_page" },
       },
       questions: [
         { id: "q1", type: "multiple_choice", text: "یک گزینه", instructions: "", marks: 2, order: 1, options: [{ id: SERVER_ID, text: "الف", order: 1 }, { id: OTHER_ID, text: "ب", order: 2 }] },
@@ -267,10 +281,15 @@ describe("toStudentAttempt", () => {
   it("carries the attempt budget and the server countdown into the session", () => {
     const { attempt, exam } = toStudentAttempt(attemptDto());
     expect(attempt).toMatchObject({ id: OTHER_ID, attemptNumber: 2, attemptLimit: 3, remainingSeconds: 2340, saveStatus: "saved", answerRevision: 7, serverRevision: 7, sessionConflict: null });
-    expect(exam.settings).toMatchObject({ attemptLimit: 3, passingPercentage: 55, totalMarks: 6, resultVisibility: "immediate", allowBackNavigation: false, randomizeQuestions: true, allowUnanswered: false, randomizeOptions: false });
+    expect(exam.settings).toMatchObject({ attemptLimit: 3, passingPercentage: 55, totalMarks: 6, resultVisibility: "immediate", allowBackNavigation: false, questionLayout: "single_page", randomizeQuestions: true, allowUnanswered: false, randomizeOptions: false });
     expect(exam.attemptId).toBe(OTHER_ID);
     expect(exam.attemptNumber).toBe(2);
     expect(attempt.answers.q3.value).toBe(true);
+  });
+
+  it("carries the server's no-return frontier into the session", () => {
+    expect(toStudentAttempt(attemptDto()).attempt.answerFrontier).toBe(0);
+    expect(toStudentAttempt(attemptDto({ answer_frontier: 2 })).attempt.answerFrontier).toBe(2);
   });
 
   it("never lets the countdown go negative", () => {

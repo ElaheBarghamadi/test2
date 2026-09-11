@@ -34,7 +34,7 @@ const exam: Exam = {
   schedule: { startAt: "2026-03-20T05:30:00Z", endAt: "2026-03-20T07:30:00Z", timezone: "Asia/Tehran" },
   questionCount: 1, participantCount: 0, teacherName: "", accent: "indigo",
   createdAt: "2026-03-01T05:30:00Z", updatedAt: "2026-03-01T05:30:00Z",
-  settings: { durationMinutes: 45, totalMarks: 2, allowBackNavigation: true, randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 2, passingPercentage: 50 },
+  settings: { durationMinutes: 45, totalMarks: 2, allowBackNavigation: true, questionLayout: "paged", randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 2, passingPercentage: 50 },
   questions: [{ id: "q1", order: 1, stem: "کدام‌یک واحد توان است؟", type: "single_choice", points: 2, required: true, options: [{ id: "o1", label: "وات", value: "o1" }, { id: "o2", label: "ژول", value: "o2" }] }],
 };
 
@@ -156,5 +156,56 @@ describe("ExamWorkspace session handling", () => {
     heartbeat.mockResolvedValue({ server_time: "2026-03-20T05:30:00Z", expires_at: "2026-03-20T06:15:00Z", remaining_seconds: 300, status: "in_progress", answer_revision: 0, session_locked_by_other: false, question_count: 1 });
     render(<ExamWorkspace exam={exam}/>);
     expect(screen.getByText(/تلاش ۱ از ۲/)).toBeTruthy();
+  });
+  it("lays the whole sheet out on one page when the exam is delivered that way", () => {
+    const onePage: Exam = {
+      ...exam,
+      questionCount: 2,
+      settings: { ...exam.settings, questionLayout: "single_page" },
+      questions: [exam.questions[0], { ...exam.questions[0], id: "q2", order: 2, stem: "واحد مقاومت چیست؟" }],
+    };
+    useExamAttemptStore.setState({ attempt: attemptFixture({ status: "in_progress", remainingSeconds: 300, answers: {} }) });
+    render(<ExamWorkspace exam={onePage}/>);
+
+    // Both bodies are on screen at once, and there is no page turn to ask for.
+    expect(screen.getByText("کدام‌یک واحد توان است؟")).toBeTruthy();
+    expect(screen.getByText("واحد مقاومت چیست؟")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /سؤال قبل/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /ثبت و ادامه/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /مرور و ارسال/ })).toBeTruthy();
+    // Each card carries its position on the sheet.
+    expect(screen.getAllByText("سؤال ۲").length).toBeGreaterThan(0);
+    // "سؤال ۱ از ۲" would describe a cursor nobody has, so the header counts answers instead.
+    expect(screen.queryByText(/سؤال ۱ از ۲/)).toBeNull();
+  });
+
+  it("holds a passed question closed on a paged exam that forbids going back", () => {
+    const strict: Exam = {
+      ...exam,
+      questionCount: 2,
+      settings: { ...exam.settings, allowBackNavigation: false },
+      questions: [exam.questions[0], { ...exam.questions[0], id: "q2", order: 2, stem: "واحد مقاومت چیست؟" }],
+    };
+    // The server has seen an answer written to the second question, so the first one is final.
+    useExamAttemptStore.setState({ attempt: attemptFixture({ status: "in_progress", remainingSeconds: 300, currentQuestionIndex: 0, answerFrontier: 1 }) });
+    render(<ExamWorkspace exam={strict}/>);
+
+    expect(screen.getByText(/این سؤال را رد کرده‌اید/)).toBeTruthy();
+    // The map will not walk the student back there either, and only the passed cell is closed.
+    const lockedCell = screen.getAllByRole("button", { name: /سؤال ۱.*قفل شده/ })[0] as HTMLButtonElement;
+    expect(lockedCell.disabled).toBe(true);
+    expect(screen.queryAllByRole("button", { name: /سؤال ۲.*قفل شده/ })).toHaveLength(0);
+  });
+
+  it("leaves every question editable when the same frontier sits on a permissive exam", () => {
+    const back: Exam = {
+      ...exam,
+      questionCount: 2,
+      questions: [exam.questions[0], { ...exam.questions[0], id: "q2", order: 2, stem: "واحد مقاومت چیست؟" }],
+    };
+    useExamAttemptStore.setState({ attempt: attemptFixture({ status: "in_progress", remainingSeconds: 300, answerFrontier: 1 }) });
+    render(<ExamWorkspace exam={back}/>);
+    expect(screen.queryByText(/این سؤال قفل شده است/)).toBeNull();
+    expect((screen.getAllByRole("button", { name: /سؤال ۱/ })[0] as HTMLButtonElement).disabled).toBe(false);
   });
 });

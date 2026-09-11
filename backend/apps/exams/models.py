@@ -76,8 +76,17 @@ class ExamSettings(TimeStampedUUIDModel):
         PENDING = "pending", "After teacher review"
         HIDDEN = "hidden", "Manually published"
 
+    class QuestionLayout(models.TextChoices):
+        PAGED = "paged", "One question per page"
+        SINGLE_PAGE = "single_page", "All questions on one page"
+
     exam = models.OneToOneField(Exam, on_delete=models.CASCADE, related_name="settings")
     allow_previous_questions = models.BooleanField(default=True)
+    # Presentation only: paged shows one question at a time, single_page stacks the whole answer sheet.
+    # It never changes grading, the snapshot, or which answers are accepted.
+    question_layout = models.CharField(
+        max_length=12, choices=QuestionLayout.choices, default=QuestionLayout.PAGED
+    )
     randomize_questions = models.BooleanField(default=False)
     result_visibility = models.CharField(max_length=20, choices=ResultVisibility.choices, default=ResultVisibility.PENDING)
     show_correct_answers = models.BooleanField(default=False)

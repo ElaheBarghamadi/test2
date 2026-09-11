@@ -11,6 +11,17 @@ interface AttemptState {
   setAnswer: (questionId: string, value: AnswerValue) => void;
   toggleFlag: (questionId: string) => void;
   setCurrentQuestion: (index: number) => void;
+  /** The server's navigation frontier, re-read on every heartbeat. */
+  setAnswerFrontier: (frontier: number) => void;
+  /**
+   * Replace the given questions with what the server holds and take them out of the queue.
+   *
+   * Used when a write is refused by the "no going back" rule: the student's local edit for those
+   * questions never existed as far as the exam is concerned, so the value on screen has to become the
+   * saved one, and the ids must leave the queue or the retry loop would fight the rule forever. Anything
+   * else still queued is left alone, so a flush that mixed allowed and refused edits loses neither.
+   */
+  reconcileAnswers: (answers: Record<string, ExamAnswer>, questionIds: string[], frontier?: number) => void;
   tick: () => void;
   syncClock: (status: ExamAttempt["status"], remainingSeconds: number) => void;
   markSaved: (revision: number, serverRevision?: number) => void;
@@ -59,6 +70,32 @@ export const useExamAttemptStore = create<AttemptState>((set, get) => ({
     return { attempt: { ...state.attempt, answerRevision: revision, saveStatus: state.attempt.connectionStatus === "offline" ? "saved_locally" : "saving" } };
   }),
   setCurrentQuestion: (currentQuestionIndex) => set((state) => state.attempt ? { attempt: { ...state.attempt, currentQuestionIndex } } : state),
+  setAnswerFrontier: (frontier) => set((state) => {
+    if (!state.attempt || frontier <= (state.attempt.answerFrontier ?? 0)) return state;
+    return { attempt: { ...state.attempt, answerFrontier: frontier } };
+  }),
+  reconcileAnswers: (answers, questionIds, frontier) => set((state) => {
+    if (!state.attempt || questionIds.length === 0) return state;
+    const attempt = state.attempt;
+    const dropped = new Set(questionIds);
+    const next = { ...attempt.answers };
+    for (const questionId of questionIds) {
+      const serverAnswer = answers[questionId];
+      // Only questions the server actually holds are replaced; an id missing from the payload has no
+      // answer there at all, which for a refused edit means "still blank".
+      if (serverAnswer) next[questionId] = serverAnswer;
+      else if (next[questionId]) next[questionId] = { ...next[questionId], value: null, updatedAt: new Date().toISOString() };
+    }
+    return { attempt: {
+      ...attempt,
+      answers: next,
+      pendingAnswerQuestionIds: (attempt.pendingAnswerQuestionIds ?? []).filter((id) => !dropped.has(id)),
+      pendingFlagQuestionIds: (attempt.pendingFlagQuestionIds ?? []).filter((id) => !dropped.has(id)),
+      answerFrontier: typeof frontier === "number" ? Math.max(frontier, attempt.answerFrontier ?? 0) : attempt.answerFrontier,
+      saveStatus: "saved",
+      lastSavedAt: new Date().toISOString(),
+    } };
+  }),
   tick: () => set((state) => {
     if (!state.attempt || state.attempt.status !== "in_progress") return state;
     const now = new Date(); const lastTick = state.attempt.lastTickAt ? new Date(state.attempt.lastTickAt) : now;

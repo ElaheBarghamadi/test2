@@ -58,6 +58,8 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
     passing_percentage = serializers.SerializerMethodField()
     result_visibility = serializers.SerializerMethodField()
     allow_unanswered = serializers.SerializerMethodField()
+    allow_previous_questions = serializers.SerializerMethodField()
+    question_layout = serializers.SerializerMethodField()
     teacher_name = serializers.SerializerMethodField()
     question_count = serializers.IntegerField(read_only=True)
 
@@ -81,6 +83,8 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
             "passing_percentage",
             "result_visibility",
             "allow_unanswered",
+            "allow_previous_questions",
+            "question_layout",
             "teacher_name",
             "attempt",
         )
@@ -107,6 +111,16 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
     def get_allow_unanswered(self, exam: Exam) -> bool:
         # The student has to know before starting that a blank answer will block submission.
         return exam.settings.allow_unanswered
+
+    def get_allow_previous_questions(self, exam: Exam) -> bool:
+        # The start screen states the navigation rule before an attempt exists, so it has to come from the
+        # server: hardcoding it told students they could go back on exams where the teacher had said no.
+        return exam.settings.allow_previous_questions
+
+    def get_question_layout(self, exam: Exam) -> str:
+        # Layout is presentation, and the dashboard needs it before the attempt exists so the runner
+        # does not re-flow the whole answer sheet a second after the student presses start.
+        return exam.settings.question_layout
 
 
 class StudentAttemptOptionSerializer(serializers.ModelSerializer):
@@ -154,7 +168,7 @@ class StudentNavigationSettingsSerializer(serializers.ModelSerializer):
         # Result visibility, max attempts, and correct-answer visibility are management-only settings.
         # `allow_unanswered` is different: the student has to know before pressing submit that the
         # teacher requires a complete answer sheet, and knowing it leaks nothing.
-        fields = ("allow_previous_questions", "randomize_questions", "allow_unanswered")
+        fields = ("allow_previous_questions", "randomize_questions", "allow_unanswered", "question_layout")
         read_only_fields = fields
 
 
@@ -208,6 +222,9 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
     remaining_seconds = serializers.SerializerMethodField()
     attempt_limit = serializers.SerializerMethodField()
     answer_revision = serializers.IntegerField(read_only=True)
+    # Which answers are final. Meaningless unless the exam is paged and forbids returning, but always
+    # reported so the runner does not have to guess the rule from two other fields.
+    answer_frontier = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = ExamAttempt
@@ -216,6 +233,7 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
             "attempt_number",
             "attempt_limit",
             "answer_revision",
+            "answer_frontier",
             "status",
             "started_at",
             "submitted_at",

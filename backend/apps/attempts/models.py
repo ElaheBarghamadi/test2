@@ -36,6 +36,11 @@ class ExamAttempt(TimeStampedUUIDModel):
     expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
     # Optimistic-concurrency counter: rejects a retried/queued write that would overwrite a newer answer.
     answer_revision = models.PositiveIntegerField(default=0)
+    # Highest question index (into this attempt's own snapshot order) an answer was ever written to.
+    # The "no going back" rule is measured against it: with `allow_previous_questions` off, a question
+    # below the frontier has been passed and its answer is final. Index-based, never `Question.order`,
+    # because a randomized attempt does not run in `order` sequence.
+    answer_frontier = models.PositiveSmallIntegerField(default=0)
     # Tab/device ownership of the session. Enforced server-side so a second tab cannot clobber answers.
     client_session = models.CharField(max_length=64, blank=True)
     session_switch_count = models.PositiveSmallIntegerField(default=0)
@@ -120,6 +125,7 @@ class AttemptEvent(TimeStampedUUIDModel):
         AUTO_SUBMITTED = "auto_submitted", "Submitted when the timer expired"
         EXAM_CLOSED = "exam_closed", "Finalized because the teacher ended the exam"
         STALE_WRITE_REJECTED = "stale_write_rejected", "Out-of-date save request rejected"
+        QUESTION_LOCKED = "question_locked", "Edit refused by the no-return rule"
 
     attempt = models.ForeignKey(ExamAttempt, on_delete=models.CASCADE, related_name="events")
     kind = models.CharField(max_length=32, choices=Kind.choices, db_index=True)

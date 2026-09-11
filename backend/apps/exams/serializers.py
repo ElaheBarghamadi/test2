@@ -104,6 +104,7 @@ class ExamSettingsSerializer(serializers.ModelSerializer):
         model = ExamSettings
         fields = (
             "allow_previous_questions",
+            "question_layout",
             "randomize_questions",
             "result_visibility",
             "show_correct_answers",
@@ -128,6 +129,10 @@ class ExamSettingsSerializer(serializers.ModelSerializer):
         unexpected = set(data).difference(self.fields)
         if unexpected:
             raise serializers.ValidationError({field: "This is not a supported exam setting." for field in unexpected})
+        if isinstance(data.get("question_layout"), str):
+            # Normalised here rather than in a validator: the choice field itself rejects a value with
+            # stray spacing or capitals, so the fix-up has to happen before its validation.
+            data = {**data, "question_layout": data["question_layout"].strip().lower()}
         return super().to_internal_value(data)
 
 

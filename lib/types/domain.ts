@@ -83,6 +83,8 @@ export interface WrittenQuestion extends BaseQuestion {
 /** Discriminated question union used by the student renderer and teacher builder. */
 export type Question = MultipleChoiceQuestion | MultipleAnswerQuestion | TrueFalseQuestion | ShortAnswerQuestion | WrittenQuestion;
 
+export type QuestionLayout = "paged" | "single_page";
+
 export interface ExamSchedule {
   startAt: string;
   endAt: string;
@@ -98,6 +100,11 @@ export interface ExamSettings {
   randomizeOptions: boolean;
   /** False = the student cannot submit a blank answer; enforced by the server, warned about by the UI. */
   allowUnanswered: boolean;
+  /**
+   * How the sheet is laid out: one question at a time, or the whole exam on one page. Presentation only -
+   * it changes no mark, no snapshot and (except for the paged case below) no permission.
+   */
+  questionLayout: QuestionLayout;
   showResultImmediately: boolean;
   resultVisibility: ResultVisibility;
   showCorrectAnswers: boolean;
@@ -182,6 +189,12 @@ export interface ExamAttempt {
   remainingSeconds: number;
   answers: Record<string, ExamAnswer>;
   currentQuestionIndex: number;
+  /**
+   * How far the attempt has written, in this attempt's own question order. With `allowBackNavigation` off
+   * on a paged exam, everything below it is final - the server refuses those writes, and the runner keeps
+   * the student from trying. Kept in step by every heartbeat, so it needs no separate endpoint.
+   */
+  answerFrontier?: number;
   saveStatus: SaveStatus;
   lastSavedAt?: string;
   answerRevision: number;
@@ -202,7 +215,7 @@ export interface ExamAttempt {
 /** One server-recorded session/activity signal. An observation for the teacher, never a verdict. */
 export interface AttemptSignal {
   id: string;
-  kind: "session_switch" | "tab_hidden" | "tab_visible" | "disconnected" | "reconnected" | "auto_submitted" | "exam_closed" | "stale_write_rejected";
+  kind: "session_switch" | "tab_hidden" | "tab_visible" | "disconnected" | "reconnected" | "auto_submitted" | "exam_closed" | "stale_write_rejected" | "question_locked";
   at: string;
   detail?: Record<string, unknown>;
 }

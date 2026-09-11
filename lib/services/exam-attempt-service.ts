@@ -14,29 +14,39 @@ export interface SaveAttemptRequest {
 }
 
 /** A 409 from the attempt write guards, decoded so the caller can react to the *reason*. */
+export type AttemptConflictCode = "stale_revision" | "another_session_active" | "attempt_finalized" | "question_locked";
+
 export class AttemptWriteConflict extends Error {
   constructor(
-    public readonly code: "stale_revision" | "another_session_active" | "attempt_finalized",
+    public readonly code: AttemptConflictCode,
     message: string,
     public readonly answerRevision?: number,
+    /** Which questions the server refused, for the one code that names them. */
+    public readonly questionIds: string[] = [],
   ) {
     super(message);
     this.name = "AttemptWriteConflict";
   }
 }
 
-const CONFLICT_COPY: Record<AttemptWriteConflict["code"], string> = {
+const CONFLICT_COPY: Record<AttemptConflictCode, string> = {
   stale_revision: "نسخهٔ تازه‌تری روی سرور ثبت شده بود.",
   another_session_active: "این آزمون در پنجرهٔ دیگری باز است و همان پنجره در حال نوشتن است.",
   attempt_finalized: "نشست آزمون بسته شده است؛ پاسخ‌های ذخیره‌شده نمره گرفته‌اند.",
+  question_locked: "این سؤال را رد کرده‌اید و در این آزمون نمی‌توانید به آن برگردید.",
 };
 
 function asConflict(error: unknown): AttemptWriteConflict | null {
   if (!(error instanceof ApiError) || error.status !== 409) return null;
-  const payload = (error.payload ?? {}) as { code?: unknown; answer_revision?: unknown };
+  const payload = (error.payload ?? {}) as { code?: unknown; answer_revision?: unknown; question_ids?: unknown };
   const code = payload.code;
-  if (code !== "stale_revision" && code !== "another_session_active" && code !== "attempt_finalized") return null;
-  return new AttemptWriteConflict(code, CONFLICT_COPY[code], typeof payload.answer_revision === "number" ? payload.answer_revision : undefined);
+  if (code !== "stale_revision" && code !== "another_session_active" && code !== "attempt_finalized" && code !== "question_locked") return null;
+  return new AttemptWriteConflict(
+    code,
+    CONFLICT_COPY[code],
+    typeof payload.answer_revision === "number" ? payload.answer_revision : undefined,
+    Array.isArray(payload.question_ids) ? payload.question_ids.map(String) : [],
+  );
 }
 
 function toAnswerInput(question: Question, value: AnswerValue): ApiAnswerInput {
@@ -124,12 +134,13 @@ export const examAttemptService = {
    * This is the heartbeat endpoint, not the attempt detail: a class of 180 students polling every minute
    * should not download every question and every answer just to learn how many seconds are left.
    */
-  async syncClock(attemptId: string, examSession?: string): Promise<{ status: ExamAttempt["status"]; remainingSeconds: number; serverRevision?: number; sessionLockedByOther: boolean }> {
+  async syncClock(attemptId: string, examSession?: string): Promise<{ status: ExamAttempt["status"]; remainingSeconds: number; serverRevision?: number; answerFrontier?: number; sessionLockedByOther: boolean }> {
     const beat = await attemptsApi.heartbeat(attemptId, { examSession });
     return {
       status: beat.status,
       remainingSeconds: beat.remaining_seconds ?? 0,
       serverRevision: beat.answer_revision,
+      answerFrontier: beat.answer_frontier,
       sessionLockedByOther: beat.session_locked_by_other === true,
     };
   },

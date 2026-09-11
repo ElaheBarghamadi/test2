@@ -45,6 +45,8 @@ export interface ApiStudentQuestionDto {
 
 export interface ApiExamSettingsDto {
   allow_previous_questions: boolean;
+  /** Absent on a payload stored before the layout existed; the server default is one question a page. */
+  question_layout?: "paged" | "single_page";
   randomize_questions: boolean;
   randomize_options: boolean;
   allow_unanswered: boolean;
@@ -89,10 +91,17 @@ export interface ApiStudentAttemptExamDto {
   /** Marks, pass mark and release policy are student-safe; the answer key never is. */
   total_marks: number | string; question_count: number; passing_percentage: number | string;
   result_visibility: "immediate" | "pending" | "hidden";
-  navigation: { allow_previous_questions: boolean; randomize_questions: boolean; allow_unanswered: boolean };
+  navigation: {
+    allow_previous_questions: boolean;
+    randomize_questions: boolean;
+    allow_unanswered: boolean;
+    question_layout?: "paged" | "single_page";
+  };
 }
 export interface ApiAttemptDto {
   id: string; attempt_number: number; attempt_limit: number; answer_revision: number; status: ApiAttemptStatus; started_at: string;
+  /** Highest question index an answer was written to - the server's record, and the no-return boundary. */
+  answer_frontier?: number;
   submitted_at: string | null; last_activity_at: string; server_time: string; expires_at: string;
   remaining_seconds: number; exam: ApiStudentAttemptExamDto; questions: ApiStudentQuestionDto[];
   answers: ApiStudentAnswerDto[];
@@ -104,6 +113,9 @@ export interface ApiAvailableExamDto {
   passing_percentage: number | string; result_visibility: "immediate" | "pending" | "hidden";
   teacher_name: string;
   allow_unanswered: boolean;
+  /** Both are server-side rules the start screen has to state truthfully before an attempt exists. */
+  allow_previous_questions?: boolean;
+  question_layout?: "paged" | "single_page";
   availability: "available" | "upcoming" | "completed" | "in_progress";
   attempt: {
     id: string; status: ApiAttemptStatus; started_at: string; submitted_at: string | null;
@@ -198,6 +210,8 @@ export interface ApiAdminOverviewDto {
 
 /** Clock-only response for a live attempt; deliberately much smaller than the attempt detail. */
 export interface ApiAttemptHeartbeatDto {
+  /** Where the "no going back" rule currently sits; see `answerFrontier` in the domain model. */
+  answer_frontier?: number;
   server_time: string; expires_at: string | null; remaining_seconds: number | null;
   status: ApiAttemptStatus; answer_revision: number; session_locked_by_other: boolean; question_count: number;
 }

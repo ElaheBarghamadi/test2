@@ -33,6 +33,7 @@ from .services import (
     heartbeat,
     record_client_signal,
     refresh_attempt_if_expired,
+    record_attempt_event,
     save_answer,
     save_answers_batch,
     set_question_flag,
@@ -59,14 +60,22 @@ def _session_context(request) -> tuple[str, int | None]:  # type: ignore[no-unty
     return client_session, expected_revision
 
 
-def _conflict_response(exc: AttemptConflict) -> Response:
-    """A rejected write is a conflict, not a validation failure: clients branch on `code`."""
+def _conflict_response(exc: AttemptConflict, attempt: ExamAttempt | None = None) -> Response:
+    """A rejected write is a conflict, not a validation failure: clients branch on `code`.
+
+    The activity event travels on the exception and is written *here*, after the transaction that the
+    refusal rolled back. Recording it inside that block would roll the row back with the write, which is
+    how the teacher's log ended up missing exactly the attempts worth knowing about.
+    """
     payload: dict[str, object] = {
         "detail": str(exc),
         "code": exc.code,
         "status_code": status.HTTP_409_CONFLICT,
     }
     payload.update(exc.extra)
+    if exc.event is not None and attempt is not None:
+        kind, detail = exc.event
+        record_attempt_event(attempt, kind, detail=detail)
     return Response(payload, status=status.HTTP_409_CONFLICT)
 
 
@@ -103,6 +112,18 @@ def _hydrate_attempt(attempt_id: UUID, student) -> ExamAttempt:  # type: ignore[
     attempt = get_object_or_404(_attempt_detail_queryset().filter(student=student), pk=attempt_id)
     attempt.student_questions = _ordered_questions(attempt)
     return attempt
+
+
+def _attempt_question_indexes(attempt: ExamAttempt) -> dict[str, int]:
+    """Positions inside this attempt's snapshot, which is the order the student actually sees.
+
+    `get_attempt` already hydrated the ordered list, so this is a dict build over rows that are in memory
+    - not another query on the busiest write path in the product.
+    """
+    ordered = getattr(attempt, "student_questions", None)
+    if ordered is None:
+        ordered = _ordered_questions(attempt)
+    return {str(item.id): index for index, item in enumerate(ordered)}
 
 
 def _answer_response(answer_id: UUID) -> Response:
@@ -263,9 +284,12 @@ class StudentAttemptAnswerView(StudentAttemptAccessMixin, APIView):
                 serializer.validated_data,
                 client_session=client_session,
                 expected_revision=expected_revision,
+                # The "no going back" rule counts positions in this attempt's own order, so the index is
+                # resolved from the snapshot rather than taken from anything the client sends.
+                question_index=_attempt_question_indexes(attempt).get(str(question.id), 0),
             )
         except AttemptConflict as exc:
-            return _conflict_response(exc)
+            return _conflict_response(exc, attempt)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         return _answer_response(answer.id)
@@ -310,12 +334,18 @@ class StudentAttemptBatchAnswerView(StudentAttemptAccessMixin, APIView):
             raise serializers.ValidationError({"answers": item_errors})
 
         client_session, expected_revision = _session_context(request)
+        order = _attempt_question_indexes(attempt)
         try:
             answers = save_answers_batch(
-                attempt.id, request.user, updates, client_session=client_session, expected_revision=expected_revision
+                attempt.id,
+                request.user,
+                updates,
+                client_session=client_session,
+                expected_revision=expected_revision,
+                index_by_question=order,
             )
         except AttemptConflict as exc:
-            return _conflict_response(exc)
+            return _conflict_response(exc, attempt)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         answer_ids = [answer.id for answer in answers]
@@ -344,7 +374,7 @@ class StudentAttemptFlagView(StudentAttemptAccessMixin, APIView):
                 expected_revision=expected_revision,
             )
         except AttemptConflict as exc:
-            return _conflict_response(exc)
+            return _conflict_response(exc, attempt)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         return _answer_response(answer.id)
@@ -363,7 +393,7 @@ class StudentAttemptFlagView(StudentAttemptAccessMixin, APIView):
                 expected_revision=expected_revision,
             )
         except AttemptConflict as exc:
-            return _conflict_response(exc)
+            return _conflict_response(exc, attempt)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
         return _answer_response(answer.id)
@@ -380,7 +410,7 @@ class StudentAttemptSubmitView(StudentAttemptAccessMixin, APIView):
                 attempt.id, request.user, client_session=client_session, trigger=trigger
             )
         except AttemptConflict as exc:
-            return _conflict_response(exc)
+            return _conflict_response(exc, attempt)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
 
