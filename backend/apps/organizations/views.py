@@ -5,14 +5,16 @@ from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.response import Response
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.views import APIView
 
 from apps.exams.models import Exam
 from apps.users.models import StudentProfile, TeacherProfile, User
-from apps.users.permissions import IsAdministrator
+from apps.users.permissions import IsAdministrator, IsAdministratorOrSchoolAdmin
 
 from .models import School, SchoolMembership
-from .serializers import AdminExamSerializer, AdminSchoolSerializer, AdminUserCreateSerializer, AdminUserSerializer, AdminUserWriteSerializer
+from .scope import governs_nothing, is_school_admin, managed_school, scope_exams, scope_users
+from .serializers import AdminExamSerializer, AdminSchoolSerializer, AdminUserCreateSerializer, AdminUserSerializer, AdminUserWriteSerializer, SchoolSummarySerializer
 
 
 def schools_queryset():
@@ -20,6 +22,27 @@ def schools_queryset():
         user_count=Count("memberships", distinct=True),
         exam_count=Count("memberships__user__created_exams", distinct=True),
     )
+
+
+def _require_a_school(user) -> None:
+    """A school administrator without a membership governs nothing, so the console says so out loud.
+
+    Without this, every scoped read below would fall through to the platform-administrator branch and hand
+    an account with no school the whole network.
+    """
+    if governs_nothing(user):
+        raise PermissionDenied("حساب مدیر مدرسه به هیچ مدرسه‌ای وصل نشده است؛ مدیر کل باید عضویت او را تعیین کند.")
+
+
+def _deny_unless_platform_admin(user) -> None:
+    """Platform-wide changes stay with the platform administrator.
+
+    A school administrator governs one school; creating a school, renaming one, or deciding who is a
+    platform administrator is not a thing a school can do to the network, and the refusal is stated as a
+    rule rather than left to a permission class that would only answer 403 without a reason.
+    """
+    if is_school_admin(user):
+        raise PermissionDenied("این اقدام فقط برای مدیر کل سامانه است؛ مدیر مدرسه در همین مدرسهٔ خود دسترسی دارد.")
 
 
 def users_queryset():
@@ -67,12 +90,18 @@ def apply_school(user: User, data: dict) -> None:
 
 
 class AdminSchoolListCreateView(APIView):
-    permission_classes = (IsAdministrator,)
+    permission_classes = (IsAdministratorOrSchoolAdmin,)
 
     def get(self, request) -> Response:  # type: ignore[no-untyped-def]
-        return Response(AdminSchoolSerializer(schools_queryset(), many=True).data)
+        _require_a_school(request.user)
+        queryset = schools_queryset()
+        school = managed_school(request.user)
+        if school is not None:
+            queryset = queryset.filter(pk=school.pk)
+        return Response(AdminSchoolSerializer(queryset, many=True).data)
 
     def post(self, request) -> Response:  # type: ignore[no-untyped-def]
+        _deny_unless_platform_admin(request.user)
         serializer = AdminSchoolSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         school = serializer.save()
@@ -80,9 +109,10 @@ class AdminSchoolListCreateView(APIView):
 
 
 class AdminSchoolDetailView(APIView):
-    permission_classes = (IsAdministrator,)
+    permission_classes = (IsAdministratorOrSchoolAdmin,)
 
     def patch(self, request, school_id) -> Response:  # type: ignore[no-untyped-def]
+        _deny_unless_platform_admin(request.user)
         school = get_object_or_404(School, pk=school_id)
         serializer = AdminSchoolSerializer(school, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -91,10 +121,16 @@ class AdminSchoolDetailView(APIView):
 
 
 class AdminUserListCreateView(APIView):
-    permission_classes = (IsAdministrator,)
+    permission_classes = (IsAdministratorOrSchoolAdmin,)
 
     def get(self, request) -> Response:  # type: ignore[no-untyped-def]
-        queryset = users_queryset()
+        _require_a_school(request.user)
+        # A school administrator never sees the whole platform's roster, whatever the query string says.
+        asking_about = request.query_params.get("school_id", "").strip()
+        school = managed_school(request.user)
+        if school is not None and asking_about and asking_about != str(school.pk):
+            raise PermissionDenied("مدیر مدرسه فقط کاربران مدرسهٔ خودش را می‌بیند.")
+        queryset = scope_users(request.user, users_queryset())
         if search := request.query_params.get("search", "").strip():
             queryset = queryset.filter(Q(email__icontains=search) | Q(first_name__icontains=search) | Q(last_name__icontains=search))
         if role := request.query_params.get("role"):
@@ -106,9 +142,20 @@ class AdminUserListCreateView(APIView):
         return Response(AdminUserSerializer(queryset, many=True).data)
 
     def post(self, request) -> Response:  # type: ignore[no-untyped-def]
+        _require_a_school(request.user)
+        school = managed_school(request.user)
+        requested_role = request.data.get("role", User.Role.STUDENT)
+        if school is not None and requested_role in {User.Role.ADMIN, User.Role.SCHOOL_ADMIN}:
+            # Creating an administrator — of the platform or of a school — is not something a school
+            # administrator can do to themselves or to anyone else.
+            raise PermissionDenied("نقش مدیر را فقط مدیر کل سامانه می‌تواند بدهد.")
         serializer = AdminUserCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        if school is not None:
+            # The new account belongs to the administrator's own school, whatever the payload claimed.
+            data["school"] = school
+            data["school_id"] = str(school.pk)
         with transaction.atomic():
             user = User.objects.create_user(
                 email=data["email"], password=data["password"], first_name=data.get("first_name", ""),
@@ -120,10 +167,19 @@ class AdminUserListCreateView(APIView):
 
 
 class AdminUserDetailView(APIView):
-    permission_classes = (IsAdministrator,)
+    permission_classes = (IsAdministratorOrSchoolAdmin,)
 
     def patch(self, request, user_id) -> Response:  # type: ignore[no-untyped-def]
-        user = get_object_or_404(users_queryset(), pk=user_id)
+        _require_a_school(request.user)
+        user = get_object_or_404(scope_users(request.user, users_queryset()), pk=user_id)
+        school = managed_school(request.user)
+        if school is not None:
+            if request.data.get("role") in {User.Role.ADMIN, User.Role.SCHOOL_ADMIN}:
+                raise PermissionDenied("مدیر مدرسه نمی‌تواند نقش مدیر بدهد.")
+            wanted_school = request.data.get("school_id")
+            if wanted_school not in (None, "", str(school.pk)):
+                # Moving a person out of the school you administer is the platform's decision, not yours.
+                raise PermissionDenied("مدیر مدرسه فقط می‌تواند کاربر را در مدرسهٔ خودش نگه دارد.")
         serializer = AdminUserWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -142,13 +198,23 @@ class AdminUserDetailView(APIView):
 
 
 class AdminOverviewView(APIView):
-    permission_classes = (IsAdministrator,)
+    """The console's front page, sized to whoever is looking at it.
+
+    A platform administrator counts the network. A school administrator counts *their school*, from the same
+    endpoint, and `scope` tells the interface which of the two it is drawing so the wording and the available
+    actions follow the data rather than a second client-side guess at the role.
+    """
+
+    permission_classes = (IsAdministratorOrSchoolAdmin,)
 
     def get(self, request) -> Response:  # type: ignore[no-untyped-def]
-        users = User.objects.all()
-        exams = Exam.objects.all()
+        _require_a_school(request.user)
+        school = managed_school(request.user)
+        users = User.objects.filter(school_membership__school=school) if school else User.objects.all()
+        exams = Exam.objects.filter(teacher__school_membership__school=school) if school else Exam.objects.all()
         return Response({
-            "school_count": School.objects.filter(is_active=True).count(),
+            "scope": {"kind": "school" if school else "platform", "school": SchoolSummarySerializer(school).data if school else None},
+            "school_count": (1 if school else School.objects.filter(is_active=True).count()),
             "user_count": users.count(),
             "user_counts": {role: users.filter(role=role).count() for role in User.Role.values},
             "active_exam_count": exams.filter(status=Exam.Status.ACTIVE).count(),
@@ -163,10 +229,13 @@ class AdminOverviewView(APIView):
 
 
 class AdminExamListView(APIView):
-    permission_classes = (IsAdministrator,)
+    """Every paper of the network, or of one school — the same view, scoped by who is asking."""
+
+    permission_classes = (IsAdministratorOrSchoolAdmin,)
 
     def get(self, request) -> Response:  # type: ignore[no-untyped-def]
-        queryset = Exam.objects.select_related("teacher", "teacher__school_membership__school").annotate(
+        _require_a_school(request.user)
+        queryset = scope_exams(request.user, Exam.objects.select_related("teacher", "teacher__school_membership__school")).annotate(
             question_count=Count("questions", distinct=True), participant_count=Count("attempts__student", distinct=True)
         ).order_by("-updated_at")
         if search := request.query_params.get("search", "").strip():

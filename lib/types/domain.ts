@@ -1,4 +1,4 @@
-export type Role = "student" | "teacher" | "admin";
+export type Role = "student" | "teacher" | "admin" | "school_admin";
 export type ExamStatus = "draft" | "scheduled" | "active" | "completed" | "archived";
 export type QuestionType = "single_choice" | "multiple_choice" | "true_false" | "short_answer" | "essay";
 export type AnswerValue = string | string[] | boolean | null;

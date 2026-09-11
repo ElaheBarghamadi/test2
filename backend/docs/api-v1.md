@@ -559,7 +559,33 @@ Kinds: `exam_published`, `exam_started`, `exam_ended`, `grading_required`, `grad
 
 ## Organization administration API
 
-All routes below require the `admin` role. They are a real management surface, not a replacement for Django's superuser administration.
+All routes below require the `admin` role — or `school_admin`, whose reach is the same endpoints narrowed to
+one school by the server. They are a real management surface, not a replacement for Django's superuser
+administration.
+
+| Role | Reach |
+| --- | --- |
+| `admin` | the whole network. |
+| `school_admin` («مدیر مدرسه») | the school of their own `SchoolMembership`: its people, its papers, its results. |
+
+A school administrator may list and provision accounts **inside their school** (`student`, `teacher`), change
+names, password, active state and role-appropriate profile, monitor the school's exams, and move a paper
+through its lifecycle (`/exams/{id}/publish/`, `start`, `extend`, `complete`, `archive`, `restore`) and
+publish its results. Three things are refused, with a Persian `detail` rather than a bare 403:
+
+- **network-wide objects**: creating or editing a `School`, and granting the `admin` or `school_admin` role;
+- **authoring**: `POST /exams/`, `PATCH /exams/{id}/`, anything under `/exams/{id}/questions/`, and
+  `duplicate` — a principal editing a teacher's stems would make the answer key disagree with attempts that
+  were already graded against it;
+- **answer sheets**: `/results/teacher/attempts/{id}/`, the grading board, the cohort grading page, manual
+  grades and per-answer feedback. Scores, pending counts and publication are supervision; a student's sheet
+  is not.
+
+Query strings cannot widen any of it: `?school_id=` naming another school is a 403, and a foreign object id
+is a 404 because every route resolves through a queryset already narrowed to the administrator's school. A
+`school_admin` account whose own membership is missing governs **nothing** — the console answers 403 and the
+exam list is empty, because the membership *is* the scope and falling back to "all" would be the worst
+possible default.
 
 | Method | URL | Purpose |
 | --- | --- | --- |
@@ -567,7 +593,7 @@ All routes below require the `admin` role. They are a real management surface, n
 | `PATCH` | `/admin/schools/{school_id}/` | Change a school name, city, or active status. Join codes are server-generated/read-only. |
 | `GET`, `POST` | `/admin/users/` | List/filter all accounts, or provision an account and optional school/profile. |
 | `PATCH` | `/admin/users/{user_id}/` | Change names, role, active status, password, school membership, and role-appropriate profile. |
-| `GET` | `/admin/overview/` | Real counts plus recent user/exam summaries. |
+| `GET` | `/admin/overview/` | Real counts plus recent user/exam summaries, and `scope: { kind, school }` saying which console the payload describes. |
 | `GET` | `/admin/exams/` | Network-wide, read-only exam monitoring including owner, school, questions, and participants. |
 
 School deletion is deliberately absent because memberships are protected. Deactivation prevents public code-based joins and new administrative assignments while retaining historical relationships. Each user has at most one membership. Administrators cannot remove their own admin role or deactivate their own account. User list filters are `search`, `role`, and `school_id`.

@@ -5,11 +5,13 @@ from django.db import transaction
 from django.db.models import Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.users.models import User
-from apps.users.permissions import IsExamOwnerOrAdministrator, IsTeacherOrAdministrator
+from apps.organizations.scope import is_school_admin, scope_exams
+from apps.users.permissions import CanSuperviseExam, IsExamOwnerOrAdministrator, IsTeacherOrAdministrator
 
 from .models import Exam, Question, QuestionOption, QuestionTag
 from .serializers import (
@@ -63,8 +65,27 @@ def _drf_validation_error(exc: DjangoValidationError) -> serializers.ValidationE
     return serializers.ValidationError(exc.messages)
 
 
+def _refuse_school_admin_authoring(user) -> None:
+    """Authoring is the owner's job, and the console says so in the language the teacher reads.
+
+    The rule is enforced here rather than hidden in the interface: a school administrator's reach is the
+    paper's lifecycle — schedule, publication, results — and writing a teacher's stems would make the answer
+    key disagree with attempts that were already graded against it.
+    """
+    if is_school_admin(user):
+        raise PermissionDenied("مدیر مدرسه نمی‌تواند محتوای آزمون را تغییر دهد؛ این کار آموزگار مالک آزمون است.")
+
+
 class TeacherExamAccessMixin:
-    permission_classes = (IsTeacherOrAdministrator, IsExamOwnerOrAdministrator)
+    """Scoping and permissions for the teacher-facing exam routes.
+
+    A school administrator reaches this family for **reading and lifecycle**: `CanSuperviseExam` admits them
+    and `scope_exams` narrows every queryset to their own school, so a foreign exam id is a 404 before any
+    object check. Writing is refused per entry point (see `_refuse_school_admin_authoring`) or, for the
+    question family, by `QuestionAccessMixin` restating the stricter pair.
+    """
+
+    permission_classes = (CanSuperviseExam,)
     # Authoring is bulk-friendly by design (options, reorder, import), so the same write budget that
     # guards the exam engine guards it: 240/min is far above real editing, and it caps a runaway loop.
     throttle_scope = "exam_write"
@@ -85,8 +106,11 @@ class TeacherExamAccessMixin:
                     ),
                 )
             )
-        if self.request.user.role != User.Role.ADMIN:
+        if self.request.user.role == User.Role.TEACHER:
             queryset = queryset.filter(teacher=self.request.user)
+        else:
+            # Platform admin sees the network; a school administrator sees their school's papers.
+            queryset = scope_exams(self.request.user, queryset)
         return queryset
 
     def get_exam(self, exam_id, *, include_questions: bool = False) -> Exam:  # type: ignore[no-untyped-def]
@@ -125,6 +149,7 @@ class TeacherExamListCreateView(TeacherExamAccessMixin, APIView):
         return Response(TeacherExamListSerializer(queryset, many=True).data)
 
     def post(self, request) -> Response:  # type: ignore[no-untyped-def]
+        _refuse_school_admin_authoring(request.user)
         serializer = ExamWriteSerializer(data=request.data, context={"teacher": request.user})
         serializer.is_valid(raise_exception=True)
         exam = serializer.save()
@@ -136,6 +161,7 @@ class TeacherExamDetailView(TeacherExamAccessMixin, APIView):
         return Response(TeacherExamSerializer(self.get_exam(exam_id, include_questions=True)).data)
 
     def patch(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
+        _refuse_school_admin_authoring(request.user)
         exam = self.get_exam(exam_id)
         serializer = ExamWriteSerializer(exam, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -147,6 +173,9 @@ class ExamActionView(TeacherExamAccessMixin, APIView):
     action = None
 
     def post(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
+        # Duplicating a paper builds new rows, so it is authoring even though it reads like an action.
+        if self.action == "duplicate":
+            _refuse_school_admin_authoring(request.user)
         # Resolve through owner-scoped queryset before any state-changing service call.
         exam = self.get_exam(exam_id)
         try:
@@ -176,6 +205,14 @@ class ExamActionView(TeacherExamAccessMixin, APIView):
 
 
 class QuestionAccessMixin(TeacherExamAccessMixin):
+    """Question content: the owner or the platform admin only.
+
+    Inherits the scoping and the response helpers, but not `CanSuperviseExam` — a school administrator
+    supervising a paper must not be able to add, edit, import, reorder or archive its questions.
+    """
+
+    permission_classes = (IsTeacherOrAdministrator, IsExamOwnerOrAdministrator)
+
     def get_question_queryset(self):  # type: ignore[no-untyped-def]
         queryset = (
             Question.objects.select_related("exam", "exam__teacher")

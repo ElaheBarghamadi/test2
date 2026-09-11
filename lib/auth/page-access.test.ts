@@ -13,7 +13,7 @@ describe("ruleFor", () => {
   it("covers a whole subtree, not just the index page", () => {
     expect(ruleFor("/student")?.allow).toEqual(["student"]);
     expect(ruleFor("/student/exam/exam-1/review")?.allow).toEqual(["student"]);
-    expect(ruleFor("/admin/users")?.allow).toEqual(["admin"]);
+    expect(ruleFor("/admin/users")?.allow).toEqual(["admin", "school_admin"]);
   });
 
   it("does not let a prefix match a look-alike route", () => {
@@ -26,7 +26,9 @@ describe("ruleFor", () => {
 
   it("lists the teacher panel for teachers and administrators, and the admin panel for nobody else", () => {
     expect(ACCESS_RULES.find((rule) => rule.prefix === "/teacher")?.allow).toEqual(["teacher", "admin"]);
-    expect(ACCESS_RULES.find((rule) => rule.prefix === "/admin")?.allow).toEqual(["admin"]);
+    // The school administrator shares the admin console — one school of it — and is not admitted to the
+    // teacher panel, because authoring a paper is not their job.
+    expect(ACCESS_RULES.find((rule) => rule.prefix === "/admin")?.allow).toEqual(["admin", "school_admin"]);
   });
 });
 
@@ -65,8 +67,10 @@ describe("loginTarget", () => {
 });
 
 describe("isRole and dashboardFor", () => {
-  it("only accepts the three roles the API can hand out", () => {
+  it("only accepts the roles the API can hand out", () => {
     expect(isRole("admin")).toBe(true);
+    expect(isRole("school_admin")).toBe(true);
+    expect(isRole("school admin")).toBe(false);
     expect(isRole("ADMIN")).toBe(false);
     expect(isRole("root")).toBe(false);
     expect(isRole(null)).toBe(false);
@@ -76,6 +80,8 @@ describe("isRole and dashboardFor", () => {
     expect(dashboardFor("teacher")).toBe("/teacher/dashboard");
     expect(dashboardFor("admin")).toBe("/admin/dashboard");
     expect(dashboardFor("student")).toBe("/student/dashboard");
+    // A school administrator has no panel of their own: the console they share with the platform admin.
+    expect(dashboardFor("school_admin")).toBe("/admin/dashboard");
   });
 });
 
@@ -105,6 +111,17 @@ describe("decideAccess", () => {
     // An administrator may open a teacher screen: the API accepts both roles there.
     expect(decideAccess("/teacher/exams", { kind: "verified", role: "admin" })).toEqual({ action: "render" });
     expect(decideAccess("/admin/users", { kind: "verified", role: "admin" })).toEqual({ action: "render" });
+    expect(decideAccess("/admin/users", { kind: "verified", role: "school_admin" })).toEqual({ action: "render" });
+    expect(decideAccess("/admin/schools", { kind: "verified", role: "school_admin" })).toEqual({ action: "render" });
+    // …but not the teacher surfaces: the API would answer 403 and the school admin has no business there.
+    expect(decideAccess("/teacher/exams", { kind: "verified", role: "school_admin" })).toEqual({
+      action: "foreign-role",
+      to: "/admin/dashboard",
+    });
+    expect(decideAccess("/student/dashboard", { kind: "verified", role: "school_admin" })).toEqual({
+      action: "foreign-role",
+      to: "/admin/dashboard",
+    });
   });
 
   it("moves a signed-in stranger to their own panel without logging them out", () => {

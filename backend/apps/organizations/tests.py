@@ -155,3 +155,157 @@ class SchoolIsolationApiTests(TestCase):
             self.client.force_authenticate(student)
             self.assertEqual(self.client.get("/api/v1/student/exams/").data, [])
             self.assertEqual(self.client.post(f"/api/v1/student/exams/{self.exam.id}/start/").status_code, 400)
+
+
+class SchoolAdministratorApiTests(TestCase):
+    """«مدیر مدرسه»: one school, its people, its papers and their results — and no further.
+
+    The role is deliberately *not* a smaller platform administrator. Everything below checks one of three
+    things: the reach is the whole school (not one teacher's rows), the reach stops at the school's border
+    (a foreign object is a 404, and a query string cannot widen it), and the two things a principal must
+    never do — author a teacher's paper, read a student's answers — are refused at the API rather than only
+    hidden in the interface.
+    """
+
+    password = "A-strong-test-password-927"
+
+    def setUp(self) -> None:
+        self.platform_admin = User.objects.create_user(email="root@example.com", password=self.password, role=User.Role.ADMIN)
+        self.principal = User.objects.create_user(email="principal@example.com", password=self.password, role=User.Role.SCHOOL_ADMIN)
+        self.orphan_principal = User.objects.create_user(email="orphan@example.com", password=self.password, role=User.Role.SCHOOL_ADMIN)
+        self.teacher = User.objects.create_user(email="school.teacher@example.com", password=self.password, role=User.Role.TEACHER)
+        self.rival_teacher = User.objects.create_user(email="rival.teacher@example.com", password=self.password, role=User.Role.TEACHER)
+        self.student = User.objects.create_user(email="school.student@example.com", password=self.password)
+        self.client = APIClient()
+
+        self.school = School.objects.create(name="North Academy", city="Tehran")
+        self.other_school = School.objects.create(name="South Academy", city="Shiraz")
+        for user, school in ((self.principal, self.school), (self.teacher, self.school), (self.student, self.school), (self.rival_teacher, self.other_school)):
+            SchoolMembership.objects.create(user=user, school=school)
+
+        self.exam = self.make_exam(self.teacher, "Physics midterm")
+        self.foreign_exam = self.make_exam(self.rival_teacher, "Chemistry midterm")
+
+    def make_exam(self, owner: User, title: str) -> Exam:
+        exam = Exam.objects.create(teacher=owner, title=title, subject="Physics", duration_minutes=45, status=Exam.Status.DRAFT)
+        question = Question.objects.create(exam=exam, type=Question.Type.MULTIPLE_CHOICE, text="Force unit?", order=1, marks=2)
+        QuestionOption.objects.create(question=question, text="Newton", is_correct=True, order=1)
+        QuestionOption.objects.create(question=question, text="Joule", is_correct=False, order=2)
+        return exam
+
+    def authenticate(self, user: User) -> None:
+        self.client.force_authenticate(user)
+
+    def test_overview_is_the_school_not_the_network(self) -> None:
+        self.authenticate(self.principal)
+        data = self.client.get("/api/v1/admin/overview/").data
+        self.assertEqual(data["scope"]["kind"], "school")
+        self.assertEqual(data["scope"]["school"]["name"], "North Academy")
+        self.assertEqual(data["user_count"], 3, "principal, teacher and student of this school")
+        self.assertEqual(data["exam_count"], 1)
+        self.assertEqual(data["school_count"], 1)
+
+        self.authenticate(self.platform_admin)
+        platform = self.client.get("/api/v1/admin/overview/").data
+        self.assertEqual(platform["scope"]["kind"], "platform")
+        self.assertIsNone(platform["scope"]["school"])
+        self.assertGreater(platform["exam_count"], 1)
+
+    def test_roster_is_the_school_and_a_query_string_cannot_widen_it(self) -> None:
+        self.authenticate(self.principal)
+        rows = self.client.get("/api/v1/admin/users/").data
+        self.assertEqual({row["email"] for row in rows}, {"principal@example.com", "school.teacher@example.com", "school.student@example.com"})
+
+        refused = self.client.get(f"/api/v1/admin/users/?school_id={self.other_school.pk}")
+        self.assertEqual(refused.status_code, 403)
+
+    def test_schools_are_read_only_and_limited_to_their_own(self) -> None:
+        self.authenticate(self.principal)
+        rows = self.client.get("/api/v1/admin/schools/").data
+        self.assertEqual([row["name"] for row in rows], ["North Academy"])
+        self.assertEqual(self.client.post("/api/v1/admin/schools/", {"name": "Third Academy"}, format="json").status_code, 403)
+        self.assertEqual(self.client.patch(f"/api/v1/admin/schools/{self.school.pk}/", {"city": "Qom"}, format="json").status_code, 403)
+
+    def test_people_can_be_created_only_inside_the_school_and_never_as_administrators(self) -> None:
+        self.authenticate(self.principal)
+        created = self.client.post(
+            "/api/v1/admin/users/",
+            {
+                "email": "new.teacher@example.com", "password": self.password, "first_name": "N", "last_name": "K",
+                "role": User.Role.TEACHER, "school_id": str(self.other_school.pk), "teacher_profile": {"department": "Math"},
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.data["school"]["name"], "North Academy", "the new account lands in the principal's own school")
+
+        for role in (User.Role.ADMIN, User.Role.SCHOOL_ADMIN):
+            refused = self.client.post(
+                "/api/v1/admin/users/",
+                {"email": f"{role}@example.com", "password": self.password, "role": role},
+                format="json",
+            )
+            self.assertEqual(refused.status_code, 403, f"a principal cannot hand out the {role} role")
+
+    def test_people_of_another_school_are_not_even_visible(self) -> None:
+        self.authenticate(self.principal)
+        self.assertEqual(self.client.patch(f"/api/v1/admin/users/{self.rival_teacher.pk}/", {"is_active": False}, format="json").status_code, 404)
+
+        # Moving one of their own people out of the school is the platform's decision.
+        refused = self.client.patch(f"/api/v1/admin/users/{self.teacher.pk}/", {"school_id": str(self.other_school.pk)}, format="json")
+        self.assertEqual(refused.status_code, 403)
+        self.assertEqual(self.client.patch(f"/api/v1/admin/users/{self.teacher.pk}/", {"role": User.Role.ADMIN}, format="json").status_code, 403)
+        self.teacher.refresh_from_db()
+        self.assertEqual(self.teacher.school_membership.school_id, self.school.pk)
+
+    def test_papers_of_the_school_are_supervised_not_written(self) -> None:
+        self.authenticate(self.principal)
+        exams = self.client.get("/api/v1/exams/").data
+        self.assertEqual([exam["title"] for exam in exams], ["Physics midterm"])
+        self.assertEqual(self.client.get(f"/api/v1/exams/{self.exam.pk}/").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/v1/exams/{self.foreign_exam.pk}/").status_code, 404, "a foreign paper is not there at all")
+
+        self.assertEqual(self.client.post(f"/api/v1/exams/{self.exam.pk}/publish/", {}).status_code, 200)
+        self.exam.refresh_from_db()
+        # A paper whose window is unset publishes straight into `active`; either way it left `draft`, which
+        # is the point - the principal moved it, not the owner.
+        self.assertIn(self.exam.status, {Exam.Status.SCHEDULED, Exam.Status.ACTIVE})
+        self.assertEqual(self.client.post(f"/api/v1/exams/{self.exam.pk}/extend/", {"extra_minutes": 15}, format="json").status_code, 200)
+
+        # Reading a supervised paper is fine; writing its content is not.
+        self.assertEqual(self.client.patch(f"/api/v1/exams/{self.exam.pk}/", {"title": "Renamed"}, format="json").status_code, 403)
+        self.assertEqual(self.client.post("/api/v1/exams/", {"title": "X", "subject": "Y", "duration_minutes": 30}, format="json").status_code, 403)
+        self.assertEqual(self.client.post(f"/api/v1/exams/{self.exam.pk}/duplicate/", {}).status_code, 403)
+        self.assertEqual(self.client.post(f"/api/v1/exams/{self.exam.pk}/questions/", {"type": "written", "text": "x", "marks": 1}, format="json").status_code, 403)
+
+    def test_results_are_visible_and_publishable_but_sheets_are_not(self) -> None:
+        self.authenticate(self.principal)
+        self.assertEqual(self.client.get("/api/v1/results/teacher/overview/").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/v1/results/teacher/exams/{self.exam.pk}/").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/results/teacher/students/").status_code, 200)
+        self.assertEqual(self.client.post(f"/api/v1/results/teacher/exams/{self.exam.pk}/publish/", {}).status_code, 200)
+
+        self.assertEqual(self.client.get(f"/api/v1/results/teacher/exams/{self.exam.pk}/grading/").status_code, 403, "the marking desk is an answer sheet")
+        self.assertEqual(self.client.get(f"/api/v1/results/teacher/exams/{self.foreign_exam.pk}/").status_code, 404)
+
+    def test_a_principal_without_a_school_governs_nothing(self) -> None:
+        """The role's authority *is* its membership; with none, the fallback must be "nothing"."""
+        self.authenticate(self.orphan_principal)
+        for path in ("/api/v1/admin/overview/", "/api/v1/admin/users/", "/api/v1/admin/schools/", "/api/v1/admin/exams/"):
+            self.assertEqual(self.client.get(path).status_code, 403, path)
+        self.assertEqual(self.client.get("/api/v1/exams/").data, [])
+        self.assertEqual(self.client.get(f"/api/v1/exams/{self.exam.pk}/").status_code, 404)
+
+    def test_exam_monitoring_list_is_scoped(self) -> None:
+        self.authenticate(self.principal)
+        rows = self.client.get("/api/v1/admin/exams/").data
+        self.assertEqual([row["title"] for row in rows], ["Physics midterm"])
+        self.authenticate(self.platform_admin)
+        self.assertEqual(len(self.client.get("/api/v1/admin/exams/").data), 2)
+
+    def test_a_principal_cannot_unlock_themself(self) -> None:
+        self.authenticate(self.principal)
+        refused = self.client.patch(f"/api/v1/admin/users/{self.principal.pk}/", {"role": User.Role.ADMIN}, format="json")
+        self.assertEqual(refused.status_code, 403)
+        self.principal.refresh_from_db()
+        self.assertEqual(self.principal.role, User.Role.SCHOOL_ADMIN)

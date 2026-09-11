@@ -38,6 +38,9 @@ class User(TimeStampedUUIDModel, AbstractBaseUser, PermissionsMixin):
         STUDENT = "student", "Student"
         TEACHER = "teacher", "Teacher"
         ADMIN = "admin", "Administrator"
+        # Scoped to one school through `SchoolMembership`: supervision of its people, papers and results,
+        # never authoring a teacher's paper and never a student's answer sheet. See `apps/organizations/scope.py`.
+        SCHOOL_ADMIN = "school_admin", "School administrator"
 
     email = models.EmailField(unique=True)
     first_name = models.CharField(max_length=150, blank=True)

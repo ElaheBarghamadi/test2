@@ -21,8 +21,15 @@ export const roleNavigation: Record<Role, NavItem[]> = {
     { label: "مدارس", href: "/admin/schools", icon: School },
     { label: "آزمون‌ها", href: "/admin/exams", icon: FileText },
   ],
+  // The same console, without the network-wide surfaces a school administrator may not reach: schools are
+  // read-only for them and creating one is refused by the API, so it is not offered here either.
+  school_admin: [
+    { label: "نمای کلی", href: "/admin/dashboard", icon: LayoutDashboard },
+    { label: "کاربران مدرسه", href: "/admin/users", icon: Users },
+    { label: "آزمون‌های مدرسه", href: "/admin/exams", icon: FileText },
+  ],
 };
-export const roleLabel: Record<Role, string> = { student: "دانش‌آموز", teacher: "آموزگار", admin: "مدیر سامانه" };
-export const roleIcon: Record<Role, LucideIcon> = { student: BookOpenCheck, teacher: UserRoundCog, admin: Building2 };
+export const roleLabel: Record<Role, string> = { student: "دانش‌آموز", teacher: "آموزگار", admin: "مدیر سامانه", school_admin: "مدیر مدرسه" };
+export const roleIcon: Record<Role, LucideIcon> = { student: BookOpenCheck, teacher: UserRoundCog, admin: Building2, school_admin: School };
 export const supportNav: NavItem = { label: "تنظیمات", href: "#", icon: Settings2 };
 export const homeNav: NavItem = { label: "خانه", href: "/", icon: Home };

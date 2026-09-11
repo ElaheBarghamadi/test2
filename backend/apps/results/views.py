@@ -17,7 +17,8 @@ from apps.attempts.services import _grade_attempt, attempt_timing
 from apps.exams.models import Exam, Question
 from apps.organizations.models import SchoolMembership
 from apps.users.models import User
-from apps.users.permissions import IsTeacherOrAdministrator
+from apps.organizations.scope import scope_exams
+from apps.users.permissions import IsTeacherOrAdministrator, IsTeacherOrSchoolStaff
 
 from .models import ExamResult
 from .serializers import (
@@ -31,12 +32,20 @@ from .serializers import (
 
 
 class TeacherResultsAccessMixin:
-    permission_classes = (IsTeacherOrAdministrator,)
+    """Results supervision: the owner, the platform admin, or the administrator of the paper's school.
+
+    The five views that expose or write a *student's answers* restate the stricter pair, because a school
+    administrator's scope ends at scores: they see who is pending and publish results, and never open a sheet.
+    """
+
+    permission_classes = (IsTeacherOrSchoolStaff,)
 
     def exams(self):  # type: ignore[no-untyped-def]
         queryset = Exam.objects.select_related("settings", "teacher")
-        if self.request.user.role != User.Role.ADMIN:
+        if self.request.user.role == User.Role.TEACHER:
             queryset = queryset.filter(teacher=self.request.user)
+        else:
+            queryset = scope_exams(self.request.user, queryset)
         return queryset
 
     def attempts(self):  # type: ignore[no-untyped-def]
@@ -219,6 +228,10 @@ class TeacherExamResultsView(TeacherResultsAccessMixin, APIView):
 
 
 class TeacherAttemptDetailView(TeacherResultsAccessMixin, APIView):
+    # answers: a school administrator does not reach this. The mixin admits them to
+    # results supervision — scores, pending counts, publication — and this route is the answer sheet
+    # itself.
+    permission_classes = (IsTeacherOrAdministrator,)
     def get(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
         attempt = self.get_attempt(attempt_id)
         answers = (
@@ -262,6 +275,10 @@ class TeacherAttemptDetailView(TeacherResultsAccessMixin, APIView):
 
 
 class TeacherManualGradeView(TeacherResultsAccessMixin, APIView):
+    # grades: a school administrator does not reach this. The mixin admits them to
+    # results supervision — scores, pending counts, publication — and this route is the answer sheet
+    # itself.
+    permission_classes = (IsTeacherOrAdministrator,)
     def patch(self, request, attempt_id, question_id) -> Response:  # type: ignore[no-untyped-def]
         with transaction.atomic():
             attempt = self.get_attempt(attempt_id)
@@ -312,6 +329,10 @@ def _notify_grading_completed(attempt: ExamAttempt, result: ExamResult) -> None:
 
 
 class TeacherExamGradingBoardView(TeacherResultsAccessMixin, APIView):
+    # board: a school administrator does not reach this. The mixin admits them to
+    # results supervision — scores, pending counts, publication — and this route is the answer sheet
+    # itself.
+    permission_classes = (IsTeacherOrAdministrator,)
     """One exam's marking board: every question with how much of the cohort still needs a pen.
 
     The counts are computed from the same verdict function that grading uses, so a question the teacher
@@ -407,6 +428,10 @@ def _grading_board(exam: Exam, attempts) -> dict:  # type: ignore[type-arg]
 
 
 class TeacherExamQuestionGradingView(TeacherResultsAccessMixin, APIView):
+    # cohort grading: a school administrator does not reach this. The mixin admits them to
+    # results supervision — scores, pending counts, publication — and this route is the answer sheet
+    # itself.
+    permission_classes = (IsTeacherOrAdministrator,)
     """One question across the whole cohort — the other way through the same marks.
 
     Sheet-by-sheet marking is right for finishing one student; this is right for one rubric applied to
@@ -574,6 +599,10 @@ def _question_rows(exam: Exam, question: Question, attempts) -> list[dict]:  # t
 
 
 class TeacherResultFeedbackView(TeacherResultsAccessMixin, APIView):
+    # feedback: a school administrator does not reach this. The mixin admits them to
+    # results supervision — scores, pending counts, publication — and this route is the answer sheet
+    # itself.
+    permission_classes = (IsTeacherOrAdministrator,)
     def patch(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
         attempt = self.get_attempt(attempt_id)
         result = get_object_or_404(ExamResult, attempt=attempt)

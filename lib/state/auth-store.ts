@@ -6,6 +6,7 @@ import { apiErrorMessage, setAuthenticationFailureHandler } from "@/lib/api/clie
 import { toUser } from "@/lib/api/mappers";
 import { tokenStorage } from "@/lib/api/token-storage";
 import { clearSessionMirror, syncSessionMirror } from "@/lib/api/session-mirror";
+import { rolePanel } from "@/lib/auth/roles";
 import type { ApiRegisterPayload } from "@/lib/api/dtos";
 import type { User } from "@/lib/types/domain";
 
@@ -23,7 +24,7 @@ interface AuthState {
 
 const anonymous = { user: null, status: "anonymous" as const };
 
-export const dashboardForRole = (role: User["role"]) => `/${role}/dashboard`;
+export const dashboardForRole = (role: User["role"]) => `/${rolePanel[role]}/dashboard`;
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,

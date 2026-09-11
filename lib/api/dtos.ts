@@ -1,5 +1,5 @@
 /** Wire types mirror the Django REST serializers. Keep them separate from UI/domain types. */
-export type ApiRole = "student" | "teacher" | "admin";
+export type ApiRole = "student" | "teacher" | "admin" | "school_admin";
 export type ApiExamStatus = "draft" | "scheduled" | "active" | "completed" | "archived";
 export type ApiQuestionType = "multiple_choice" | "multiple_answer" | "true_false" | "short_answer" | "written";
 export type ApiAttemptStatus = "in_progress" | "submitted" | "expired";
@@ -218,10 +218,15 @@ export interface ApiAdminUserDto {
 export interface ApiAdminExamDto {
   id: string; title: string; subject: string; grade: string; class_name: string; status: ApiExamStatus;
   duration_minutes: number; total_marks: number | string; start_at: string | null; end_at: string | null;
-  teacher_name: string; teacher_email: string; school: { id: string; name: string; city: string } | null;
+  teacher_name: string; teacher_email: string; school: { id: string; name: string; city: string; is_active?: boolean } | null;
   question_count: number; participant_count: number; created_at: string; updated_at: string;
 }
 export interface ApiAdminOverviewDto {
+  /**
+   * Which console this payload describes. `school` is the only school a school administrator may see, and
+   * the interface uses it to hide the actions the API would refuse anyway.
+   */
+  scope?: { kind: "school" | "platform"; school: { id: string; name: string; city?: string; is_active?: boolean } | null };
   school_count: number; user_count: number; user_counts: Record<ApiRole, number>;
   active_exam_count: number; exam_count: number; unassigned_user_count: number;
   recent_users: ApiAdminUserDto[]; recent_exams: ApiAdminExamDto[];

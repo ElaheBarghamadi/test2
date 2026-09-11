@@ -101,6 +101,33 @@ The teacher's marking desk (`/teacher/exams/{exam_id}/marking`) is built on that
 
 `ExamSettings.result_visibility` maps to persisted result state: `immediate` publishes a safe aggregate result, while `pending` and `hidden` are stored but withheld. `show_correct_answers` is deliberately not exposed by student APIs in this release: no student response returns answer keys, per-question correctness, explanations, or configuration.
 
+## Three roles, and what a school administrator is not
+
+`User.Role` is `student`, `teacher`, `admin`, and `school_admin` («مدیر مدرسه»). The last is deliberately
+**not** a smaller platform administrator: it is a different shape of authority, and its whole scope is one
+row — the administrator's own `SchoolMembership`.
+
+`apps/organizations/scope.py` is where that is decided, once:
+
+* *their school* — `managed_school(user)`, from the membership;
+* *its people* — `scope_users`, users whose membership points at that school;
+* *its papers* — `scope_exams`, exams authored by a teacher of that school, because an exam belongs to a
+  teacher and the teacher belongs to a school;
+* *supervision, not authoring* — `can_supervise_exam` (read + lifecycle) and `can_author_exam` (content), and
+  `answers_are_private` for the one thing a principal never gets: a student's answer sheet.
+
+Two decisions are worth their reasons. **Sharing `/admin/*` instead of a parallel `/school/*` panel**: every
+screen a principal needs is the same table with narrower rows, and a second copy of those pages would be a
+second place where the scoping rule has to be remembered — exactly the kind of place where a school ends up
+seeing another school's data. The interface does branch on the role (no school creation, no administrator
+roles in the pickers, read-only schools page, and `rolePanel` in `lib/auth/roles.ts` keeps
+`/school_admin/...` URLs from ever being built), but the reach is the API's. **A missing membership governs
+nothing**: without a school to scope to, the fallback is an empty result set and a 403 with a sentence
+explaining it, not the platform administrator's "everything".
+
+`backend/apps/organizations/tests.py::SchoolAdministratorApiTests` pins the line from both sides — what a
+principal can do to their own school's paper, and the 403/404 that answers each of the three refusals above.
+
 ## Who may be shown a page
 
 API authorization and page visibility are different doors, and only one of them used to exist. Every Django endpoint re-checks the bearer role and object owner; nothing in the frontend widens or narrows that. Before this layer, `curl /admin/users` answered `200` with the administrator shell, because the role check ran in the browser after hydration — the markup had already been produced and sent, and only then was the visitor redirected.

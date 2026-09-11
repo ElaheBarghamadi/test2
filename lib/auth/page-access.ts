@@ -20,6 +20,7 @@
  * layer is weaker than an ideal one, and it is written down in `backend/docs/architecture.md`.
  */
 
+import { rolePanel } from "@/lib/auth/roles";
 import type { Role } from "@/lib/types/domain";
 
 /** Written by the app itself after a verified login; never trusted as proof of anything. */
@@ -54,14 +55,18 @@ interface AccessRule {
  * `/teacher/*` also admits administrators because Django's teacher surfaces accept both roles
  * (`IsTeacherOrAdministrator`); a narrower page rule would only create screens an admin cannot open.
  * `/admin/*` is the other way round on purpose: a teacher must not be shown the shell either.
+ *
+ * The school administrator shares `/admin/*` with the platform administrator — same screens, one school of
+ * data — and is refused `/teacher/*`, because authoring a paper is not their job even though Django's
+ * teacher family would technically accept the role for supervision.
  */
 export const ACCESS_RULES: readonly AccessRule[] = [
   { prefix: "/student", allow: ["student"] },
   { prefix: "/teacher", allow: ["teacher", "admin"] },
-  { prefix: "/admin", allow: ["admin"] },
+  { prefix: "/admin", allow: ["admin", "school_admin"] },
 ];
 
-const ROLES = new Set<string>(["student", "teacher", "admin"]);
+const ROLES = new Set<string>(["student", "teacher", "admin", "school_admin"]);
 
 export function isRole(value: unknown): value is Role {
   return typeof value === "string" && ROLES.has(value);
@@ -112,7 +117,9 @@ export function loginTarget(pathname: string): string {
 }
 
 export function dashboardFor(role: Role): string {
-  return `/${role}/dashboard`;
+  // A school administrator is bounced to the console they share with the platform administrator, not to a
+  // `/school_admin/…` path that has no page behind it.
+  return `/${rolePanel[role]}/dashboard`;
 }
 
 /** The whole rule set, in one pure function. `middleware.ts` supplies `session`, nothing else. */
