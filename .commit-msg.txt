@@ -1,0 +1,27 @@
+feat(grading): the teacher's pen outranks the key, and a result shows only what it is told to
+
+Marking
+- `grade_answer` reads a manual score first, on every question type: a keyed answer can now be corrected
+  in place instead of editing the question and silently moving the whole class's marks with it.
+- A question the student left blank takes a mark too - the grade endpoints create the answer row instead
+  of refusing, and `manual_score: null` hands the question back to the key.
+- A note is its own gesture: a `feedback`-only write leaves the number alone, and the mark the key gave
+  stays visible beside the teacher's ("کلید ۲") so an override reads as a decision, not a lost grade.
+- Both marking screens carry an editor on every row; the zero-fill wand refuses to touch a keyed
+  question, so a keyed screen cannot silently zero a class. Correct/incorrect tallies follow the key
+  while the marks follow the pen, which is what the two numbers mean.
+
+Publication
+- `ExamSettings.result_detail` is a four-rung ladder: score only, their own sheet, sheet plus the
+  teacher's notes, sheet plus notes plus the key. Null keeps the old meaning of `show_correct_answers`,
+  so an exam that never chose behaves exactly as before.
+- While any answer is still queued the payload is cut at the smallest rung, so a half-marked sheet
+  cannot read as a wrong grade; `detail_level` says what the student got and why.
+- The rung is chosen in the publish dialog and in the builder's settings step off one shared ladder, and
+  duplication carries it over.
+
+Exam chrome
+- one bar with four rounded corners at the top of the phone layout, and nothing docked at the bottom.
+
+Verified: backend 304 tests OK (migrations 0009 applied), frontend 233 tests / 29 files, tsc clean,
+`next build` green; a live API run of both flows passes 44 checks against the running server.

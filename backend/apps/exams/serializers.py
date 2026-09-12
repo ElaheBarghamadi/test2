@@ -109,6 +109,7 @@ class ExamSettingsSerializer(serializers.ModelSerializer):
             "randomize_questions",
             "result_visibility",
             "show_correct_answers",
+            "result_detail",
             "max_attempts",
             "passing_percentage",
             "randomize_options",

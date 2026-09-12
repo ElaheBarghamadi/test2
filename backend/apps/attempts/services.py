@@ -19,6 +19,7 @@ from .models import AttemptEvent, ExamAttempt, StudentAnswer
 
 from .grading import (
     VERDICT_CORRECT,
+    VERDICT_MANUAL,
     VERDICT_PENDING,
     VERDICT_UNANSWERED,
     answer_has_value,
@@ -480,6 +481,16 @@ def _grade_attempt(attempt: ExamAttempt, *, finalized_at: datetime) -> "ExamResu
         mark = grade_answer(question, answers_by_question.get(question_id))
         if mark.verdict == VERDICT_UNANSWERED:
             unanswered_count += 1
+            continue
+        if mark.verdict == VERDICT_MANUAL and not mark.requires_manual:
+            # A teacher's number on a question the key could already answer: the marks come from the pen,
+            # the correct/incorrect tally stays with the key, so "۲ پاسخ درست" does not quietly become "۱"
+            # just because the last row was re-marked by hand.
+            score += mark.awarded
+            if grade_answer(question, answers_by_question.get(question_id), ignore_manual=True).verdict == VERDICT_CORRECT:
+                correct_count += 1
+            else:
+                incorrect_count += 1
             continue
         if mark.requires_manual:
             manual_count += 1

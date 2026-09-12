@@ -264,18 +264,30 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
   const nextOpen = manual.find((answer) => answer.manual_score === null || answer.manual_score === undefined);
   const autoScore = useMemo(() => (sheet ? sheet.answers.filter((answer) => !answer.manual_grading_required).reduce((sum, answer) => sum + numeric(answer.awarded_score), 0) : 0), [sheet]);
 
-  async function saveAnswer(questionId: string) {
+  /**
+   * One decision on one answer. `mark` sends the teacher's number, `note` leaves the number alone, and
+   * `clear` hands a keyed question back to the key. Three gestures because a teacher does three jobs at the
+   * desk, and a blank box must never be read as "zero" on a question the system has already graded.
+   */
+  async function saveAnswer(questionId: string, action: "mark" | "note" | "clear" = "mark") {
     if (!sheet) return;
-    const value = Number(marks[questionId]);
-    if (!Number.isFinite(value) || value < 0) { toast({ title: "نمره معتبر وارد کنید", variant: "error" }); return; }
-    const target = sheet.answers.find((answer) => answer.question_id === questionId);
-    if (target && value > numeric(target.maximum_score)) {
-      toast({ title: "نمره بیشتر از بارم سؤال است", description: `حداکثر ${toPersianNumber(numeric(target.maximum_score))} نمره برای این سؤال در نظر گرفته شده است.`, variant: "error" });
-      return;
+    const note = feedback[questionId] || "";
+    let payload: { manual_score?: number | null; feedback?: string } = { feedback: note };
+    if (action === "clear") {
+      payload = { manual_score: null, feedback: note };
+    } else if (action === "mark") {
+      const value = Number(marks[questionId]);
+      if (!Number.isFinite(value) || value < 0) { toast({ title: "نمره معتبر وارد کنید", variant: "error" }); return; }
+      const target = sheet.answers.find((answer) => answer.question_id === questionId);
+      if (target && value > numeric(target.maximum_score)) {
+        toast({ title: "نمره بیشتر از بارم سؤال است", description: `حداکثر ${toPersianNumber(numeric(target.maximum_score))} نمره برای این سؤال در نظر گرفته شده است.`, variant: "error" });
+        return;
+      }
+      payload = { manual_score: value, feedback: note };
     }
     setBusy(questionId);
     try {
-      await resultsApi.gradeAnswer(sheet.id, questionId, { manual_score: value, feedback: feedback[questionId] || "" });
+      await resultsApi.gradeAnswer(sheet.id, questionId, payload);
       toast({ title: "نمره ذخیره شد", variant: "success" });
       onSaved();
     } catch (reason) {
@@ -342,7 +354,7 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
             feedback={feedback[answer.question_id] ?? ""}
             onMark={(value) => setMarks((current) => ({ ...current, [answer.question_id]: value }))}
             onFeedback={(value) => setFeedback((current) => ({ ...current, [answer.question_id]: value }))}
-            onSave={() => void saveAnswer(answer.question_id)}
+            onSave={(action) => void saveAnswer(answer.question_id, action)}
             saving={busy === answer.question_id}
           />
         ))}
@@ -359,17 +371,28 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
   );
 }
 
-function AnswerRow({ answer, mark, feedback, onMark, onFeedback, onSave, saving }: { answer: ApiTeacherAttemptDetailDto["answers"][number]; mark: string; feedback: string; onMark: (value: string) => void; onFeedback: (value: string) => void; onSave: () => void; saving: boolean }) {
+function AnswerRow({ answer, mark, feedback, onMark, onFeedback, onSave, saving }: { answer: ApiTeacherAttemptDetailDto["answers"][number]; mark: string; feedback: string; onMark: (value: string) => void; onFeedback: (value: string) => void; onSave: (action: "mark" | "note" | "clear") => void; saving: boolean }) {
   const verdict = VERDICT_LABELS[answer.verdict] ?? VERDICT_LABELS.unanswered!;
   const maximum = numeric(answer.maximum_score);
-  const editable = answer.manual_grading_required;
+  // A keyed row is writable too. `needsDecision` is the amber "still open" signal - only a question that
+  // needs a human counts as unfinished work - while `overridden` marks a row where the pen outvoted the key.
+  const needsDecision = answer.manual_grading_required && (mark === "" || mark === undefined);
+  const overridden = answer.is_overridden === true;
+  const auto = numeric(answer.auto_awarded_score ?? answer.awarded_score);
+  const editable = true;
   return (
-    <Card data-answer-id={answer.question_id} className={cn("border", editable && (mark === "" ? "border-amber-500/35" : "border-emerald-500/25"))}>
+    <Card data-answer-id={answer.question_id} className={cn("border", needsDecision ? "border-amber-500/35" : overridden || mark !== "" ? "border-emerald-500/25" : "border")}>
       <CardHeader className="gap-2 pb-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-lg bg-primary/10 px-2 py-1 text-[11px] font-black text-primary">سؤال {toPersianNumber(answer.question_order)}</span>
           <Badge variant={verdict.variant}>{verdict.label}</Badge>
-          {!editable && <span className="text-[11px] font-bold text-muted-foreground">خودکار · {toPersianNumber(numeric(answer.awarded_score))} از {toPersianNumber(maximum)} نمره</span>}
+          {!answer.manual_grading_required && (
+            <span className="text-[11px] font-bold text-muted-foreground">
+              {overridden
+                ? `نمرهٔ معلم · ${toPersianNumber(numeric(answer.awarded_score))} از ${toPersianNumber(maximum)} نمره · کلید ${toPersianNumber(auto)}`
+                : `خودکار · ${toPersianNumber(auto)} از ${toPersianNumber(maximum)} نمره`}
+            </span>
+          )}
           {answer.is_flagged && <Badge variant="warning">نشان‌دار برای مرور</Badge>}
           {editable && <span className="mr-auto text-[11px] font-bold text-muted-foreground">بارم {toPersianNumber(maximum)}</span>}
         </div>
@@ -379,8 +402,13 @@ function AnswerRow({ answer, mark, feedback, onMark, onFeedback, onSave, saving 
         <div className="rounded-2xl bg-muted/45 p-3 text-xs leading-6">
           {answer.text || (answer.selected_option_texts.length ? answer.selected_option_texts.join("، ") : "—")}
         </div>
-        {editable ? (
-          <div className="grid gap-3 sm:grid-cols-[130px_1fr_auto] sm:items-start">
+        {!answer.manual_grading_required && mark === "" && (
+          <p className="text-[11px] leading-6 text-muted-foreground">
+            کلید این سؤال را نمره داده است. نمره‌ای اینجا بنویسید اگر می‌خواهید نظر خودتان جای آن را بگیرد؛
+            خالی گذاشتنش یعنی همان نمرهٔ کلید.
+          </p>
+        )}
+        <div className="grid gap-3 sm:grid-cols-[130px_1fr_auto] sm:items-start">
             <label className="block text-[11px] font-bold">
               <span className="mb-1 block text-muted-foreground">نمرهٔ شما</span>
               <Input id={`mark-${answer.question_id}`} type="number" min="0" max={maximum} step="0.25" value={mark} onChange={(event) => onMark(event.target.value)} className="h-10"/>
@@ -392,12 +420,16 @@ function AnswerRow({ answer, mark, feedback, onMark, onFeedback, onSave, saving 
             <div className="flex items-end gap-1.5 pt-0 sm:pt-5">
               <Button type="button" variant="outline" size="sm" onClick={() => onMark("0")}>۰</Button>
               <Button type="button" variant="outline" size="sm" onClick={() => onMark(String(maximum))}>تمام بارم</Button>
-              <Button type="button" size="sm" onClick={onSave} disabled={saving}><Save className="h-4 w-4"/>{saving ? "در حال ذخیره" : "ذخیره"}</Button>
+              {mark === "" ? (
+                <Button type="button" size="sm" onClick={() => onSave("note")} disabled={saving}><Save className="h-4 w-4"/>{saving ? "در حال ذخیره" : "ذخیرهٔ نکته"}</Button>
+              ) : (
+                <Button type="button" size="sm" onClick={() => onSave("mark")} disabled={saving}><Save className="h-4 w-4"/>{saving ? "در حال ذخیره" : "ذخیره"}</Button>
+              )}
+              {overridden && (
+                <Button type="button" variant="ghost" size="sm" onClick={() => onSave("clear")}>بازگشت به نمرهٔ خودکار</Button>
+              )}
             </div>
           </div>
-        ) : (
-          <p className="text-[11px] leading-6 text-muted-foreground">این سؤال کلید دارد و سامانه آن را نمره داده است؛ برای معلم هم نمایش داده می‌شود تا برگه کامل خوانده شود، ولی قابل ویرایش نیست.</p>
-        )}
       </CardContent>
     </Card>
   );
@@ -411,7 +443,7 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
   const firstInput = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!page) return;
-    setDrafts(Object.fromEntries(page.rows.filter((row) => row.editable).map((row) => [row.attempt_id, { mark: row.manual_score === null || row.manual_score === undefined ? "" : String(row.manual_score), feedback: row.feedback || "" }])));
+    setDrafts(Object.fromEntries(page.rows.map((row) => [row.attempt_id, { mark: row.manual_score === null || row.manual_score === undefined ? "" : String(row.manual_score), feedback: row.feedback || "" }])));
     firstInput.current?.focus();
   }, [page]);
 
@@ -446,7 +478,19 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
 
   async function save() {
     if (!page) return;
-    const grades = dirty.map(([attemptId, draft]) => ({ attempt_id: attemptId, mark: draft.mark === "" ? "0" : draft.mark, feedback: draft.feedback }));
+    const grades = dirty.map(([attemptId, draft]) => {
+      const original = page.rows.find((row) => row.attempt_id === attemptId);
+      // An empty box means three different things, and telling them apart is the whole point of this rule:
+      // undo a decision the teacher has taken back (`null`), keep the sheet's zero idiom for a written
+      // question that never had a mark, or say nothing at all about a keyed answer nobody meant to touch.
+      let mark: string | number | null | undefined = draft.mark;
+      if (draft.mark === "") {
+        if (original?.manual_score !== null && original?.manual_score !== undefined) mark = null;
+        else if (page.question.requires_manual_grading) mark = "0";
+        else mark = undefined;
+      }
+      return { attempt_id: attemptId, ...(mark === undefined ? {} : { mark }), feedback: draft.feedback };
+    });
     if (grades.length === 0) { toast({ title: "چیزی برای ذخیره نیست", description: "نمره‌ای را تغییر دهید." }); return; }
     setSaving(true);
     try {
@@ -467,7 +511,7 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
     setDrafts((current) => {
       const nextDrafts = { ...current };
       page.rows.forEach((row) => {
-        if (!row.editable) return;
+        if (!page.question.requires_manual_grading) return;
         const empty = row.manual_score === null || row.manual_score === undefined || String(row.manual_score) === "";
         if (empty) nextDrafts[row.attempt_id] = { mark: "0", feedback: current[row.attempt_id]?.feedback ?? "" };
       });
@@ -520,7 +564,7 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
             const draft = drafts[row.attempt_id] ?? { mark: "", feedback: "" };
             const verdict = VERDICT_LABELS[row.verdict] ?? VERDICT_LABELS.unanswered!;
             return (
-              <Card key={row.attempt_id} className={cn(row.editable && draft.mark === "" && "border-amber-500/35")}>
+              <Card key={row.attempt_id} className={cn(page.question.requires_manual_grading && draft.mark === "" ? "border-amber-500/35" : row.is_overridden || draft.mark !== "" ? "border-emerald-500/25" : undefined)}>
                 <CardContent className="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
@@ -529,18 +573,23 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
                       <span className="text-[10px] text-muted-foreground">{[row.grade, row.class_name].filter(Boolean).join(" · ")}</span>
                       <Badge variant={verdict.variant}>{verdict.label}</Badge>
                       {row.is_flagged && <Badge variant="warning">نشان‌دار</Badge>}
-                      {!row.editable && <span className="text-[10px] font-bold text-muted-foreground">{toPersianNumber(numeric(row.awarded_score))} از {toPersianNumber(maximum)}</span>}
+                      {!page.question.requires_manual_grading && (
+                        <span className="text-[10px] font-bold text-muted-foreground">
+                          {row.is_overridden
+                            ? `نمرهٔ معلم ${toPersianNumber(numeric(row.awarded_score))} · کلید ${toPersianNumber(numeric(row.auto_score ?? row.awarded_score))}`
+                            : `${toPersianNumber(numeric(row.awarded_score))} از ${toPersianNumber(maximum)}`}
+                        </span>
+                      )}
                     </div>
                     <p className="mt-2 max-h-28 overflow-y-auto whitespace-pre-wrap rounded-xl bg-muted/45 p-2.5 text-[11px] leading-6">{row.text || row.selected_option_texts.join("، ") || "—"}</p>
-                    {row.editable && (
-                      <Input value={draft.feedback} onChange={(event) => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, feedback: event.target.value } }))} className="mt-2 h-9 text-[11px]" placeholder="بازخورد کوتاه برای این دانش‌آموز (اختیاری)"/>
-                    )}
+                      <Input value={draft.feedback} onChange={(event) => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, feedback: event.target.value } }))} aria-label={`نکتهٔ ${row.student_name}`}
+                        className="mt-2 h-9 text-[11px]" placeholder="بازخورد کوتاه برای این دانش‌آموز (اختیاری)"/>
                   </div>
                   <div className="flex items-center gap-2 justify-self-start sm:justify-self-end">
-                    {row.editable ? (
-                      <>
+                    <>
                         <Input
                           ref={rowIndex === 0 ? firstInput : undefined}
+                          id={`cohort-mark-${rowIndex}`}
                           aria-label={`نمرهٔ ${row.student_name}`}
                           type="number" min="0" max={maximum} step="0.25" value={draft.mark}
                           onChange={(event) => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, mark: event.target.value } }))}
@@ -553,10 +602,12 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
                         />
                         <Button type="button" variant="outline" size="sm" onClick={() => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, mark: "0" } }))}>۰</Button>
                         <Button type="button" variant="outline" size="sm" onClick={() => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, mark: String(maximum) } }))} title={`تمام بارم: ${maximum}`}>تمام</Button>
-                      </>
-                    ) : (
-                      <span className="rounded-xl bg-muted/60 px-3 py-2 text-xs font-black text-muted-foreground">{toPersianNumber(numeric(row.awarded_score))}</span>
-                    )}
+                        {row.is_overridden && (
+                          <Button type="button" variant="ghost" size="sm" onClick={() => setDrafts((current) => ({ ...current, [row.attempt_id]: { ...draft, mark: "" } }))}>
+                            بازگشت به کلید
+                          </Button>
+                        )}
+                    </>
                   </div>
                 </CardContent>
               </Card>

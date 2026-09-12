@@ -108,30 +108,73 @@ describe("ExamMarkingWorkspace", () => {
     expect(keyed.getAttribute("data-answer-id")).toBe("q-keyed");
     expect(within(keyed).getByText("درست")).toBeTruthy();
     expect(within(keyed).getByText("خودکار · ۲ از ۲ نمره")).toBeTruthy();
-    // Read-only means read-only: no mark box for a question the exam already scored.
-    expect(within(keyed).queryAllByRole("spinbutton")).toHaveLength(0);
+    // The keyed row is scored, not sealed: the pen is here too, so a wrong key can be corrected in place.
+    expect(within(keyed).getByLabelText("نمرهٔ شما")).toBeTruthy();
+    // …and it is empty, because the key's number stands unless the teacher writes over it.
+    expect((within(keyed).getByLabelText("نمرهٔ شما") as HTMLInputElement).value).toBe("");
+    expect(within(keyed).getByText(/کلید این سؤال را نمره داده است/)).toBeTruthy();
 
     const written = (await screen.findByText("توان را تعریف کنید و واحدش را بنویسید.")).closest("[data-answer-id]") as HTMLElement;
     expect(within(written).getByText("نیازمند نمرهٔ شما")).toBeTruthy();
     expect(within(written).getByText("نشان‌دار برای مرور")).toBeTruthy();
-    expect(screen.getAllByLabelText("نمرهٔ شما")).toHaveLength(1);
+    expect(screen.getAllByLabelText("نمرهٔ شما")).toHaveLength(2);
     expect(within(written).getByText("نرخ انجام کار.")).toBeTruthy();
+  });
+
+  it("overrides an auto-graded answer and hands it back to the key", async () => {
+    await openDesk();
+    const keyed = (await screen.findByText("کدام‌یک واحد توان است؟")).closest("[data-answer-id]") as HTMLElement;
+    fireEvent.change(within(keyed).getByLabelText("نمرهٔ شما"), { target: { value: "1" } });
+    fireEvent.change(within(keyed).getByLabelText("بازخورد این سؤال"), { target: { value: "گزینهٔ درست ناقص بود." } });
+    fireEvent.click(within(keyed).getByRole("button", { name: "ذخیره" }));
+    await waitFor(() =>
+      expect(gradeAnswer).toHaveBeenCalledWith("attempt-1", "q-keyed", { manual_score: 1, feedback: "گزینهٔ درست ناقص بود." }),
+    );
+  });
+
+  it("writes a note on a keyed answer without touching its mark", async () => {
+    await openDesk();
+    const keyed = (await screen.findByText("کدام‌یک واحد توان است؟")).closest("[data-answer-id]") as HTMLElement;
+    // The box is empty, so the primary button is a note save, and the server is told nothing about marks.
+    expect(within(keyed).getByRole("button", { name: "ذخیرهٔ نکته" })).toBeTruthy();
+    fireEvent.change(within(keyed).getByLabelText("بازخورد این سؤال"), { target: { value: "دقت کردی." } });
+    fireEvent.click(within(keyed).getByRole("button", { name: "ذخیرهٔ نکته" }));
+    await waitFor(() => expect(gradeAnswer).toHaveBeenCalledWith("attempt-1", "q-keyed", { feedback: "دقت کردی." }));
+  });
+
+  it("offers the undo only on a row the teacher has actually overridden", async () => {
+    gradeAnswer.mockResolvedValue({
+      answer: { ...sheet.answers[0]!, awarded_score: "1.00", auto_awarded_score: "2.00", is_overridden: true, manual_score: "1.00" },
+      result: sheet.result,
+    });
+    teacherAttempt.mockResolvedValue({
+      ...sheet,
+      answers: [{ ...sheet.answers[0]!, awarded_score: "1.00", auto_awarded_score: "2.00", is_overridden: true, manual_score: "1.00" }, sheet.answers[1]!],
+    });
+    await openDesk();
+    const keyed = (await screen.findByText("کدام‌یک واحد توان است؟")).closest("[data-answer-id]") as HTMLElement;
+    expect(within(keyed).getByText("نمرهٔ معلم · ۱ از ۲ نمره · کلید ۲")).toBeTruthy();
+    // The row is seeded with the teacher's number, and undoing it is one click that sends `manual_score: null`.
+    // A number input normalises "1.00"; either spelling proves the row is seeded from the teacher's mark.
+    expect((within(keyed).getByLabelText("نمرهٔ شما") as HTMLInputElement).value).toMatch(/^1(\.00)?$/);
+    fireEvent.click(within(keyed).getByRole("button", { name: "بازگشت به نمرهٔ خودکار" }));
+    await waitFor(() => expect(gradeAnswer).toHaveBeenCalledWith("attempt-1", "q-keyed", { manual_score: null, feedback: "" }));
   });
 
   it("grades the sheet one answer at a time, then reloads it", async () => {
     await openDesk();
-    const input = await screen.findByRole("spinbutton");
-    fireEvent.change(input, { target: { value: "3.5" } });
-    fireEvent.click(screen.getByRole("button", { name: "ذخیره" }));
+    const written = (await screen.findByText("توان را تعریف کنید و واحدش را بنویسید.")).closest("[data-answer-id]") as HTMLElement;
+    fireEvent.change(within(written).getByLabelText("نمرهٔ شما"), { target: { value: "3.5" } });
+    fireEvent.click(within(written).getByRole("button", { name: "ذخیره" }));
     await waitFor(() => expect(gradeAnswer).toHaveBeenCalledWith("attempt-1", "q-written", { manual_score: 3.5, feedback: "" }));
     await waitFor(() => expect(gradingBoard).toHaveBeenCalledTimes(2));
   });
 
   it("refuses a mark above the question's own weight before it reaches the server", async () => {
     await openDesk();
-    const input = await screen.findByRole("spinbutton");
-    fireEvent.change(input, { target: { value: "9" } });
-    fireEvent.click(screen.getByRole("button", { name: "ذخیره" }));
+    const written = (await screen.findByText("توان را تعریف کنید و واحدش را بنویسید.")).closest("[data-answer-id]") as HTMLElement;
+    fireEvent.change(within(written).getByLabelText("نمرهٔ شما"), { target: { value: "9" } });
+    fireEvent.click(within(written).getByRole("button", { name: "ذخیره" }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(gradeAnswer).not.toHaveBeenCalled();
   });
@@ -150,16 +193,27 @@ describe("ExamMarkingWorkspace", () => {
     expect(body.map((row: { attempt_id: string; mark: string }) => [row.attempt_id, row.mark])).toEqual([["attempt-1", "3"], ["attempt-2", "4"]]);
   });
 
-  it("keeps a keyed question read-only in the question view too", async () => {
+  it("opens a keyed question for the pen in the cohort view as well", async () => {
     gradingQuestion.mockImplementation(async (_exam: string, questionId: string) => (questionId === "q-keyed" ? keyedPage : writtenPage));
     await openDesk("question");
     fireEvent.click(screen.getByRole("button", { name: /کدام‌یک واحد توان است؟/ }));
     await waitFor(() => expect(gradingQuestion).toHaveBeenCalledWith("exam-1", "q-keyed"));
     expect(await screen.findAllByText("وات")).toBeTruthy();
-    expect(screen.queryAllByRole("spinbutton")).toHaveLength(0);
-    // The verdict of each row is stated, so the teacher is signing off on a complete sheet.
+    // One box per student, all of them empty: the key's number is shown, not repeated as a draft mark.
+    expect(screen.getAllByRole("spinbutton")).toHaveLength(2);
+    expect(screen.getAllByRole("spinbutton").map((input) => (input as HTMLInputElement).value)).toEqual(["", ""]);
+    // The verdict of each row is still stated, so the teacher sees what they are changing.
     expect(screen.getByText("درست")).toBeTruthy();
     expect(screen.getByText("نادرست")).toBeTruthy();
+    // The zero-fill wand is a written-question tool: on a keyed screen it would silently erase the class.
+    expect(screen.queryByRole("button", { name: /پُر کردن ۰/ })).toBeNull();
+
+    // A note alone is a legitimate change on a keyed row, and it must not send a mark for the other one.
+    fireEvent.change(screen.getByLabelText("نکتهٔ سارا محمدی"), { target: { value: "کلید را اصلاح کردم." } });
+    fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ نمره‌ها/ }));
+    await waitFor(() => expect(saveQuestionGrades).toHaveBeenCalledTimes(1));
+    const body = saveQuestionGrades.mock.calls[0]![2];
+    expect(body).toEqual([{ attempt_id: "attempt-1", feedback: "کلید را اصلاح کردم." }]);
   });
 
   it("fills the empty boxes with zero without saving them", async () => {

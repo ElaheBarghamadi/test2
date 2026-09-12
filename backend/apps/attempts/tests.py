@@ -530,7 +530,7 @@ class TeacherResultsApiTests(TestCase):
         self.assertEqual(students.data[0]["email"], self.student.email)
         self.assertEqual(students.data[0]["needs_grading_count"], 1)
 
-    def test_teacher_cannot_override_an_automatically_graded_short_answer(self) -> None:
+    def test_teacher_can_override_an_automatically_graded_short_answer(self) -> None:
         short = Question.objects.create(
             exam=self.exam,
             type=Question.Type.SHORT_ANSWER,
@@ -547,12 +547,56 @@ class TeacherResultsApiTests(TestCase):
             format="json",
         )
         self.student_client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
-        blocked = self.teacher_client.patch(
+        # The key is a guess about the answer; the teacher's number is the decision, and it is allowed on a
+        # keyed question too. `manual_score: null` hands the question back to the key.
+        override = self.teacher_client.patch(
             f"/api/v1/results/teacher/attempts/{attempt_id}/answers/{short.id}/grade/",
-            {"manual_score": "0.00"},
+            {"manual_score": "0.00", "feedback": "Correct idea, but the wording names the wrong organelle."},
             format="json",
         )
-        self.assertEqual(blocked.status_code, 400)
+        self.assertEqual(override.status_code, 200)
+        answer = override.data["answer"]
+        self.assertEqual((answer["awarded_score"], answer["auto_awarded_score"]), ("0.00", "2.00"))
+        self.assertTrue(answer["is_overridden"])
+        self.assertEqual(answer["verdict"], "manual")
+        # The published number follows the pen: the short answer's 2 marks are gone, and the written
+        # question was left blank, so the sheet is worth nothing.
+        self.assertEqual(override.data["result"]["score"], "0.00")
+        # The key's tally is untouched: the answer was right, the teacher simply decided it was worth nothing.
+        # Only the marks move, so "۱ پاسخ درست" and "۰ از ۲" can be true at the same time.
+        self.assertEqual(override.data["result"]["correct_count"], 1)
+        self.assertEqual(override.data["result"]["incorrect_count"], 0)
+
+        cleared = self.teacher_client.patch(
+            f"/api/v1/results/teacher/attempts/{attempt_id}/answers/{short.id}/grade/",
+            {"manual_score": None},
+            format="json",
+        )
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(cleared.data["answer"]["awarded_score"], "2.00")
+        self.assertEqual(cleared.data["result"]["score"], "2.00")
+        self.assertEqual(cleared.data["result"]["correct_count"], 1)
+        self.assertFalse(cleared.data["answer"]["is_overridden"])
+        self.assertEqual(cleared.data["answer"]["verdict"], "correct")
+        # The note survives an undone mark - they are two separate things the teacher wrote.
+        self.assertTrue(cleared.data["answer"]["feedback"].startswith("Correct idea"))
+
+        # A note alone is a valid write, and it must not move the number.
+        noted = self.teacher_client.patch(
+            f"/api/v1/results/teacher/attempts/{attempt_id}/answers/{short.id}/grade/",
+            {"feedback": "Well explained."},
+            format="json",
+        )
+        self.assertEqual(noted.data["answer"]["awarded_score"], "2.00")
+        self.assertEqual(noted.data["answer"]["feedback"], "Well explained.")
+
+        # A mark above the question's worth is still refused.
+        too_much = self.teacher_client.patch(
+            f"/api/v1/results/teacher/attempts/{attempt_id}/answers/{short.id}/grade/",
+            {"manual_score": "9.00"},
+            format="json",
+        )
+        self.assertEqual(too_much.status_code, 400)
 
 
 class StudentExamConductingApiTests(StudentExamApiTests):
@@ -1322,11 +1366,28 @@ class CohortGradingApiTests(TestCase):
         self.assertEqual((profile_row["grade"], profile_row["class_name"]), ("12", "12-A"))
         self.assertEqual(profile_row["text"], "Movement of particles.")
 
-        # The keyed question is the same screen read-only: the distribution, not a form.
+        # A keyed question opens the same screen, not a read-only table: the distribution is still there and
+        # every row can be marked by hand. `auto_score` is what the key said, so an override shows as a change.
         keyed_page = self.teacher_client.get(self.question_url(self.keyed))
         self.assertEqual(keyed_page.data["question"]["correct_option_ids"], [str(self.right_option.id)])
-        self.assertTrue(all(row["editable"] is False for row in keyed_page.data["rows"]))
+        self.assertTrue(all(row["editable"] is True for row in keyed_page.data["rows"]))
+        self.assertTrue(all(row["is_overridden"] is False for row in keyed_page.data["rows"]))
         self.assertTrue(all(row["verdict"] in {"correct", "incorrect"} for row in keyed_page.data["rows"]))
+        self.assertTrue(all(row["auto_score"] in {"0.00", "2.00"} for row in keyed_page.data["rows"]))
+
+        saved = self.teacher_client.post(
+            self.question_url(self.keyed),
+            {"grades": [{"attempt_id": str(first.id), "mark": "0.50", "feedback": "Half the key."}]},
+            format="json",
+        )
+        self.assertEqual(saved.status_code, 200)
+        row = next(item for item in saved.data["rows"] if item["attempt_id"] == str(first.id))
+        self.assertEqual((row["awarded_score"], row["auto_score"]), ("0.50", row["auto_score"]))
+        self.assertTrue(row["is_overridden"])
+        # The queue is untouched. `total` counts only the written question, twice over (one per attempt);
+        # marking a keyed answer by hand must not add to it, and must not unblock it either.
+        self.assertEqual((saved.data["progress"]["total"], saved.data["progress"]["graded"]), (2, 0))
+        self.assertEqual(first.result.pending_manual_grading_count, 1)
 
     def test_batch_save_marks_every_row_and_regrades_each_attempt(self) -> None:
         first = self.finalize(self.student, option=self.right_option, text="Movement of particles.")
@@ -1383,12 +1444,44 @@ class CohortGradingApiTests(TestCase):
         self.assertEqual(refused.status_code, 400)
         self.assertIn("not part of the exam", str(refused.data))
 
-    def test_an_already_keyed_question_cannot_be_graded_by_hand_here(self) -> None:
+    def test_an_already_keyed_question_can_be_graded_by_hand_here(self) -> None:
+        """The cohort screen takes a mark on a keyed question too, and the key's number stays visible beside it.
+
+        This used to answer 400, which left the teacher no way to say "the key is wrong" without editing the
+        question - a change that would silently move every other student's mark too.
+        """
         self.finalize(self.student, option=self.right_option, text="Movement of particles.")
-        refused = self.teacher_client.post(
+        attempt_id = str(ExamAttempt.objects.first().id)
+        saved = self.teacher_client.post(
             self.question_url(self.keyed),
-            {"grades": [{"attempt_id": str(ExamAttempt.objects.first().id), "mark": "1.00"}]},
+            {"grades": [{"attempt_id": attempt_id, "mark": "0.00", "feedback": "The key accepted a typo."}]},
             format="json",
+        )
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.data["saved"], 1)
+        row = next(item for item in saved.data["rows"] if item["attempt_id"] == attempt_id)
+        self.assertEqual((row["awarded_score"], row["auto_score"], row["is_overridden"]), ("0.00", "2.00", True))
+        # A note with no mark is a valid row, and `mark: null` undoes an override.
+        noted = self.teacher_client.post(
+            self.question_url(self.keyed),
+            {"grades": [{"attempt_id": attempt_id, "feedback": "Reviewed twice."}]},
+            format="json",
+        )
+        self.assertEqual(noted.status_code, 200)
+        noted_row = next(item for item in noted.data["rows"] if item["attempt_id"] == attempt_id)
+        self.assertEqual((noted_row["awarded_score"], noted_row["feedback"]), ("0.00", "Reviewed twice."))
+        undone = self.teacher_client.post(
+            self.question_url(self.keyed),
+            {"grades": [{"attempt_id": attempt_id, "mark": None}]},
+            format="json",
+        )
+        self.assertEqual(undone.status_code, 200)
+        undone_row = next(item for item in undone.data["rows"] if item["attempt_id"] == attempt_id)
+        self.assertEqual((undone_row["awarded_score"], undone_row["is_overridden"]), ("2.00", False))
+
+        # A row that sends neither mark nor note is refused, per row, not for the whole screen.
+        refused = self.teacher_client.post(
+            self.question_url(self.keyed), {"grades": [{"attempt_id": attempt_id}]}, format="json"
         )
         self.assertEqual(refused.status_code, 400)
 
@@ -1429,3 +1522,146 @@ class CohortGradingApiTests(TestCase):
         self.assertEqual(detail.status_code, 200)
         self.assertNotIn("correct_option_ids", str(detail.data))
         self.assertNotIn("awarded_score", str(detail.data))
+
+
+class ResultDetailVisibilityApiTests(StudentExamApiTests):
+    """What a published result reveals, rung by rung.
+
+    One keyed question, answered wrongly on purpose, so each rung has something different to hide: the sheet,
+    the teacher's note, and the key itself. The default rung is the smallest one, and an exam written before
+    the ladder existed still means exactly what `show_correct_answers` always meant.
+    """
+
+    def sheet(self, *, result_detail=None, show_correct_answers: bool = False, with_written: bool = False):
+        exam = self.make_exam()
+        exam.settings.result_detail = result_detail
+        exam.settings.show_correct_answers = show_correct_answers
+        exam.settings.save()
+        keyed = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE, marks=2)
+        keyed.explanation = "وات یکای توان است."
+        keyed.save()
+        written = (
+            Question.objects.create(exam=exam, type=Question.Type.WRITTEN, text="توان را تعریف کنید.", order=2, marks=3)
+            if with_written
+            else None
+        )
+        exam.total_marks = Decimal("5.00" if written else "2.00")
+        exam.save()
+
+        attempt_id = self.start(exam).data["id"]
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{keyed.id}/",
+            {"selected_option_ids": [str(keyed.options.get(order=2).id)]},
+            format="json",
+        )
+        if written is not None:
+            self.client.patch(
+                f"/api/v1/student/attempts/{attempt_id}/answers/{written.id}/",
+                {"text": "نرخ انجام کار."},
+                format="json",
+            )
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+        return exam, attempt_id
+
+    @staticmethod
+    def mark_by_hand(question: Question, *, score: str, note: str = "") -> None:
+        """A teacher's decision on one answer, then the re-grade that clears it from the queue.
+
+        Written through the ORM on purpose: this class is about what the student is allowed to read, and a
+        result that is still waiting for a pen never gets past the smallest rung.
+        """
+        from apps.attempts.services import _grade_attempt
+
+        answer = StudentAnswer.objects.select_related("attempt").get(question=question)
+        answer.manual_score = Decimal(score)
+        answer.feedback = note
+        answer.save(update_fields=("manual_score", "feedback", "updated_at"))
+        _grade_attempt(answer.attempt, finalized_at=timezone.now())
+
+    def published(self, attempt_id) -> dict:  # type: ignore[type-arg]
+        response = self.client.get(f"/api/v1/student/results/{attempt_id}/")
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def test_score_only_shows_nothing_but_the_number(self) -> None:
+        _, attempt_id = self.sheet(result_detail=ExamSettings.ResultDetail.SCORE_ONLY)
+        data = self.published(attempt_id)
+        self.assertEqual((data["detail_level"], data["answers"]), ("score_only", []))
+        self.assertEqual(data["score"], "0.00")
+
+    def test_own_answers_lists_the_sheet_and_says_nothing_about_right_or_wrong(self) -> None:
+        _, attempt_id = self.sheet(result_detail=ExamSettings.ResultDetail.OWN_ANSWERS)
+        row = self.published(attempt_id)["answers"][0]
+        self.assertEqual(row["question_text"], "multiple_choice question")
+        self.assertEqual(row["selected_option_texts"], ["Second"])
+        self.assertNotIn("verdict", row)
+        self.assertNotIn("awarded_score", row)
+        self.assertNotIn("explanation", row)
+        self.assertNotIn("feedback", row)
+
+    def test_notes_open_the_note_rung_and_nothing_more(self) -> None:
+        exam, attempt_id = self.sheet(result_detail=ExamSettings.ResultDetail.OWN_ANSWERS_WITH_FEEDBACK)
+        keyed = exam.questions.get(type=Question.Type.MULTIPLE_CHOICE)
+        self.mark_by_hand(keyed, score="1.00", note="یک گزینه درست بود.")
+        rows = self.published(attempt_id)["answers"]
+        self.assertEqual([row["feedback"] for row in rows], ["یک گزینه درست بود."])
+        # A note is not a verdict: the rung stops at the words, and the key stays closed.
+        self.assertTrue(all("verdict" not in row and "awarded_score" not in row for row in rows))
+
+    def test_full_key_releases_the_key_and_the_model_answer(self) -> None:
+        exam, attempt_id = self.sheet(result_detail=ExamSettings.ResultDetail.FULL_KEY, with_written=True)
+        self.mark_by_hand(exam.questions.get(type=Question.Type.WRITTEN), score="2.00")
+        rows = self.published(attempt_id)["answers"]
+        keyed = next(row for row in rows if row["question_type"] == Question.Type.MULTIPLE_CHOICE)
+        self.assertEqual((keyed["verdict"], keyed["awarded_score"]), ("incorrect", "0.00"))
+        self.assertEqual(keyed["correct_option_texts"], ["First"])
+        self.assertEqual(keyed["explanation"], "وات یکای توان است.")
+        written = next(row for row in rows if row["question_type"] == Question.Type.WRITTEN)
+        self.assertEqual((written["verdict"], written["awarded_score"]), ("manual", "2.00"))
+
+    def test_a_sheet_still_being_graded_waits_at_the_smallest_rung(self) -> None:
+        # A written answer in the queue forces score-only, whatever the teacher chose: a half-marked sheet
+        # published as "۰ از ۳" reads as a grade, not as work in progress.
+        _, attempt_id = self.sheet(result_detail=ExamSettings.ResultDetail.FULL_KEY, with_written=True)
+        data = self.published(attempt_id)
+        self.assertEqual((data["detail_level"], data["answers"], data["is_final"]), ("score_only", [], False))
+        # Grading the last answer opens the rung the teacher chose - nothing else has to be published again.
+        written = ExamAttempt.objects.get(id=attempt_id).exam.questions.get(type=Question.Type.WRITTEN)
+        self.mark_by_hand(written, score="2.00")
+        after = self.published(attempt_id)
+        self.assertEqual((after["detail_level"], len(after["answers"])), (ExamSettings.ResultDetail.FULL_KEY, 2))
+
+    def test_the_legacy_switch_still_means_the_full_key(self) -> None:
+        shown, attempt_id = self.sheet(show_correct_answers=True)
+        self.assertEqual(self.published(attempt_id)["detail_level"], ExamSettings.ResultDetail.FULL_KEY)
+        self.assertTrue(all("verdict" in row for row in self.published(attempt_id)["answers"]))
+
+        hidden, other_id = self.sheet()
+        self.assertEqual(self.published(other_id)["detail_level"], ExamSettings.ResultDetail.SCORE_ONLY)
+        self.assertIsNone(shown.settings.result_detail)
+
+    def test_the_teacher_writes_the_rung_and_an_unknown_one_is_refused(self) -> None:
+        exam, _ = self.sheet()
+        self.client.force_authenticate(self.teacher)
+        updated = self.client.patch(
+            f"/api/v1/exams/{exam.id}/", {"settings": {"result_detail": "own_answers"}}, format="json"
+        )
+        self.assertEqual(updated.status_code, 200)
+        exam.settings.refresh_from_db()
+        self.assertEqual(exam.settings.result_detail, "own_answers")
+
+        refused = self.client.patch(
+            f"/api/v1/exams/{exam.id}/", {"settings": {"result_detail": "everything"}}, format="json"
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("result_detail", refused.data["detail"]["settings"])
+
+    def test_duplication_carries_the_rung_over(self) -> None:
+        exam, _ = self.sheet(result_detail=ExamSettings.ResultDetail.OWN_ANSWERS_WITH_FEEDBACK)
+        self.client.force_authenticate(self.teacher)
+        duplicate = self.client.post(f"/api/v1/exams/{exam.id}/duplicate/")
+        self.assertEqual(duplicate.status_code, 201)
+        self.assertEqual(
+            Exam.objects.get(id=duplicate.data["id"]).settings.result_detail,
+            ExamSettings.ResultDetail.OWN_ANSWERS_WITH_FEEDBACK,
+        )

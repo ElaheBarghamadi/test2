@@ -112,6 +112,7 @@ function toExamSettings(dto: ApiExamSettingsDto, totalMarks = 0): Exam["settings
     showResultImmediately: dto.result_visibility === "immediate",
     resultVisibility: frontendVisibility(dto.result_visibility),
     showCorrectAnswers: dto.show_correct_answers,
+    resultDetail: dto.result_detail ?? null,
     attemptLimit: dto.max_attempts,
     passingPercentage: number(dto.passing_percentage),
   };
@@ -181,6 +182,9 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
       randomize_questions: draft.settings.randomizeQuestions,
       result_visibility: apiVisibility(draft.settings.resultVisibility),
       show_correct_answers: draft.settings.showCorrectAnswers,
+      // Only sent when the teacher chose a rung: leaving it out is what keeps a legacy exam on the meaning of
+      // `show_correct_answers`, which is the server's job to resolve, not the client's to guess.
+      ...(draft.settings.resultDetail ? { result_detail: draft.settings.resultDetail } : {}),
       randomize_options: draft.settings.randomizeOptions,
       allow_unanswered: draft.settings.allowUnanswered,
       max_attempts: draft.settings.attemptLimit,
@@ -240,7 +244,7 @@ export function toStudentDashboardExam(dto: ApiAvailableExamDto): Exam {
       questionLayout: dto.question_layout === "single_page" ? "single_page" : "paged",
       randomizeQuestions: false, randomizeOptions: false, allowUnanswered: dto.allow_unanswered !== false,
       showResultImmediately: dto.result_visibility === "immediate", resultVisibility: dto.result_visibility,
-      showCorrectAnswers: false, attemptLimit: dto.max_attempts,
+      showCorrectAnswers: false, resultDetail: null, attemptLimit: dto.max_attempts,
       passingPercentage: number(result?.passing_percentage ?? dto.passing_percentage),
     },
     questions: [], teacherName: dto.teacher_name ?? "", accent: accentFor(dto.id), createdAt: startAt, updatedAt: startAt,
@@ -303,5 +307,22 @@ export function toStudentResult(dto: ApiStudentResultDto, attempt: ExamAttempt, 
     wasRevised: Boolean(dto.revised_at), passingPercentage: number(dto.passing_percentage), passed: dto.passed,
     attemptNumber: dto.attempt_number || attempt.attemptNumber || 1,
     submittedAt: dto.submitted_at || attempt.startedAt || new Date().toISOString(), feedback: dto.feedback || "",
+    detailLevel: dto.detail_level ?? "score_only",
+    // The rung decides the content, so the mapper only has to carry what arrived; nothing here infers
+    // a verdict from a missing field.
+    answerSheet: (dto.answers ?? []).map((row) => ({
+      questionId: row.question_id,
+      order: row.question_order,
+      text: row.question_text,
+      type: row.question_type,
+      marks: number(row.marks),
+      yourAnswer: row.your_answer || (row.selected_option_texts.length ? row.selected_option_texts.join("، ") : "—"),
+      feedback: row.feedback ?? "",
+      awarded: row.awarded_score === undefined ? null : number(row.awarded_score),
+      verdict: row.verdict ?? null,
+      correctOptions: row.correct_option_texts ?? [],
+      expectedAnswers: row.expected_answers ?? [],
+      explanation: row.explanation ?? "",
+    })),
   };
 }

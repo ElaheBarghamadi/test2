@@ -45,6 +45,17 @@ export interface ApiQuestionDto {
   created_at?: string; updated_at?: string;
 }
 
+/** One row of a published answer sheet: the student's own words, plus whatever the chosen rung releases. */
+export interface ApiStudentResultAnswerDto {
+  question_id: string; question_order: number; question_text: string; question_type: ApiQuestionType; marks: number | string;
+  your_answer: string | null; selected_option_texts: string[];
+  /** Present from the note rung up. */
+  feedback?: string;
+  /** Present only at `full_key`. */
+  awarded_score?: number | string; verdict?: "correct" | "incorrect" | "partial" | "manual" | "pending" | "unanswered";
+  correct_option_texts?: string[]; expected_answers?: string[]; explanation?: string;
+}
+
 /** The student attempt serializer omits the parent exam and all answer-key fields. */
 export interface ApiStudentQuestionDto {
   id: string; type: ApiQuestionType; text: string; instructions: string;
@@ -60,6 +71,11 @@ export interface ApiExamSettingsDto {
   allow_unanswered: boolean;
   result_visibility: "immediate" | "pending" | "hidden";
   show_correct_answers: boolean;
+  /**
+   * What a published result reveals. Null or absent means the teacher never chose a rung, and the server
+   * derives it from `show_correct_answers` - so the client must not invent a default of its own.
+   */
+  result_detail?: "score_only" | "own_answers" | "own_answers_with_feedback" | "full_key" | null;
   max_attempts: number;
   passing_percentage: number | string;
 }
@@ -137,6 +153,9 @@ export interface ApiAvailableExamDto {
 }
 export interface ApiStudentResultDto {
   id: string; status: "pending" | "hidden" | "published"; score: number | string;
+  /** The rung this payload was cut at, resolved by the server. `answers` never contains more than it allows. */
+  detail_level?: "score_only" | "own_answers" | "own_answers_with_feedback" | "full_key";
+  answers?: ApiStudentResultAnswerDto[];
   percentage: number | string | null; maximum_score: number; correct_count: number; incorrect_count: number;
   unanswered_count: number; pending_manual_grading_count: number;
   /**
@@ -181,6 +200,12 @@ export interface ApiTeacherAttemptAnswerDto {
    * used to arrive with no number at all, so the marking screen showed only what was left to do.
    */
   awarded_score: number | string;
+  /**
+   * What the key alone would have awarded, and whether a teacher's number replaced it. Optional because a
+   * payload stored before overrides existed carries neither.
+   */
+  auto_awarded_score?: number | string;
+  is_overridden?: boolean;
   verdict: "correct" | "incorrect" | "unanswered" | "pending" | "manual";
 }
 export interface ApiAttemptSignalDto {
@@ -281,8 +306,14 @@ export interface ApiGradingQuestionRowDto {
   text: string | null; is_flagged: boolean;
   awarded_score: number | string; verdict: ApiTeacherAttemptAnswerDto["verdict"];
   manual_score: number | string | null; feedback: string;
-  /** False on a keyed question: the teacher reads those rows, they do not mark them. */
-  editable: boolean;
+  /**
+   * False when the row was written before overrides existed - the desk then assumes every row takes a pen,
+   * which is what the server does today. Kept so an older cached payload still renders.
+   */
+  editable?: boolean;
+  /** What the key alone awarded, and whether a teacher's number replaced it. */
+  auto_score?: number | string;
+  is_overridden?: boolean;
 }
 export interface ApiGradingQuestionDto {
   id: string; order: number; text: string; type: ApiQuestionType; marks: number | string; instructions: string;

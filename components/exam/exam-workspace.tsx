@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ChevronLeft, ChevronRight, CircleHelp, ListChecks, Send, ShieldCheck } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleHelp, ListChecks, LogOut, Send, ShieldCheck } from "lucide-react";
 import type { AnswerValue, Exam } from "@/lib/types/domain";
 import { Button } from "@/components/ui/button";
 import { AutosaveIndicator } from "@/components/exam/autosave-indicator";
@@ -192,18 +192,34 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
   );
   return (
     <div className="min-h-screen bg-surface">
-      <header className="sticky top-0 z-30 border-b bg-background/92 backdrop-blur-xl">
-        <div className="mx-auto flex h-auto max-w-[1480px] flex-wrap items-center justify-between gap-3 px-4 py-3 sm:h-[76px] sm:flex-nowrap sm:px-6">
+      <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur-xl sm:border-b sm:bg-background/92">
+        {/*
+          Phones get exactly one piece of chrome: a floating bar with four rounded corners, carrying the
+          exit control, where the student is in the paper, the save state, the clock and the jump list.
+          There used to be a second progress strip under the header *and* a fixed dock at the bottom, so a
+          640px-tall phone spent around 180px on chrome and the question itself had to be scrolled to. The
+          dock is gone, along with the padding that used to be reserved for it.
+        */}
+        <div className="px-2 py-2 sm:hidden">
+          <div className="flex items-center gap-2 rounded-2xl border bg-card px-2.5 py-2 shadow-lift">
+            <Link href="/student/dashboard" aria-label="خروج از آزمون" className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"><LogOut className="h-4 w-4"/></Link>
+            <ExamProgress compact current={currentIndex + 1} total={exam.questions.length} answered={answered} showPosition={!singlePage}/>
+            <AutosaveIndicator status={attempt.saveStatus} className="hidden min-[430px]:inline-flex"/>
+            <ExamTimer seconds={attempt.remainingSeconds} className="border-0 bg-muted px-2 py-1 shadow-none [&>div>p:first-child]:hidden"/>
+            <Button variant="ghost" size="icon-sm" onClick={() => toast({ title: "میانبرهای صفحه‌کلید", description: singlePage ? "در حالت یک‌صفحه‌ای با کلیدهای ۱ تا ۹ می‌توانید به سؤال‌ها پرش کنید." : "با کلیدهای چپ و راست بین سؤال‌ها جابه‌جا شوید، با Space پاسخ را علامت بزنید، و با Enter ادامه دهید." })} aria-label="میانبرهای صفحه‌کلید"><CircleHelp className="h-4 w-4"/></Button>
+            <Button variant="secondary" size="sm" onClick={() => setNavigatorOpen(true)} aria-label="فهرست سؤال‌ها"><ListChecks className="h-4 w-4"/><span className="hidden min-[430px]:inline">سؤال‌ها</span></Button>
+          </div>
+        </div>
+        <div className="hidden h-[76px] max-w-[1480px] flex-nowrap items-center justify-between gap-3 px-6 sm:mx-auto sm:flex">
           <div className="min-w-0"><Link href="/student/dashboard" className="text-[11px] font-bold text-muted-foreground hover:text-primary">خروج از آزمون</Link><h1 className="mt-1 truncate text-sm font-black sm:text-base">{exam.title}</h1></div>
-          <div className="order-3 hidden flex-1 justify-center sm:order-none sm:flex"><ExamProgress current={currentIndex + 1} total={exam.questions.length} answered={answered} showPosition={!singlePage}/></div>
+          <div className="order-3 flex flex-1 justify-center"><ExamProgress current={currentIndex + 1} total={exam.questions.length} answered={answered} showPosition={!singlePage}/></div>
           <div className="flex items-center gap-2">
             {attempt.attemptNumber ? <span className="hidden rounded-xl border bg-card px-2.5 py-2 text-[11px] font-bold text-muted-foreground lg:inline-flex">تلاش {toPersianNumber(attempt.attemptNumber)} از {toPersianNumber(exam.settings.attemptLimit)}</span> : null}
             <ExamTimer seconds={attempt.remainingSeconds}/>
           </div>
         </div>
-        <div className="border-t px-4 py-2 sm:hidden"><ExamProgress current={currentIndex + 1} total={exam.questions.length} answered={answered} showPosition={!singlePage}/></div>
       </header>
-      <main className="mx-auto flex max-w-[1480px] gap-6 px-4 py-5 pb-32 sm:px-6 sm:py-7 xl:pb-10">
+      <main className="mx-auto flex max-w-[1480px] gap-6 px-4 py-4 pb-8 sm:px-6 sm:py-7">
         <div className="min-w-0 flex-1">
           <ExamSessionBanner attempt={attempt} onRestoreConnection={() => { setConnectionStatus(navigator.onLine ? "online" : "offline"); if (navigator.onLine) retrySave(); }}/>
           <ExamSessionNotice conflict={attempt.sessionConflict} saveStatus={attempt.saveStatus} claiming={claiming} onClaim={claimSession} onRetry={retrySave}/>
@@ -241,12 +257,7 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
         </div>
         <QuestionNavigator exam={exam} attempt={attempt} currentIndex={currentIndex} onNavigate={goTo} lockedBefore={noReturn ? frontier : 0} showPosition={!singlePage}/>
       </main>
-      <div className="fixed inset-x-3 bottom-3 z-30 flex items-center justify-between gap-2 rounded-2xl border bg-card/95 p-2 shadow-lift backdrop-blur-md xl:hidden">
-        <Button variant="secondary" onClick={() => setNavigatorOpen(true)}><ListChecks className="h-4 w-4"/>سؤال‌ها</Button>
-        <AutosaveIndicator status={attempt.saveStatus} className="hidden min-[420px]:inline-flex"/>
-        <Button variant="ghost" size="sm" onClick={() => toast({ title: "میانبرهای صفحه‌کلید", description: singlePage ? "در حالت یک‌صفحه‌ای با کلیدهای ۱ تا ۹ می‌توانید گزینهٔ سؤال آخر را انتخاب کنید." : "برای حرکت بین سؤال‌ها از کلیدهای جهت‌نما و برای گزینه‌ها از کلیدهای ۱ تا ۹ استفاده کنید." })}><CircleHelp className="h-4 w-4"/><span className="sr-only">راهنما</span></Button>
-        <ExamTimer seconds={attempt.remainingSeconds} className="border-0 bg-muted px-2 shadow-none [&>div>p:first-child]:hidden"/>
-      </div>
+
       {navigatorOpen && <div className="fixed inset-0 z-50 bg-foreground/20 backdrop-blur-[2px] xl:hidden" onMouseDown={() => setNavigatorOpen(false)}><div className="h-full" onMouseDown={(event) => event.stopPropagation()}><QuestionNavigator exam={exam} attempt={attempt} currentIndex={currentIndex} onNavigate={goTo} mobile close={() => setNavigatorOpen(false)} lockedBefore={noReturn ? frontier : 0} showPosition={!singlePage}/></div></div>}
     </div>
   );

@@ -20,9 +20,10 @@ export const resultsApi = {
   /** One question across every finalized attempt, plus the key so the rubric is on screen while marking. */
   gradingQuestion: (examId: string, questionId: string) => apiRequest<ApiGradingQuestionPageDto>(`/results/teacher/exams/${examId}/grading/${questionId}/`),
   /** Save a whole screen of marks at once; one bad row refuses the batch rather than half-applying it. */
-  saveQuestionGrades: (examId: string, questionId: string, grades: Array<{ attempt_id: string; mark: string | number; feedback?: string }>) => apiRequest<ApiGradingSaveResultDto>(`/results/teacher/exams/${examId}/grading/${questionId}/`, { method: "POST", body: { grades } }),
+  /** `mark: null` hands a keyed question back to the key; a row with only `feedback` leaves the number alone. */
+  saveQuestionGrades: (examId: string, questionId: string, grades: Array<{ attempt_id: string; mark?: string | number | null; feedback?: string }>) => apiRequest<ApiGradingSaveResultDto>(`/results/teacher/exams/${examId}/grading/${questionId}/`, { method: "POST", body: { grades } }),
   teacherAttempt: (attemptId: string) => apiRequest<ApiTeacherAttemptDetailDto>(`/results/teacher/attempts/${attemptId}/`),
-  gradeAnswer: (attemptId: string, questionId: string, payload: { manual_score: number; feedback?: string }) => apiRequest<ApiManualGradeResponseDto>(`/results/teacher/attempts/${attemptId}/answers/${questionId}/grade/`, { method: "PATCH", body: payload }),
+  gradeAnswer: (attemptId: string, questionId: string, payload: { manual_score?: number | string | null; feedback?: string }) => apiRequest<ApiManualGradeResponseDto>(`/results/teacher/attempts/${attemptId}/answers/${questionId}/grade/`, { method: "PATCH", body: payload }),
   updateFeedback: (attemptId: string, feedback: string) => apiRequest<ApiTeacherResultDto>(`/results/teacher/attempts/${attemptId}/feedback/`, { method: "PATCH", body: { feedback } }),
   publishExamResults: (examId: string) => apiRequest<{ published_count: number; pending_manual_grading_count: number }>(`/results/teacher/exams/${examId}/publish/`, { method: "POST" }),
   teacherStudents: () => apiRequest<ApiTeacherStudentOverviewDto[]>("/results/teacher/students/"),

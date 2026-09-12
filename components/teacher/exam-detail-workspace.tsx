@@ -4,6 +4,7 @@ import Link from "next/link";
 import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Clock3, Copy, Eye, ListChecks, PlusCircle, RotateCcw, Timer, UsersRound } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Exam } from "@/lib/types/domain";
+import { RESULT_DETAIL_LABELS, resolveResultDetail } from "@/lib/exam/result-detail";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Badge } from "@/components/ui/badge";
@@ -121,7 +122,12 @@ export function TeacherExamDetailWorkspace({ examId }: { examId: string }) {
       { label: "بازگشت به سؤال‌ها", value: exam.settings.questionLayout === "single_page" ? "بی‌اثر در چیدمان یک‌صفحه‌ای" : exam.settings.allowBackNavigation ? "مجاز" : "غیرفعال" },
       { label: "ترتیب سؤال‌ها", value: exam.settings.randomizeQuestions ? "تصادفی" : "ثابت" },
       { label: "نمایش نتیجه", value: exam.settings.resultVisibility === "immediate" ? "فوری" : exam.settings.resultVisibility === "pending" ? "پس از بررسی" : "انتشار دستی" },
-      { label: "نمایش پاسخ درست", value: exam.settings.showCorrectAnswers ? "بله" : "خیر" },
+      {
+        // What the published result reveals, in the teacher's words. The legacy switch folds into the same
+        // line, so an exam created before the ladder exists still reads truthfully here.
+        label: "محتوای نتیجهٔ منتشرشده",
+        value: RESULT_DETAIL_LABELS[resolveResultDetail(exam.settings)] ?? "فقط نمره",
+      },
       { label: "تعداد تلاش", value: `${toPersianNumber(exam.settings.attemptLimit)} بار` },
       { label: "حدنصاب قبولی", value: exam.settings.passingPercentage > 0 ? `${toPersianNumber(exam.settings.passingPercentage)}٪` : "بدون حکم قبولی" },
     ].map((item) => <div key={item.label} className="flex items-center justify-between gap-3 border-b pb-3 last:border-0 last:pb-0"><span className="font-bold text-muted-foreground">{item.label}</span><span className="text-xs font-extrabold">{item.value}</span></div>)}</div></CardContent></Card>

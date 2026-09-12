@@ -285,21 +285,20 @@ class TeacherManualGradeView(TeacherResultsAccessMixin, APIView):
             if attempt.status not in {ExamAttempt.Status.SUBMITTED, ExamAttempt.Status.EXPIRED}:
                 raise serializers.ValidationError({"attempt": ["Only finalized attempts can be graded."]})
             question = get_object_or_404(Question.objects.filter(exam=attempt.exam), pk=question_id)
-            requires_manual_grading = question.type == Question.Type.WRITTEN or (
-                question.type == Question.Type.SHORT_ANSWER and not question.configuration.get("expected_answers", [])
-            )
-            if not requires_manual_grading:
-                raise serializers.ValidationError({"question": ["This answer is automatically graded and cannot be manually overridden."]})
+            # Any question may be marked by hand, keyed ones included: the key is a guess about the answer and
+            # the teacher's number is the decision. A row is created for a question the student left blank so
+            # a teacher can award marks there too, and `manual_score: null` hands the question back to the key.
             answer = StudentAnswer.objects.select_for_update().filter(attempt=attempt, question=question).first()
             if answer is None:
-                raise serializers.ValidationError({"answer": ["The student did not submit an answer for this question."]})
+                answer = StudentAnswer.objects.create(attempt=attempt, question=question)
             serializer = ManualGradeSerializer(data=request.data, context={"answer": answer})
             serializer.is_valid(raise_exception=True)
-            answer.manual_score = serializer.validated_data["manual_score"]
+            if "manual_score" in serializer.validated_data:
+                answer.manual_score = serializer.validated_data["manual_score"]
             if "feedback" in serializer.validated_data:
                 answer.feedback = serializer.validated_data["feedback"]
             answer.full_clean()
-            answer.save(update_fields=("manual_score", "feedback", "updated_at"))
+            answer.save()
             result = _grade_attempt(attempt, finalized_at=timezone.now())
             # The queue for this student may have just emptied: tell them the number they waited for exists.
             _notify_grading_completed(attempt, result)
@@ -467,10 +466,8 @@ class TeacherExamQuestionGradingView(TeacherResultsAccessMixin, APIView):
     def post(self, request, exam_id, question_id) -> Response:  # type: ignore[no-untyped-def]
         exam = self.get_exam(exam_id)
         question = self._question(exam, question_id)
-        if not requires_manual_grading(question):
-            raise serializers.ValidationError(
-                {"question": ["This answer is automatically graded and cannot be manually overridden."]}
-            )
+        # Keyed questions are writable here too, one decision per row: `{mark}` to override, `{mark: null}`
+        # to hand the row back to the key, and `{feedback}` to leave a note without touching the number.
         grades = request.data.get("grades") if isinstance(request.data, dict) else None
         if not isinstance(grades, list) or not grades:
             raise serializers.ValidationError({"grades": ["Send at least one row."]})
@@ -498,29 +495,38 @@ class TeacherExamQuestionGradingView(TeacherResultsAccessMixin, APIView):
             if attempt is None:
                 errors.append({"index": index, "error": "This attempt is not part of the exam."})
                 continue
+            # A missing row is not a refusal: a question the student left blank can still be awarded marks.
             answer = answers.get(str(attempt.id))
-            if answer is None:
-                errors.append({"index": index, "error": "The student did not submit an answer for this question."})
+            payload: dict[str, object] = {}
+            if "mark" in item:
+                payload["manual_score"] = item.get("mark")
+            if item.get("feedback") is not None:
+                payload["feedback"] = item.get("feedback")
+            if not payload:
+                errors.append({"index": index, "error": "Send a mark, a note, or `mark: null` to undo an override."})
                 continue
-            payload = {"manual_score": item.get("mark"), "feedback": item.get("feedback", "")}
-            serializer = entry(data=payload, context={"answer": answer})
+            serializer = entry(data=payload, context={"answer": answer, "question": question})
             if not serializer.is_valid():
                 errors.append({"index": index, "attempt_id": str(attempt.id), "error": serializer.errors})
                 continue
-            prepared.append((answer, serializer.validated_data["manual_score"], serializer.validated_data.get("feedback")))
+            prepared.append((attempt, answer, serializer.validated_data))
         if errors:
             raise serializers.ValidationError({"rows": errors})
 
         results = []
         with transaction.atomic():
             touched: dict[str, ExamAttempt] = {}
-            for answer, manual_score, feedback in prepared:
-                answer.manual_score = manual_score
-                if feedback is not None:
-                    answer.feedback = feedback
+            for attempt_owner, answer, data in prepared:
+                if answer is None:
+                    # A blank can be graded too, so the row is created here rather than refused.
+                    answer = StudentAnswer.objects.create(attempt=attempt_owner, question=question)
+                if "manual_score" in data:
+                    answer.manual_score = data["manual_score"]
+                if "feedback" in data:
+                    answer.feedback = data["feedback"]
                 answer.full_clean()
-                answer.save(update_fields=("manual_score", "feedback", "updated_at"))
-                touched[str(answer.attempt_id)] = answer.attempt
+                answer.save()
+                touched[str(answer.attempt_id)] = attempt_owner
             for attempt in touched.values():
                 result = _grade_attempt(attempt, finalized_at=timezone.now())
                 _notify_grading_completed(attempt, result)
@@ -592,7 +598,11 @@ def _question_rows(exam: Exam, question: Question, attempts) -> list[dict]:  # t
                 "verdict": mark.verdict,
                 "manual_score": None if answer is None or answer.manual_score is None else str(answer.manual_score),
                 "feedback": answer.feedback if answer is not None else "",
-                "editable": bool(answer is not None and mark.requires_manual),
+                "editable": True,
+                # What the key alone would have awarded, and whether the teacher's number replaced it. The
+                # desk shows both so an override reads as a decision with a reason, not as a lost grade.
+                "auto_score": f"{grade_answer(question, answer, ignore_manual=True).awarded:.2f}",
+                "is_overridden": answer is not None and answer.manual_score is not None and not mark.requires_manual,
             }
         )
     return rows

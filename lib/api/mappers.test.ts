@@ -216,6 +216,15 @@ describe("toExamWritePayload", () => {
     expect(toExamWritePayload({ ...draft, schedule: { ...draft.schedule, timezone: "UTC" } }).start_at).toBe("2026-03-20T09:00:00.000Z");
   });
 
+  it("sends the result rung only when the teacher chose one", () => {
+    // Leaving `result_detail` out is what keeps an exam on the meaning of the legacy switch, so the client
+    // must not send a rung it invented from a default.
+    expect(toExamWritePayload(draft).settings).not.toHaveProperty("result_detail");
+    expect(toExamWritePayload({ ...draft, settings: { ...draft.settings, resultDetail: "own_answers_with_feedback" } }).settings).toMatchObject({
+      result_detail: "own_answers_with_feedback",
+    });
+  });
+
   it("persists the pass mark and trims before sending", () => {
     const payload = toExamWritePayload(draft);
     expect(payload.title).toBe("آزمون شیمی");
@@ -354,6 +363,50 @@ describe("toStudentResult", () => {
     incorrect_count: 1, unanswered_count: 1, pending_manual_grading_count: 0, manual_grading_count: 0, revised_at: null, passing_percentage: 55,
     passed: true, attempt_number: 1, submitted_at: "2026-03-20T06:00:00Z", is_final: true, feedback: "خوب بود", published_at: null,
   };
+
+  it("carries the published answer sheet without inventing a verdict", () => {
+    // A score-only payload has no `answers` at all, and the mapper must not turn that into empty verdict rows.
+    expect(toStudentResult(base, attempt, exam).answerSheet).toEqual([]);
+    expect(toStudentResult(base, attempt, exam).detailLevel).toBe("score_only");
+
+    const keyed = toStudentResult(
+      {
+        ...base,
+        detail_level: "full_key",
+        answers: [
+          {
+            question_id: "q1", question_order: 1, question_text: "کدام یکای توان است؟", question_type: "multiple_choice", marks: "2.00",
+            your_answer: null, selected_option_texts: ["ژول"], feedback: "دقت کردی.", awarded_score: "0.00", verdict: "incorrect",
+            correct_option_texts: ["وات"], expected_answers: [], explanation: "وات یکای توان است.",
+          },
+        ],
+      },
+      attempt,
+      exam,
+    );
+    expect(keyed.detailLevel).toBe("full_key");
+    expect(keyed.answerSheet?.[0]).toMatchObject({
+      order: 1,
+      yourAnswer: "ژول",
+      feedback: "دقت کردی.",
+      awarded: 0,
+      verdict: "incorrect",
+      correctOptions: ["وات"],
+      explanation: "وات یکای توان است.",
+    });
+
+    // The note rung sends fewer fields; the missing ones stay null and empty rather than becoming a verdict.
+    const notes = toStudentResult(
+      {
+        ...base,
+        detail_level: "own_answers",
+        answers: [{ question_id: "q1", question_order: 1, question_text: "سؤال", question_type: "written", marks: "3.00", your_answer: "نرخ انجام کار.", selected_option_texts: [] }],
+      },
+      attempt,
+      exam,
+    );
+    expect(notes.answerSheet?.[0]).toMatchObject({ yourAnswer: "نرخ انجام کار.", feedback: "", awarded: null, verdict: null, correctOptions: [] });
+  });
 
   it("maps marks, the pass verdict and the manual-grading flag", () => {
     expect(toStudentResult(base, attempt, exam)).toMatchObject({ score: 6, maximumScore: 10, percentage: 60, passingPercentage: 55, passed: true, pendingManualGrading: 0, status: "published", attemptNumber: 1, feedback: "خوب بود" });

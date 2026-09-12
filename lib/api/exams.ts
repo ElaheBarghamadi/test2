@@ -1,11 +1,16 @@
 import { apiRequest } from "@/lib/api/client";
-import type { ApiExamWritePayload, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
+import type { ApiExamSettingsDto, ApiExamWritePayload, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
 
 export const examsApi = {
   list: () => apiRequest<ApiTeacherExamListDto[]>("/exams/"),
   detail: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/`),
   create: (payload: ApiExamWritePayload) => apiRequest<ApiTeacherExamDto>("/exams/", { method: "POST", body: payload }),
   update: (examId: string, payload: ApiExamWritePayload) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/`, { method: "PATCH", body: payload }),
+  /**
+   * A settings-only PATCH. The exam write serializer takes `settings` on its own, so choosing what a published
+   * result reveals does not require resending the title, the schedule, or anything else about the exam.
+   */
+  updateSettings: (examId: string, settings: Partial<ApiExamSettingsDto>) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/`, { method: "PATCH", body: { settings } }),
   publish: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/publish/`, { method: "POST" }),
   /** Opens a scheduled exam immediately; used when the class is already sitting in the room. */
   start: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/start/`, { method: "POST" }),

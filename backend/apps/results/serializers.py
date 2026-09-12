@@ -14,6 +14,11 @@ class StudentResultSerializer(serializers.ModelSerializer):
     """Published result plus the exam context a student needs to read it (marks, pass verdict)."""
 
     is_final = serializers.SerializerMethodField()
+    # Which rung of `ExamSettings.ResultDetail` this payload was cut at, and the rows it allows. The student
+    # screen reads the level rather than guessing from empty arrays, so it can say "the teacher chose to show
+    # only the score" instead of showing a blank section that looks like a bug.
+    detail_level = serializers.SerializerMethodField()
+    answers = serializers.SerializerMethodField()
     maximum_score = serializers.SerializerMethodField()
     attempt_number = serializers.SerializerMethodField()
     submitted_at = serializers.SerializerMethodField()
@@ -39,12 +44,72 @@ class StudentResultSerializer(serializers.ModelSerializer):
             "submitted_at",
             "is_final",
             "feedback",
+            "detail_level",
+            "answers",
             "published_at",
         )
         read_only_fields = fields
 
     def get_is_final(self, result: ExamResult) -> bool:
         return result.pending_manual_grading_count == 0
+
+    @staticmethod
+    def level(result: ExamResult) -> str:
+        """The setting the teacher chose, or the one rung above nothing while marks are still coming in.
+
+        Per-question marks and notes are withheld until the sheet is finished being graded: a page that says
+        "۱ از ۲" for half the questions and "۰ از ۲" for the ungraded rest reads as a wrong grade, not a
+        partial one. The score stays visible, since the student is waiting for exactly that.
+        """
+        from apps.exams.models import ExamSettings
+
+        if result.pending_manual_grading_count:
+            return ExamSettings.ResultDetail.SCORE_ONLY
+        return result.attempt.exam.settings.result_detail_level
+
+    def get_detail_level(self, result: ExamResult) -> str:
+        return self.level(result)
+
+    def get_answers(self, result: ExamResult) -> list[dict]:  # type: ignore[type-arg]
+        from apps.attempts.grading import grade_answer
+        from apps.exams.models import ExamSettings
+
+        level = self.level(result)
+        detail = ExamSettings.ResultDetail
+        if level == detail.SCORE_ONLY:
+            return []
+        answers = {
+            str(answer.question_id): answer
+            for answer in result.attempt.answers.select_related("question").prefetch_related("selected_options")
+        }
+        rows: list[dict] = []
+        for question in result.attempt.exam.questions.select_related(None).prefetch_related("options").order_by("order"):
+            answer = answers.get(str(question.id))
+            row: dict = {  # type: ignore[type-arg]
+                "question_id": str(question.id),
+                "question_order": question.order,
+                "question_text": question.text,
+                "question_type": question.type,
+                "marks": f"{question.marks:.2f}",
+                "your_answer": (answer.answer_data or {}).get("text") if answer else None,
+                "selected_option_texts": [option.text for option in answer.selected_options.all()] if answer else [],
+            }
+            if level == detail.OWN_ANSWERS:
+                rows.append(row)
+                continue
+            row["feedback"] = answer.feedback if answer is not None else ""
+            if level == detail.OWN_ANSWERS_WITH_FEEDBACK:
+                rows.append(row)
+                continue
+            # FULL_KEY is the only rung where the key itself is released.
+            mark = grade_answer(question, answer)
+            row["awarded_score"] = f"{mark.awarded:.2f}"
+            row["verdict"] = mark.verdict
+            row["correct_option_texts"] = [option.text for option in question.options.all() if option.is_correct]
+            row["expected_answers"] = (question.configuration or {}).get("expected_answers", [])
+            row["explanation"] = question.explanation
+            rows.append(row)
+        return rows
 
     def get_maximum_score(self, result: ExamResult) -> float:
         """The marks this attempt was actually graded against.
@@ -217,6 +282,10 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
     # function `_grade_attempt` uses, so a row and the total cannot disagree.
     awarded_score = serializers.SerializerMethodField()
     verdict = serializers.SerializerMethodField()
+    # Only meaningful next to `awarded_score`: the desk shows what the key alone would have awarded, so an
+    # override on an auto-graded answer is visible as a change rather than a silent overwrite.
+    auto_awarded_score = serializers.SerializerMethodField()
+    is_overridden = serializers.SerializerMethodField()
 
     class Meta:
         model = StudentAnswer
@@ -236,6 +305,8 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
             "is_flagged",
             "manual_score",
             "feedback",
+            "auto_awarded_score",
+            "is_overridden",
             "updated_at",
         )
         read_only_fields = fields
@@ -268,17 +339,41 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
     def get_verdict(self, answer: StudentAnswer) -> str:
         return self._mark(answer).verdict
 
+    def get_auto_awarded_score(self, answer: StudentAnswer) -> str:
+        return f"{grade_answer(answer.question, answer, ignore_manual=True).awarded:.2f}"
+
+    def get_is_overridden(self, answer: StudentAnswer) -> bool:
+        """A teacher's number on a question the key could already answer.
+
+        Not every manual score is an override: on a written answer the pen is the only grader there is, and
+        calling that an override would fill the desk with badges that mean "normal".
+        """
+        return answer.manual_score is not None and not requires_manual_grading(answer.question)
+
 
 class ManualGradeSerializer(serializers.Serializer):
-    manual_score = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=Decimal("0.00"))
+    """One teacher decision on one answer.
+
+    Both halves are optional because the desk needs three separate gestures and not just one: set a mark,
+    write a note, or undo an override (`manual_score: null` hands the question back to the key). A keyed
+    question takes the same payload as a written one — the teacher's number wins wherever it is entered.
+    """
+
+    manual_score = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=Decimal("0.00"), required=False, allow_null=True)
     feedback = serializers.CharField(required=False, allow_blank=True, max_length=5000)
 
     def validate(self, attrs: dict) -> dict:
         unexpected = set(self.initial_data).difference(self.fields)
         if unexpected:
             raise serializers.ValidationError({field: "This is not a supported grading field." for field in unexpected})
-        answer: StudentAnswer = self.context["answer"]
-        if attrs["manual_score"] > answer.question.marks:
+        if "manual_score" not in attrs and "feedback" not in attrs:
+            raise serializers.ValidationError({"manual_score": "Send a mark, a note, or `manual_score: null` to undo an override."})
+        # `answer` is absent when a cohort row is graded for a question the student left blank; the question
+        # in context is the same one either way, and it is the only thing this bound check needs.
+        answer: StudentAnswer | None = self.context.get("answer")
+        maximum = (answer.question if answer is not None else self.context["question"]).marks
+        score = attrs.get("manual_score")
+        if score is not None and score > maximum:
             raise serializers.ValidationError({"manual_score": "Manual score cannot exceed the question marks."})
         return attrs
 

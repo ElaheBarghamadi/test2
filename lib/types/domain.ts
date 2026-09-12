@@ -108,6 +108,8 @@ export interface ExamSettings {
   showResultImmediately: boolean;
   resultVisibility: ResultVisibility;
   showCorrectAnswers: boolean;
+  /** Absent or `null` = the teacher never chose, so the legacy `showCorrectAnswers` switch decides. */
+  resultDetail?: ResultDetailLevel | null;
   attemptLimit: number;
   /** Pass mark as a percentage of the exam total; 0 disables the pass/fail verdict. */
   passingPercentage: number;
@@ -245,6 +247,27 @@ export interface GradingQueueRow {
   resultStatus: "pending" | "hidden" | "published" | null;
 }
 
+export type ResultDetailLevel = "score_only" | "own_answers" | "own_answers_with_feedback" | "full_key";
+
+/** One line of a published answer sheet, shaped by whatever rung the teacher chose. */
+export interface ResultAnswerRow {
+  questionId: string;
+  order: number;
+  text: string;
+  type: string;
+  marks: number;
+  /** What the student wrote or picked, as the sheet recorded it. */
+  yourAnswer: string;
+  /** Only from the note rung up. */
+  feedback: string;
+  /** Only at `full_key`; `null` means the rung did not release it. */
+  awarded: number | null;
+  verdict: string | null;
+  correctOptions: string[];
+  expectedAnswers: string[];
+  explanation: string;
+}
+
 export interface ExamResult {
   id: string;
   examId: string;
@@ -256,6 +279,9 @@ export interface ExamResult {
   incorrect: number;
   unanswered: number;
   pendingManualGrading: number;
+  /** What the published result is allowed to contain, decided by the server. */
+  detailLevel?: ResultDetailLevel;
+  answerSheet?: ResultAnswerRow[];
   /** Total answers that needed the teacher's pen; `manual - pending` is "17 / 24 graded". */
   manualGradingCount?: number;
   /** Set when the number was recomputed after students had already seen it. */

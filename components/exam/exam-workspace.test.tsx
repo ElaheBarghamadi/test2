@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { ExamWorkspace } from "@/components/exam/exam-workspace";
 import { useExamAttemptStore } from "@/lib/state/exam-attempt-store";
 import type { Exam, ExamAttempt } from "@/lib/types/domain";
@@ -207,5 +207,41 @@ describe("ExamWorkspace session handling", () => {
     render(<ExamWorkspace exam={back}/>);
     expect(screen.queryByText(/این سؤال قفل شده است/)).toBeNull();
     expect((screen.getAllByRole("button", { name: /سؤال ۱/ })[0] as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+describe("phone chrome", () => {
+  /**
+   * One bar on a phone.
+   *
+   * The header used to stack a second progress strip under itself *and* float a dock over the bottom of the
+   * screen, which on a short viewport meant the question was never fully visible without scrolling. The
+   * structure is asserted here because it is the whole promise: a single rounded bar above the content, and
+   * nothing fixed at the bottom of it.
+   */
+  function renderBar() {
+    useExamAttemptStore.setState({ attempt: attemptFixture({ status: "in_progress", remainingSeconds: 900 }) });
+    const view = render(<ExamWorkspace exam={exam}/>);
+    return view;
+  }
+
+  it("puts one rounded bar at the top with everything the dock used to hold", () => {
+    const { container } = renderBar();
+    const bars = Array.from(container.querySelectorAll("div")).filter((node) => node.className.includes("px-2") && node.className.includes("sm:hidden"));
+    expect(bars.length).toBe(1);
+    const bar = bars[0]!.firstElementChild as HTMLElement;
+    expect(bar.className).toContain("rounded-2xl");
+    expect(bar.className).toContain("shadow-lift");
+    expect(within(bar).getByRole("link", { name: "خروج از آزمون" })).toBeTruthy();
+    expect(within(bar).getByRole("button", { name: "فهرست سؤال‌ها" })).toBeTruthy();
+    expect(within(bar).getByText(/٪ تکمیل|٪/)).toBeTruthy();
+    expect(within(bar).getByRole("timer")).toBeTruthy();
+  });
+
+  it("leaves nothing fixed over the bottom of the page", () => {
+    const { container } = renderBar();
+    const fixedBottom = Array.from(container.querySelectorAll("div")).filter((node) => `${node.className}`.includes("fixed") && `${node.className}`.includes("bottom-"));
+    expect(fixedBottom).toHaveLength(0);
+    // and the space that used to be reserved for that dock is gone
+    expect((container.querySelector("main") as HTMLElement).className).not.toContain("pb-32");
   });
 });

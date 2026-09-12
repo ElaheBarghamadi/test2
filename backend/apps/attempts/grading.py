@@ -87,9 +87,25 @@ class AnswerMark:
         return not self.requires_manual and self.verdict != VERDICT_UNANSWERED
 
 
-def grade_answer(question: Question, answer: StudentAnswer | None) -> AnswerMark:
-    """Grade one answer against one question. Never touches the database beyond the given rows."""
+def grade_answer(question: Question, answer: StudentAnswer | None, *, ignore_manual: bool = False) -> AnswerMark:
+    """Grade one answer against one question. Never touches the database beyond the given rows.
+
+    `ignore_manual` recomputes what the key alone would have awarded. The marking desk shows the two side by
+    side when a teacher has overridden an auto-graded answer, so "the machine said ۲, you said ۰" is visible
+    instead of silent - and both numbers come from this one function, so they cannot drift.
+    """
     marks = Decimal(str(question.marks))
+    # A teacher's pen outranks the key, on every question type - not only on the ones that need a human.
+    # The key is a guess about the answer; the mark the teacher entered after looking at it is a decision,
+    # and the desk has to be able to say "the auto grade was wrong here" without the total disagreeing.
+    # The override is checked before the blank test, because a teacher may also award marks to a question
+    # the student left empty.
+    if not ignore_manual and answer is not None and answer.manual_score is not None:
+        return AnswerMark(
+            awarded=Decimal(str(answer.manual_score)),
+            verdict=VERDICT_MANUAL,
+            requires_manual=requires_manual_grading(question),
+        )
     if not answer_has_value(question, answer):
         # A blank is a zero, not a task for the teacher: an unanswered written question never enters the
         # grading queue, so a sheet cannot stay "pending" over an empty page the student chose to skip.
@@ -97,9 +113,7 @@ def grade_answer(question: Question, answer: StudentAnswer | None) -> AnswerMark
 
     assert answer is not None  # narrowed by answer_has_value
     if requires_manual_grading(question):
-        if answer.manual_score is None:
-            return AnswerMark(awarded=ZERO, verdict=VERDICT_PENDING, requires_manual=True)
-        return AnswerMark(awarded=Decimal(str(answer.manual_score)), verdict=VERDICT_MANUAL, requires_manual=True)
+        return AnswerMark(awarded=ZERO, verdict=VERDICT_PENDING, requires_manual=True)
 
     if question.type == Question.Type.SHORT_ANSWER:
         configuration = question.configuration or {}

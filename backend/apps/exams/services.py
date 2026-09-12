@@ -347,6 +347,7 @@ def duplicate_exam(exam_id, owner) -> Exam:
             "randomize_questions",
             "result_visibility",
             "show_correct_answers",
+            "result_detail",
             "max_attempts",
             "passing_percentage",
         ):

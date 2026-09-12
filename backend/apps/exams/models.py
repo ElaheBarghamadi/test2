@@ -80,6 +80,19 @@ class ExamSettings(TimeStampedUUIDModel):
         PAGED = "paged", "One question per page"
         SINGLE_PAGE = "single_page", "All questions on one page"
 
+    class ResultDetail(models.TextChoices):
+        """How much of a published result the student is allowed to read.
+
+        A ladder, not a switch: "the score" and "everything including the model answer" are the two ends most
+        people reach for, but a teacher who wants students to review what they wrote without being able to
+        compare answers against the key needs the rungs in between.
+        """
+
+        SCORE_ONLY = "score_only", "Score only"
+        OWN_ANSWERS = "own_answers", "Score and their own answer sheet"
+        OWN_ANSWERS_WITH_FEEDBACK = "own_answers_with_feedback", "Answer sheet and the teacher's notes"
+        FULL_KEY = "full_key", "Answer sheet, notes, and the correct answers"
+
     exam = models.OneToOneField(Exam, on_delete=models.CASCADE, related_name="settings")
     allow_previous_questions = models.BooleanField(default=True)
     # Presentation only: paged shows one question at a time, single_page stacks the whole answer sheet.
@@ -90,6 +103,10 @@ class ExamSettings(TimeStampedUUIDModel):
     randomize_questions = models.BooleanField(default=False)
     result_visibility = models.CharField(max_length=20, choices=ResultVisibility.choices, default=ResultVisibility.PENDING)
     show_correct_answers = models.BooleanField(default=False)
+    # Null means "not chosen": the answer is derived from `show_correct_answers`, so an exam created before
+    # this existed behaves exactly as it did. Written as `full_key`, this is the same promise; the two middle
+    # rungs are what a teacher picks when they want reflection without an answer key.
+    result_detail = models.CharField(max_length=32, choices=ResultDetail.choices, null=True, blank=True)
     max_attempts = models.PositiveSmallIntegerField(default=1)
     # Option order is randomized per attempt on top of question order; grading never sees these orders.
     randomize_options = models.BooleanField(default=False)
@@ -97,6 +114,13 @@ class ExamSettings(TimeStampedUUIDModel):
     allow_unanswered = models.BooleanField(default=True)
     # Pass mark as a percentage of the exam total; 0 disables the pass/fail verdict everywhere.
     passing_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+
+    @property
+    def result_detail_level(self) -> str:
+        """The rung this exam publishes at, resolved once so no consumer re-derives it differently."""
+        if self.result_detail:
+            return self.result_detail
+        return self.ResultDetail.FULL_KEY if self.show_correct_answers else self.ResultDetail.SCORE_ONLY
 
     class Meta:
         verbose_name_plural = "Exam settings"
