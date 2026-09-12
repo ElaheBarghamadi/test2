@@ -858,6 +858,200 @@ class QuestionBankApiTests(TestCase):
         self.assertEqual(cleared.data["tags"], [])
 
 
+class QuestionBankAuthoringApiTests(QuestionBankApiTests):
+    """Authoring, filing and categorising bank questions that belong to no exam.
+
+    Inherited helpers: `make_exam`, `add_question`, and a client authenticated as `self.teacher`.
+    """
+
+    def draft_payload(self, text: str = "What is power?", **extra) -> dict:
+        return {
+            "type": Question.Type.MULTIPLE_CHOICE,
+            "text": text,
+            "marks": 2,
+            "options": [{"text": "Watt", "is_correct": True}, {"text": "Joule", "is_correct": False}],
+            **extra,
+        }
+
+    def test_a_bank_question_can_be_saved_without_an_exam(self) -> None:
+        exam = self.make_exam()
+        created = self.client.post("/api/v1/questions/", self.draft_payload(status="draft", category="Mechanics"), format="json")
+        self.assertEqual(created.status_code, 201)
+        body = created.data
+        self.assertEqual((body["status"], body["category"], body["exam"]), ("draft", "Mechanics", None))
+        self.assertIsNone(body["exam_title"], "a bank row has no exam to name")
+        self.assertEqual(exam.questions.count(), 0, "a saved draft is not exam content")
+        # The bank sees it; the exam's own question list does not.
+        rows = self.client.get("/api/v1/questions/?placement=bank").data
+        self.assertEqual([row["id"] for row in rows], [body["id"]])
+        self.assertEqual(self.client.get(f"/api/v1/exams/{exam.id}/questions/").data, [])
+
+    def test_the_bank_does_not_store_the_same_question_twice(self) -> None:
+        first = self.client.post("/api/v1/questions/", self.draft_payload(), format="json")
+        again = self.client.post("/api/v1/questions/", self.draft_payload(), format="json")
+        self.assertEqual(again.status_code, 200)
+        self.assertTrue(again.data["deduplicated"])
+        self.assertEqual(again.data["id"], first.data["id"])
+
+    def test_folders_are_created_listed_renamed_and_deleted(self) -> None:
+        created = self.client.post("/api/v1/questions/folders/", {"name": "فیزیک سال آخر"}, format="json")
+        self.assertEqual(created.status_code, 201)
+        folder_id = created.data["id"]
+        self.assertEqual(created.data["question_count"], 0)
+
+        self.assertEqual(self.client.get("/api/v1/questions/folders/").data[0]["name"], "فیزیک سال آخر")
+
+        renamed = self.client.patch(f"/api/v1/questions/folders/{folder_id}/", {"name": "  فیزیک دوازدهم  "}, format="json")
+        self.assertEqual(renamed.data["name"], "فیزیک دوازدهم", "names are trimmed on write")
+
+        # Two folders cannot share a name in the same place.
+        clash = self.client.post("/api/v1/questions/folders/", {"name": "فیزیک دوازدهم"}, format="json")
+        self.assertEqual(clash.status_code, 400)
+        self.assertIn("name", clash.data["detail"])
+
+    def test_deleting_a_folder_unfiles_its_questions_and_keeps_them(self) -> None:
+        folder = self.client.post("/api/v1/questions/folders/", {"name": "Mechanics"}, format="json").data
+        child = self.client.post("/api/v1/questions/folders/", {"name": "Kinematics", "parent": folder["id"]}, format="json").data
+        question = self.client.post("/api/v1/questions/", self.draft_payload(folder=folder["id"]), format="json").data
+
+        listed = self.client.get("/api/v1/questions/folders/").data
+        counts = {row["id"]: row["question_count"] for row in listed}
+        self.assertEqual(counts[folder["id"]], 1, "the filed question counts against its folder")
+
+        # A folder with folders inside it is not a leaf, and deleting it would take their questions with it.
+        refused = self.client.delete(f"/api/v1/questions/folders/{folder['id']}/")
+        self.assertEqual(refused.status_code, 400)
+
+        self.assertEqual(self.client.delete(f"/api/v1/questions/folders/{child['id']}/").status_code, 204)
+        self.assertEqual(self.client.delete(f"/api/v1/questions/folders/{folder['id']}/").status_code, 204)
+        after = self.client.get(f"/api/v1/questions/{question['id']}/").data
+        self.assertEqual((after["folder"], after["category"]), (None, ""), "unfiled, not deleted")
+
+    def test_the_bank_filters_by_folder_category_and_status(self) -> None:
+        folder = self.client.post("/api/v1/questions/folders/", {"name": "Optics"}, format="json").data
+        filed = self.client.post(
+            "/api/v1/questions/",
+            self.draft_payload("Lens question", folder=folder["id"], category="Optics", status="draft"),
+            format="json",
+        ).data
+        unfiled = self.client.post("/api/v1/questions/", self.draft_payload("Mirror question", status="ready"), format="json").data
+        exam = self.make_exam()
+        in_exam = self.add_question(exam, "Exam-only question")
+
+        self.assertEqual([row["id"] for row in self.client.get(f"/api/v1/questions/?folder={folder['id']}").data], [filed["id"]])
+        self.assertEqual({row["id"] for row in self.client.get("/api/v1/questions/?folder=unfiled").data}, {unfiled["id"], str(in_exam.id)})
+        self.assertEqual([row["id"] for row in self.client.get("/api/v1/questions/?category=optics").data], [filed["id"]])
+        self.assertEqual([row["id"] for row in self.client.get("/api/v1/questions/?status=draft").data], [filed["id"]])
+        self.assertEqual({row["id"] for row in self.client.get("/api/v1/questions/?status=ready").data}, {unfiled["id"], str(in_exam.id)})
+        self.assertEqual(
+            {row["id"] for row in self.client.get("/api/v1/questions/?placement=bank").data},
+            {filed["id"], unfiled["id"]},
+            "placement=bank hides exam content",
+        )
+        self.assertEqual(
+            [{"category": "Optics", "count": 1}], self.client.get("/api/v1/questions/categories/").data
+        )
+
+    def test_a_ready_bank_question_is_copied_into_an_exam_and_a_draft_is_refused(self) -> None:
+        exam = self.make_exam()
+        draft = self.client.post(
+            "/api/v1/questions/", self.draft_payload("Draft question", status="draft"), format="json"
+        ).data
+        refused = self.client.post(
+            f"/api/v1/exams/{exam.id}/questions/import/", {"question_ids": [draft["id"]]}, format="json"
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("question_ids", refused.data["detail"])
+
+        ready = self.client.patch(f"/api/v1/questions/{draft['id']}/", {"status": "ready"}, format="json").data
+        imported = self.client.post(
+            f"/api/v1/exams/{exam.id}/questions/import/", {"question_ids": [ready["id"]]}, format="json"
+        )
+        self.assertEqual(imported.status_code, 201)
+        self.assertEqual(exam.questions.count(), 1)
+        # Copies, never moves: the bank keeps its own row so the next exam can reuse it.
+        self.assertIsNotNone(self.client.get(f"/api/v1/questions/{ready['id']}/").data)
+        self.assertIsNone(self.client.get(f"/api/v1/questions/{ready['id']}/").data["exam"])
+
+    def test_another_teacher_cannot_see_or_touch_a_bank_question_or_folder(self) -> None:
+        folder = self.client.post("/api/v1/questions/folders/", {"name": "Mine"}, format="json").data
+        question = self.client.post("/api/v1/questions/", self.draft_payload(folder=folder["id"]), format="json").data
+
+        self.client.force_authenticate(user=self.other_teacher)
+        self.assertEqual(self.client.get("/api/v1/questions/").data, [])
+        self.assertEqual(self.client.get("/api/v1/questions/folders/").data, [])
+        self.assertEqual(self.client.get(f"/api/v1/questions/{question['id']}/").status_code, 404)
+        self.assertEqual(self.client.patch(f"/api/v1/questions/{question['id']}/", {"text": "yours now"}, format="json").status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/v1/questions/folders/{folder['id']}/").status_code, 404)
+
+    def test_a_bank_row_cannot_be_filed_in_another_teachers_folder(self) -> None:
+        question = self.client.post("/api/v1/questions/", self.draft_payload(), format="json").data
+        self.client.force_authenticate(user=self.other_teacher)
+        rival_folder = self.client.post("/api/v1/questions/folders/", {"name": "Rival shelf"}, format="json").data
+        refused = self.client.patch(
+            f"/api/v1/questions/{question['id']}/", {"folder": rival_folder["id"]}, format="json"
+        )
+        self.assertEqual(refused.status_code, 404, "the row itself is invisible to a rival teacher")
+
+    def test_a_bank_question_is_editable_in_the_bank_itself(self) -> None:
+        question = self.client.post("/api/v1/questions/", self.draft_payload(), format="json").data
+        patched = self.client.patch(
+            f"/api/v1/questions/{question['id']}/",
+            {"text": "Define power, with its unit.", "category": " definitions ", "status": "ready"},
+            format="json",
+        )
+        self.assertEqual(patched.status_code, 200)
+        self.assertEqual((patched.data["text"], patched.data["category"], patched.data["status"]), ("Define power, with its unit.", "definitions", "ready"))
+
+    def test_a_half_written_question_can_be_saved_as_a_draft(self) -> None:
+        """A draft is unfinished by definition, so the structural rules wait until it is marked ready."""
+        saved = self.client.post("/api/v1/questions/", {"type": "multiple_choice", "text": "سؤالی که هنوز گزینه ندارد", "status": "draft"}, format="json")
+        self.assertEqual(saved.status_code, 201)
+        self.assertEqual(saved.data["options"], [])
+
+        # Marking it ready is the moment it has to stand up as a question, and it does not yet.
+        refused = self.client.patch(f"/api/v1/questions/{saved.data['id']}/", {"status": "ready"}, format="json")
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("options", refused.data["detail"])
+
+        # Saving the same content straight as a finished question is still refused.
+        self.assertEqual(self.client.post("/api/v1/questions/", {"type": "multiple_choice", "text": "بدون گزینه"}, format="json").status_code, 400)
+
+    def test_a_draft_still_needs_a_statement(self) -> None:
+        blank = self.client.post("/api/v1/questions/", {"type": "written", "text": "   ", "status": "draft"}, format="json")
+        self.assertEqual(blank.status_code, 400)
+        self.assertIn("text", blank.data["detail"])
+
+    def test_a_bank_question_can_be_deleted_while_an_exam_one_cannot_when_answered(self) -> None:
+        """Deletion has to work on a shelf row, which has no exam to re-sequence, and stay refused once answered."""
+        question = self.client.post("/api/v1/questions/", self.draft_payload("Throwaway question"), format="json").data
+        self.assertEqual(self.client.delete(f"/api/v1/questions/{question['id']}/").status_code, 204)
+        self.assertEqual(self.client.get(f"/api/v1/questions/{question['id']}/").status_code, 404)
+
+        from apps.attempts.models import ExamAttempt, StudentAnswer
+
+        exam = self.make_exam()
+        answered = self.add_question(exam, "Answered question")
+        student = User.objects.create_user(email="deleted.question@example.com", password=self.password, role=User.Role.STUDENT)
+        attempt = ExamAttempt.objects.create(exam=exam, student=student, status=ExamAttempt.Status.SUBMITTED)
+        StudentAnswer.objects.create(attempt=attempt, question=answered, answer_data={})
+        refused = self.client.delete(f"/api/v1/questions/{answered.id}/")
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(exam.questions.count(), 1)
+
+    def test_bank_rows_do_not_move_an_exam_total(self) -> None:
+        exam = self.make_exam()
+        self.add_question(exam, "Real question")
+        before = refresh_snapshot(exam)
+        self.client.post("/api/v1/questions/", self.draft_payload("Untouched shelf question"), format="json")
+        self.assertEqual(refresh_snapshot(exam), before, "the bank is not exam content")
+
+
+def refresh_snapshot(exam: Exam) -> tuple:
+    exam.refresh_from_db()
+    return (exam.total_marks, exam.questions.count())
+
+
 class ExamListCounterAccuracyTests(TeacherExamApiTests):
     """The list rows must agree with the detail rows no matter how many attempts exist."""
 

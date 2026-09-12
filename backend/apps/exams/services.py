@@ -434,7 +434,22 @@ def copy_questions_into_exam(exam: Exam, question_ids: list, teacher) -> tuple[l
         missing = [str(question_id) for question_id in question_ids if str(question_id) not in by_id]
         if missing:
             raise ValidationError({"question_ids": ["One or more questions no longer exist. Reload the bank and try again."]})
-        foreign = [question for question in sources if question.exam.teacher_id != getattr(teacher, "pk", None) and getattr(teacher, "role", None) != "admin"]
+        # A bank row has no parent exam, so its owner is the field that answers "whose is this".
+        def source_owner_id(question: Question) -> object:
+            return question.owner_id if question.exam_id is None else question.exam.teacher_id
+
+        foreign = [
+            question
+            for question in sources
+            if source_owner_id(question) != getattr(teacher, "pk", None) and getattr(teacher, "role", None) != "admin"
+        ]
+        unfinished = [question for question in sources if question.status == Question.Status.DRAFT]
+        if unfinished:
+            # A draft is a question its author has not finished: it stays on the shelf until they say so, and
+            # inserting it into a paper is the one thing the flag exists to prevent.
+            raise ValidationError(
+                {"question_ids": ["Draft questions cannot be added to an exam. Open it in the bank and mark it ready."]}
+            )
         if foreign and getattr(teacher, "role", None) != "admin":
             raise ValidationError({"question_ids": ["You can only reuse questions from your own exams."]})
 

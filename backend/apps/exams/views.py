@@ -13,7 +13,7 @@ from apps.users.models import User
 from apps.organizations.scope import is_school_admin, scope_exams
 from apps.users.permissions import CanSuperviseExam, IsExamOwnerOrAdministrator, IsTeacherOrAdministrator
 
-from .models import Exam, Question, QuestionOption, QuestionTag
+from .models import Exam, Question, QuestionFolder, QuestionOption, QuestionTag
 from .serializers import (
     ExamWriteSerializer,
     QuestionReorderSerializer,
@@ -228,12 +228,19 @@ class QuestionAccessMixin(TeacherExamAccessMixin):
             )
         )
         if self.request.user.role != User.Role.ADMIN:
-            queryset = queryset.filter(exam__teacher=self.request.user)
+            # Exam content is reachable through its paper's teacher; a bank row has no paper, so it is
+            # reachable through the teacher who wrote it. Nothing else sees either.
+            queryset = queryset.filter(Q(exam__teacher=self.request.user) | Q(owner=self.request.user))
         return queryset
 
     def get_question(self, question_id) -> Question:  # type: ignore[no-untyped-def]
         question = get_object_or_404(self.get_question_queryset(), pk=question_id)
-        self.check_object_permissions(self.request, question.exam)
+        if question.exam_id is not None:
+            self.check_object_permissions(self.request, question.exam)
+        elif self.request.user.role != User.Role.ADMIN and question.owner_id != self.request.user.id:
+            # The queryset above already narrowed this row to its owner; this is the second net, kept because
+            # a bank row has no exam object for the permission class to be handed.
+            raise PermissionDenied("This question is not yours.")
         return question
 
 
@@ -269,6 +276,12 @@ class QuestionBankFilterSerializer(serializers.Serializer):
     subject = serializers.CharField(required=False, allow_blank=True, max_length=150)
     exam = serializers.UUIDField(required=False)
     archived = serializers.BooleanField(required=False, default=False)
+    # Bank organisation: a folder id, the literal "unfiled", a category name, and the draft/ready flag.
+    folder = serializers.CharField(required=False, allow_blank=True, max_length=36)
+    category = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    status = serializers.ChoiceField(required=False, choices=Question.Status.choices)
+    # "bank" = questions that belong to no exam, "exam" = only content that is in a paper, "any" = both.
+    placement = serializers.ChoiceField(required=False, default="any", choices=("any", "bank", "exam"))
     ordering = serializers.ChoiceField(
         required=False,
         default="-updated_at",
@@ -299,6 +312,16 @@ class QuestionBankListView(QuestionAccessMixin, APIView):
             queryset = queryset.filter(tags__name__iexact=data["tag"].strip())
         if data.get("exam"):
             queryset = queryset.filter(exam_id=data["exam"])
+        if folder := data.get("folder", ""):
+            queryset = queryset.filter(folder__isnull=True) if folder == "unfiled" else queryset.filter(folder_id=folder)
+        if data.get("category", "").strip():
+            queryset = queryset.filter(category__iexact=data["category"].strip())
+        if data.get("status"):
+            queryset = queryset.filter(status=data["status"])
+        if data.get("placement") == "bank":
+            queryset = queryset.filter(exam__isnull=True)
+        elif data.get("placement") == "exam":
+            queryset = queryset.filter(exam__isnull=False)
         queryset = queryset.filter(is_archived=bool(data.get("archived")))
         order = data["ordering"]
         if order == "answered_count" or order == "-answered_count":
@@ -306,6 +329,23 @@ class QuestionBankListView(QuestionAccessMixin, APIView):
         else:
             queryset = queryset.order_by(order, "exam__title", "order")
         return Response(TeacherQuestionSerializer(queryset[:200], many=True).data)
+
+    def post(self, request) -> Response:  # type: ignore[no-untyped-def]
+        """Author a question straight into the bank, with no exam behind it.
+
+        This is the "save it and keep working on it" path: a draft row is invisible to every exam, so a
+        teacher can write half a question, close the tab, and finish it later without a paper carrying it.
+        """
+        serializer = QuestionWriteSerializer(
+            data=request.data, context={"exam": None, "owner": request.user, "request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        question = serializer.save()
+        payload = dict(TeacherQuestionSerializer(self.get_question(question.pk)).data)
+        if getattr(serializer, "deduplicated", None) is not None:
+            payload["deduplicated"] = True
+            return Response(payload, status=status.HTTP_200_OK)
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class QuestionBankTagsView(QuestionAccessMixin, APIView):
@@ -315,6 +355,119 @@ class QuestionBankTagsView(QuestionAccessMixin, APIView):
         teacher = None if request.user.role == User.Role.ADMIN else request.user
         tags = QuestionTag.objects.filter(teacher=teacher) if teacher is not None else QuestionTag.objects.all()
         return Response([{"id": str(tag.id), "name": tag.name, "count": tag.questions.count()} for tag in tags.order_by("name")])
+
+
+class QuestionFolderSerializer(serializers.ModelSerializer):
+    """One shelf of the bank. `question_count` is the number of live (unarchived) questions filed in it."""
+
+    question_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = QuestionFolder
+        fields = ("id", "name", "parent", "question_count", "created_at", "updated_at")
+        read_only_fields = ("id", "question_count", "created_at", "updated_at")
+
+    def validate_name(self, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Folder name cannot be blank.")
+        return value[:120]
+
+    def validate_parent(self, value):  # type: ignore[no-untyped-def]
+        if value is None:
+            return None
+        user = self.context["request"].user
+        if user.role != User.Role.ADMIN and value.teacher_id != user.id:
+            raise serializers.ValidationError("This folder is not yours.")
+        return value
+
+    def validate(self, attrs: dict) -> dict:
+        unexpected = set(self.initial_data).difference(self.fields)
+        if unexpected:
+            raise serializers.ValidationError({field: "This is not a supported folder field." for field in unexpected})
+        # The unique index treats "no parent" as distinct from itself, so two top-level folders could share a
+        # name if this were left to the database. The check is here instead, case-insensitively, and it skips
+        # the row being renamed.
+        teacher = getattr(self.context["request"].user, "pk", None)
+        name = (attrs.get("name") or "").lower()
+        parent = attrs.get("parent", self.instance.parent if self.instance is not None else None)
+        if name:
+            clash = QuestionFolder.objects.filter(teacher_id=teacher, name__iexact=name, parent=parent)
+            if self.instance is not None:
+                clash = clash.exclude(pk=self.instance.pk)
+            if clash.exists():
+                raise serializers.ValidationError({"name": "You already have a folder with this name here."})
+        return attrs
+
+
+class QuestionFolderAccessMixin(QuestionAccessMixin):
+    """Folders are the teacher's own furniture; the platform admin can see all of them."""
+
+    def get_folder_queryset(self):  # type: ignore[no-untyped-def]
+        queryset = QuestionFolder.objects.select_related("parent").annotate(
+            question_count=Count("questions", filter=Q(questions__is_archived=False), distinct=True)
+        )
+        if self.request.user.role != User.Role.ADMIN:
+            queryset = queryset.filter(teacher=self.request.user)
+        return queryset
+
+
+class QuestionFolderListView(QuestionFolderAccessMixin, APIView):
+    def get(self, request) -> Response:  # type: ignore[no-untyped-def]
+        folders = self.get_folder_queryset().order_by("name")
+        return Response(QuestionFolderSerializer(folders, many=True).data)
+
+    def post(self, request) -> Response:  # type: ignore[no-untyped-def]
+        serializer = QuestionFolderSerializer(
+            data=request.data, context={"request": request, "teacher": request.user},
+        )
+        serializer.is_valid(raise_exception=True)
+        # `teacher` is not in the serializer's fields: the folder always belongs to whoever is authenticated,
+        # so a request cannot file a folder in somebody else's bank by naming their id.
+        folder = serializer.save(teacher=request.user)
+        # Re-read through the scoped queryset: `question_count` is an annotation, and a plain instance
+        # would answer without it.
+        return Response(
+            QuestionFolderSerializer(self.get_folder_queryset().get(pk=folder.pk)).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class QuestionFolderDetailView(QuestionFolderAccessMixin, APIView):
+    def get_object(self, folder_id) -> QuestionFolder:  # type: ignore[no-untyped-def]
+        return get_object_or_404(self.get_folder_queryset(), pk=folder_id)
+
+    def patch(self, request, folder_id) -> Response:  # type: ignore[no-untyped-def]
+        folder = self.get_object(folder_id)
+        serializer = QuestionFolderSerializer(folder, data=request.data, partial=True, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(QuestionFolderSerializer(self.get_folder_queryset().get(pk=folder.pk)).data)
+
+    def delete(self, request, folder_id) -> Response:  # type: ignore[no-untyped-def]
+        folder = self.get_object(folder_id)
+        if folder.children.exists():
+            raise serializers.ValidationError(
+                {"folder": ["Move or delete the folders inside it first."]}
+            )
+        # `on_delete=SET_NULL` on Question.folder means the questions are unfiled, never deleted: a folder is
+        # a way of organising the bank, not a container that owns what is in it.
+        folder.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class QuestionBankCategoriesView(QuestionAccessMixin, APIView):
+    """The teacher's own category labels, with counts, for the bank's filter chips."""
+
+    def get(self, request) -> Response:  # type: ignore[no-untyped-def]
+        rows = (
+            self.get_question_queryset()
+            .exclude(category="")
+            .values("category")
+            .annotate(count=Count("id"))
+            .order_by("category")
+        )
+        return Response([{"category": row["category"], "count": row["count"]} for row in rows])
 
 
 class QuestionImportSerializer(serializers.Serializer):
@@ -391,10 +544,14 @@ class TeacherQuestionDetailView(QuestionAccessMixin, APIView):
                 status=status.HTTP_409_CONFLICT,
             )
         with transaction.atomic():
-            exam = Exam.objects.select_for_update().get(pk=question.exam_id)
+            # A bank row has no exam to re-sequence or re-total, and `exam_id` being null here is the normal
+            # case for a question its author deleted before ever using it.
+            if question.exam_id is not None:
+                exam = Exam.objects.select_for_update().get(pk=question.exam_id)
             question.delete()
-            resequence_questions(exam.pk)
-            refresh_total_marks(exam)
+            if question.exam_id is not None:
+                resequence_questions(exam.pk)
+                refresh_total_marks(exam)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

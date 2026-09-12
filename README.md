@@ -35,6 +35,20 @@ to the client-side guard — the API is still the authority on every value, but 
 produced before the browser redirects. It is read from `.env.local` (`.env.local.example` ships the local
 values); leave `API_PROXY_TARGET` unset and the gate stays inactive rather than locking anyone out.
 
+### Why local pages feel slow, and what to use instead
+
+`npm run dev` compiles each route the first time it is opened, and every page in this app is a client
+component that refetches from Django on mount (`Cache-Control: private, no-store`), so a click between
+screens pays for compilation *and* a round trip. Nothing is wrong with the machine.
+
+```bash
+npm run dev:turbo           # the same dev server on Turbopack: much faster route compiles
+npm run build && npm start  # pre-compiled pages — use this when the work is browsing, not editing
+```
+
+On the backend, `manage.py runserver --threads 2` serves concurrent requests instead of queueing them,
+which matters once a page fires several fetches at once.
+
 Validate a production build (do not run it concurrently with `npm run dev`):
 
 ```bash

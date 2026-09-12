@@ -141,7 +141,59 @@ class ExamSettings(TimeStampedUUIDModel):
         return f"Settings: {self.exam.title}"
 
 
+class QuestionFolder(TimeStampedUUIDModel):
+    """A named shelf inside one teacher's question bank, optionally nested.
+
+    Folders belong to the teacher rather than to a school or an exam: a bank is a personal working space, and
+    sharing it would mean deciding who may move somebody else's material. Deleting a folder unfiles the
+    questions inside it instead of taking them along.
+    """
+
+    teacher = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="question_folders")
+    parent = models.ForeignKey("self", on_delete=models.CASCADE, related_name="children", null=True, blank=True)
+    name = models.CharField(max_length=120)
+
+    class Meta:
+        ordering = ("name",)
+        constraints = [
+            models.UniqueConstraint(Lower("name"), "parent", models.F("teacher"), name="unique_folder_name_per_parent"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.parent.name} / {self.name}" if self.parent_id else self.name
+
+    def clean(self) -> None:
+        errors: dict[str, str] = {}
+        if not self.name.strip():
+            errors["name"] = "Folder name cannot be blank."
+        if len(self.name.strip()) > 120:
+            errors["name"] = "Folder name must be 120 characters or fewer."
+        # A cycle would make the tree unrenderable and the parent walk endless, so nesting is checked here
+        # rather than trusted to whatever UI built it.
+        if self.parent_id is not None:
+            seen = {self.pk}
+            node = self.parent
+            while node is not None:
+                if node.pk in seen:
+                    errors["parent"] = "A folder cannot be nested inside itself."
+                    break
+                seen.add(node.pk)
+                node = node.parent
+        if errors:
+            raise ValidationError(errors)
+
+
 class Question(TimeStampedUUIDModel):
+    class Status(models.TextChoices):
+        """Whether a bank question is finished enough to be put in front of students.
+
+        Only the bank asks this: a question that belongs to an exam is exam content whatever this says, and
+        the publish gate already judges it by its own rules.
+        """
+
+        DRAFT = "draft", "Draft"
+        READY = "ready", "Ready"
+
     class Type(models.TextChoices):
         MULTIPLE_CHOICE = "multiple_choice", "Multiple choice"
         MULTIPLE_ANSWER = "multiple_answer", "Multiple answer"
@@ -154,7 +206,19 @@ class Question(TimeStampedUUIDModel):
         MEDIUM = "medium", "Medium"
         HARD = "hard", "Hard"
 
-    exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name="questions")
+    # Null means "in the bank, not in an exam yet". Nothing that reads exam content (`exam.questions`, the
+    # attempt snapshot, the publish gate) can see such a row, so an unfinished question cannot leak into a
+    # paper; ownership of those rows comes from `owner` instead of through the exam's teacher.
+    exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name="questions", null=True, blank=True)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bank_questions", null=True, blank=True
+    )
+    folder = models.ForeignKey(
+        QuestionFolder, on_delete=models.SET_NULL, related_name="questions", null=True, blank=True
+    )
+    # A free-text label, not a fixed list: a biology teacher's categories are nobody else's vocabulary.
+    category = models.CharField(max_length=80, blank=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.READY)
     type = models.CharField(max_length=30, choices=Type.choices, db_index=True)
     text = models.TextField()
     instructions = models.TextField(blank=True)
@@ -186,6 +250,15 @@ class Question(TimeStampedUUIDModel):
                 name="unique_question_content_per_exam",
                 violation_error_message="This exam already holds an identical question.",
             ),
+            # The per-exam constraint above cannot cover bank rows, because `exam` is null and Postgres lets
+            # any number of nulls through a unique index. So the bank gets its own: the same question typed
+            # twice into one teacher's shelf is one row, in exactly the spirit of the exam-level rule.
+            models.UniqueConstraint(
+                fields=("owner", "content_hash"),
+                condition=models.Q(exam__isnull=True) & ~models.Q(content_hash="") & ~models.Q(owner__isnull=True),
+                name="unique_bank_content_per_teacher",
+                violation_error_message="Your bank already holds an identical question.",
+            ),
         ]
         indexes = [
             models.Index(fields=("exam", "order")),
@@ -193,10 +266,15 @@ class Question(TimeStampedUUIDModel):
             models.Index(fields=("exam", "type")),
             models.Index(fields=("type", "difficulty")),
             models.Index(fields=("is_archived", "difficulty")),
+            # The bank's own two filters, applied on nearly every list request.
+            models.Index(fields=("owner", "folder")),
+            models.Index(fields=("owner", "category")),
         ]
 
     def __str__(self) -> str:
-        return f"{self.exam.title} · Q{self.order}"
+        # A bank row has no parent exam to name, and `__str__` runs in admin lists and error messages, so it
+        # has to answer without touching a null relation.
+        return f"{self.exam.title} · Q{self.order}" if self.exam_id is not None else f"bank · {self.text[:40]}"
 
     def clean(self) -> None:
         errors: dict[str, str] = {}

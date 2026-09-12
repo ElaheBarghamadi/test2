@@ -13,8 +13,15 @@ import type { Exam } from "@/lib/types/domain";
 const api = vi.hoisted(() => ({
   bank: vi.fn(),
   bankTags: vi.fn(),
+  bankCategories: vi.fn(),
   importQuestions: vi.fn(),
   createQuestion: vi.fn(),
+  createBankQuestion: vi.fn(),
+  updateQuestionMeta: vi.fn(),
+  folders: vi.fn(),
+  createFolder: vi.fn(),
+  updateFolder: vi.fn(),
+  deleteFolder: vi.fn(),
   archiveQuestion: vi.fn(),
 }));
 const hook = vi.hoisted(() => ({ exams: [] as Exam[], loading: false, initialized: true, hydrate: vi.fn() }));
@@ -55,7 +62,12 @@ beforeEach(() => {
   Object.values(api).forEach((fn) => fn.mockReset());
   api.bank.mockResolvedValue([]);
   api.bankTags.mockResolvedValue([]);
+  api.bankCategories.mockResolvedValue([]);
+  api.folders.mockResolvedValue([]);
   api.createQuestion.mockResolvedValue({ id: "q-new" });
+  api.createBankQuestion.mockResolvedValue({ id: "q-bank" });
+  api.updateQuestionMeta.mockResolvedValue({ id: "q-1" });
+  api.createFolder.mockResolvedValue({ id: "f-new", name: "سینماتیک", parent: null, question_count: 0 });
   hook.exams = [exam];
   hook.hydrate.mockReset();
   toast.mockReset();
@@ -84,7 +96,7 @@ describe("question bank composer", () => {
 
   it("refuses an incomplete question before it reaches the API", async () => {
     await openComposer();
-    fireEvent.click(screen.getByRole("button", { name: /افزودن به بانک/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^افزودن به آزمون$/ }));
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "سؤال هنوز کامل نیست" })));
     expect(api.createQuestion).not.toHaveBeenCalled();
   });
@@ -92,7 +104,7 @@ describe("question bank composer", () => {
   it("writes the question into the chosen exam through the same payload the builder uses", async () => {
     await openComposer();
     await fillACompleteQuestion();
-    fireEvent.click(screen.getByRole("button", { name: /افزودن به بانک/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^افزودن به آزمون$/ }));
 
     await waitFor(() => expect(api.createQuestion).toHaveBeenCalledTimes(1));
     const [examId, payload] = api.createQuestion.mock.calls[0] as [string, Record<string, unknown>];
@@ -106,13 +118,13 @@ describe("question bank composer", () => {
         { text: "ژول", is_correct: false },
       ],
     });
-    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "سؤال به بانک افزوده شد" }));
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "سؤال به آزمون افزوده شد" }));
   });
 
   it("keeps the list in step by reloading the bank after a write", async () => {
     await openComposer();
     await fillACompleteQuestion();
-    fireEvent.click(screen.getByRole("button", { name: /افزودن به بانک/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^افزودن به آزمون$/ }));
     await waitFor(() => expect(api.createQuestion).toHaveBeenCalled());
     await waitFor(() => expect(api.bank).toHaveBeenCalledTimes(2));
     expect(hook.hydrate).toHaveBeenCalled();
@@ -122,7 +134,7 @@ describe("question bank composer", () => {
     api.createQuestion.mockResolvedValue({ id: "q-existing", deduplicated: true });
     await openComposer();
     await fillACompleteQuestion();
-    fireEvent.click(screen.getByRole("button", { name: /افزودن به بانک/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^افزودن به آزمون$/ }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "این سؤال عیناً در همان آزمون بود" })));
     expect((toast.mock.calls.at(-1)?.[0] as { description?: string }).description).toContain("نسخهٔ دوم ساخته نشد");
@@ -131,12 +143,88 @@ describe("question bank composer", () => {
   it("stays open for the next question when the teacher asks for it", async () => {
     await openComposer();
     await fillACompleteQuestion();
-    fireEvent.click(screen.getByRole("button", { name: /افزودن و ادامه دادن/ }));
+    fireEvent.click(screen.getByRole("button", { name: /ذخیره و ادامه دادن/ }));
     // The form is cleared only after the bank list and the exam cache have been refreshed, so the assertion
     // waits for the state the teacher would actually see next, not for the request.
     await waitFor(() => expect((screen.getByRole("textbox", { name: /متن سؤال/ }) as HTMLTextAreaElement).value).toBe(""));
-    expect(screen.getByRole("button", { name: /افزودن به بانک/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /ذخیره در بانک/ })).toBeTruthy();
     expect(screen.getByRole("dialog").textContent).toContain("آزمون آینده");
+  });
+});
+
+describe("bank folders and categories", () => {
+  const bankRow = {
+    id: "q-1", exam: null, exam_title: null, type: "multiple_choice", text: "سؤال نیمه‌تمام", instructions: "", marks: "1.00", order: 1,
+    options: [], status: "draft", category: "سینماتیک", folder: "f-1", folder_name: "فیزیک / سینماتیک",
+  };
+
+  beforeEach(() => {
+    api.folders.mockResolvedValue([
+      { id: "f-0", name: "فیزیک", parent: null, question_count: 3 },
+      { id: "f-1", name: "سینماتیک", parent: "f-0", question_count: 1 },
+    ]);
+    api.bankCategories.mockResolvedValue([{ category: "سینماتیک", count: 1 }]);
+  });
+
+  it("shows the shelf tree and files a question by moving it", async () => {
+    api.bank.mockResolvedValue([bankRow]);
+    render(<QuestionBankWorkspace/>);
+
+    // A child folder is named by its place in the tree, so two "سینماتیک" shelves stay distinguishable.
+    const chip = await screen.findByRole("button", { name: /فیزیک \/ سینماتیک/ });
+    expect(chip.textContent).toContain("۱");
+    fireEvent.click(chip);
+    await waitFor(() => expect(api.bank).toHaveBeenLastCalledWith(expect.objectContaining({ folder: "f-1" })));
+
+    // The row's own control moves it without leaving the list.
+    const select = screen.getByRole("combobox", { name: /انتقال به پوشه/ }) as HTMLSelectElement;
+    expect(select.value).toBe("f-1");
+    fireEvent.change(select, { target: { value: "" } });
+    await waitFor(() => expect(api.updateQuestionMeta).toHaveBeenCalledWith("q-1", { folder: null }));
+  });
+
+  it("asks for the unfiled questions and for the drafts only", async () => {
+    render(<QuestionBankWorkspace/>);
+    fireEvent.click(await screen.findByRole("button", { name: /بدون پوشه/ }));
+    await waitFor(() => expect(api.bank).toHaveBeenLastCalledWith(expect.objectContaining({ folder: "unfiled" })));
+
+    fireEvent.change(screen.getByRole("combobox", { name: /فیلتر وضعیت/ }), { target: { value: "draft" } });
+    await waitFor(() => expect(api.bank).toHaveBeenLastCalledWith(expect.objectContaining({ status: "draft" })));
+
+    fireEvent.click(screen.getByRole("button", { name: /سینماتیک · ۱/ }));
+    await waitFor(() => expect(api.bank).toHaveBeenLastCalledWith(expect.objectContaining({ category: "سینماتیک" })));
+  });
+
+  it("creates a folder and removes one without touching what is inside it", async () => {
+    // The shelf the API answers with is the one the rail must then show, so the mock is pointed at it first.
+    api.folders.mockResolvedValue([{ id: "f-new", name: "نوسان", parent: null, question_count: 0 }]);
+    render(<QuestionBankWorkspace/>);
+    fireEvent.change(await screen.findByRole("textbox", { name: "پوشهٔ تازه" }), { target: { value: "  نوسان  " } });
+    fireEvent.click(screen.getByRole("button", { name: /ساخت/ }));
+    await waitFor(() => expect(api.createFolder).toHaveBeenCalledWith({ name: "نوسان" }));
+
+    // Selecting the chip filters the list and opens its own rename/delete controls.
+    fireEvent.click(await screen.findByRole("button", { name: /نوسان/ }));
+    await waitFor(() => expect(api.bank).toHaveBeenLastCalledWith(expect.objectContaining({ folder: "f-new" })));
+    fireEvent.click(screen.getByRole("button", { name: /حذف پوشه/ }));
+    await waitFor(() => expect(api.deleteFolder).toHaveBeenCalledWith("f-new"));
+    // Deleting a shelf must never delete what was filed on it, and the toast has to say so.
+    expect((toast.mock.calls.at(-1)?.[0] as { description?: string }).description).toContain("حذف نشدند");
+  });
+
+  it("marks a draft ready from its row", async () => {
+    api.bank.mockResolvedValue([bankRow]);
+    render(<QuestionBankWorkspace/>);
+    fireEvent.click(await screen.findByRole("button", { name: /آماده‌سازی/ }));
+    await waitFor(() => expect(api.updateQuestionMeta).toHaveBeenCalledWith("q-1", { status: "ready" }));
+  });
+
+  it("labels a row with its shelf and category", async () => {
+    api.bank.mockResolvedValue([bankRow]);
+    render(<QuestionBankWorkspace/>);
+    const row = await screen.findByText("سؤال نیمه‌تمام");
+    expect(row.parentElement?.textContent).toContain("پیش‌نویس");
+    expect(row.parentElement?.textContent).toContain("سینماتیک");
   });
 });
 

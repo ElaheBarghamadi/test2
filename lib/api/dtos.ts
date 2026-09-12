@@ -43,7 +43,20 @@ export interface ApiQuestionDto {
   /** Teacher serializers only; intentionally absent on student endpoints. */
   configuration?: Record<string, unknown>; explanation?: string;
   created_at?: string; updated_at?: string;
+  /**
+   * Bank organisation. Absent on an older payload; a question that lives only in the bank has `exam: null`
+   * and no `exam_title`, which is what tells the UI it is a shelf row rather than exam content.
+   */
+  folder?: string | null; folder_name?: string; category?: string; status?: "draft" | "ready";
 }
+
+/** A shelf in the teacher's own bank; `parent` turns the flat list into a tree on the client. */
+export interface ApiQuestionFolderDto {
+  id: string; name: string; parent: string | null; question_count: number;
+  created_at?: string; updated_at?: string;
+}
+
+export interface ApiQuestionCategoryDto { category: string; count: number; }
 
 /** One row of a published answer sheet: the student's own words, plus whatever the chosen rung releases. */
 export interface ApiStudentResultAnswerDto {
@@ -103,6 +116,8 @@ export interface ApiQuestionWritePayload {
   /** `id` keeps an existing option's identity (and its student answers) intact across edits. */
   options?: Array<{ id?: string; text: string; is_correct: boolean }>;
   configuration?: Record<string, unknown>; explanation?: string;
+  /** Bank organisation, accepted on either path: a question can be filed the moment it is written. */
+  folder?: string | null; category?: string; status?: "draft" | "ready";
 }
 
 export interface ApiStudentAnswerDto {
@@ -354,5 +369,11 @@ export interface ApiTeacherOverviewDto {
 export interface ApiQuestionBankQuery {
   search?: string; type?: ApiQuestionType; difficulty?: "easy" | "medium" | "hard";
   tag?: string; subject?: string; exam?: string; archived?: boolean;
+  /** A folder id, or the literal "unfiled" for questions that are in no folder. */
+  folder?: string;
+  category?: string;
+  status?: "draft" | "ready";
+  /** "bank" = questions attached to no exam, "exam" = only paper content, absent = both. */
+  placement?: "any" | "bank" | "exam";
   ordering?: string;
 }

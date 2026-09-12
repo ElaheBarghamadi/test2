@@ -1,5 +1,5 @@
 import { apiRequest } from "@/lib/api/client";
-import type { ApiExamSettingsDto, ApiExamWritePayload, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
+import type { ApiExamSettingsDto, ApiExamWritePayload, ApiQuestionCategoryDto, ApiQuestionFolderDto, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
 
 export const examsApi = {
   list: () => apiRequest<ApiTeacherExamListDto[]>("/exams/"),
@@ -30,6 +30,20 @@ export const examsApi = {
     return apiRequest<ApiQuestionDto[]>(`/questions/${search ? `?${search}` : ""}`);
   },
   bankTags: () => apiRequest<ApiQuestionTagDto[]>("/questions/tags/"),
+  bankCategories: () => apiRequest<ApiQuestionCategoryDto[]>("/questions/categories/"),
+  /**
+   * Author a question straight onto the shelf, with no exam behind it. `status: "draft"` is what makes it a
+   * save-and-continue: a draft stays out of every exam until its author marks it ready.
+   */
+  createBankQuestion: (payload: Omit<ApiQuestionWritePayload, never> & { status?: "draft" | "ready"; folder?: string | null; category?: string }) =>
+    apiRequest<ApiQuestionDto>("/questions/", { method: "POST", body: payload }),
+  /** Bank metadata only: filing, categorising, and the draft/ready flag. Partial by design. */
+  updateQuestionMeta: (questionId: string, payload: { folder?: string | null; category?: string; status?: "draft" | "ready" }) =>
+    apiRequest<ApiQuestionDto>(`/questions/${questionId}/`, { method: "PATCH", body: payload }),
+  folders: () => apiRequest<ApiQuestionFolderDto[]>("/questions/folders/"),
+  createFolder: (payload: { name: string; parent?: string | null }) => apiRequest<ApiQuestionFolderDto>("/questions/folders/", { method: "POST", body: payload }),
+  updateFolder: (folderId: string, payload: { name?: string; parent?: string | null }) => apiRequest<ApiQuestionFolderDto>(`/questions/folders/${folderId}/`, { method: "PATCH", body: payload }),
+  deleteFolder: (folderId: string) => apiRequest<void>(`/questions/folders/${folderId}/`, { method: "DELETE" }),
   /**
    * Copies bank questions into an exam. Copies, never moves, so no live answer sheet can change.
    *

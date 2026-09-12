@@ -6,6 +6,8 @@ from django.db import transaction
 from django.db.models import F, Max
 from rest_framework import serializers
 
+from apps.users.models import User
+
 from .models import Exam, ExamSettings, Question, QuestionOption, QuestionTag
 from .content_identity import content_identity, question_content_hash
 from .services import question_definition_errors, refresh_total_marks
@@ -44,10 +46,12 @@ class TeacherQuestionSerializer(serializers.ModelSerializer):
     tags = QuestionTagSerializer(many=True, read_only=True)
     usage_count = serializers.IntegerField(read_only=True)
     answered_count = serializers.IntegerField(read_only=True)
-    # The bank lists questions across exams, so each row names its owner exam and that exam's state.
-    exam_title = serializers.CharField(source="exam.title", read_only=True)
-    exam_subject = serializers.CharField(source="exam.subject", read_only=True)
-    exam_status = serializers.CharField(source="exam.status", read_only=True)
+    # The bank lists questions across exams, so each row names its owner exam and that exam's state. A row
+    # that lives only in the bank has no exam at all, hence the method fields rather than a `source=` path.
+    exam_title = serializers.SerializerMethodField()
+    exam_subject = serializers.SerializerMethodField()
+    exam_status = serializers.SerializerMethodField()
+    folder_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
@@ -68,13 +72,32 @@ class TeacherQuestionSerializer(serializers.ModelSerializer):
             "copied_from",
             "usage_count",
             "answered_count",
+            "folder",
+            "folder_name",
+            "category",
+            "status",
             "exam_title",
             "exam_subject",
             "exam_status",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "exam", "order", "copied_from", "created_at", "updated_at")
+        read_only_fields = ("id", "exam", "order", "copied_from", "owner", "created_at", "updated_at")
+
+    def get_exam_title(self, question: Question) -> str | None:
+        return question.exam.title if question.exam_id is not None else None
+
+    def get_exam_subject(self, question: Question) -> str | None:
+        return question.exam.subject if question.exam_id is not None else None
+
+    def get_exam_status(self, question: Question) -> str | None:
+        return question.exam.status if question.exam_id is not None else None
+
+    def get_folder_name(self, question: Question) -> str:
+        folder = question.folder
+        if folder is None:
+            return ""
+        return f"{folder.parent.name} / {folder.name}" if folder.parent_id is not None else folder.name
 
 
 class QuestionOptionWriteSerializer(serializers.Serializer):
@@ -301,7 +324,7 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
     # Blanks are tolerated and dropped rather than rejected: the builder's tag input keeps an empty
     # field while the teacher is typing a new label.
     tags = serializers.ListField(child=serializers.CharField(max_length=60, allow_blank=True, trim_whitespace=True), required=False, allow_empty=True)
-    protected_fields = {"exam", "order", "id"}
+    protected_fields = {"exam", "order", "id", "owner"}
 
     class Meta:
         model = Question
@@ -316,7 +339,22 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             "difficulty",
             "tags",
             "is_archived",
+            "folder",
+            "category",
+            "status",
         )
+
+    def validate_folder(self, value):  # type: ignore[no-untyped-def]
+        """A folder is a teacher's private furniture, so only their own (or the admin's) can be chosen."""
+        if value is None:
+            return None
+        user = self.context["request"].user
+        if getattr(user, "role", None) != User.Role.ADMIN and value.teacher_id != user.id:
+            raise serializers.ValidationError("This folder is not yours.")
+        return value
+
+    def validate_category(self, value: str) -> str:
+        return (value or "").strip()[:80]
 
     def validate_text(self, value: str) -> str:
         value = value.strip()
@@ -348,6 +386,12 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
                 })
         question_type = attrs.get("type", instance.type if instance else None)
         configuration = attrs.get("configuration", instance.configuration if instance else {})
+        status_value = attrs.get("status", instance.status if instance is not None else Question.Status.READY)
+        # A draft in the bank is work in progress: its author may save a half-written question and come back
+        # to it, so the structural rules it will have to satisfy are deferred to the moment it is marked
+        # ready. Exam content is never given that grace, because a paper is graded as a whole.
+        is_bank_row = instance.exam_id is None if instance is not None else self.context.get("exam") is None
+        drafting = is_bank_row and status_value == Question.Status.DRAFT
         options_supplied = "options" in attrs
         if options_supplied:
             effective_options = attrs["options"]
@@ -355,9 +399,10 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             effective_options = list(instance.options.order_by("order").values("text", "is_correct", "order"))
         else:
             effective_options = []
-        errors = question_definition_errors(question_type, effective_options, configuration)
-        if errors:
-            raise serializers.ValidationError(errors)
+        if not drafting:
+            errors = question_definition_errors(question_type, effective_options, configuration)
+            if errors:
+                raise serializers.ValidationError(errors)
 
         # Every question carries a fingerprint of its content, so "the same question again" is detectable
         # instead of being stored twice. The identity is computed here, from what the write *will* leave
@@ -376,8 +421,15 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             ],
         )
         if instance is not None:
-            exam = instance.exam
-            for candidate in exam.questions.prefetch_related("options").exclude(pk=instance.pk):
+            # "Another copy of this exact question" means the same exam for exam content, and the same
+            # teacher's shelf for a bank row; neither place can hold two.
+            peers = (
+                instance.exam.questions
+                if instance.exam_id is not None
+                else Question.objects.filter(owner_id=instance.owner_id, exam__isnull=True)
+            )
+            where = "این آزمون" if instance.exam_id is not None else "بانک سؤال شما"
+            for candidate in peers.prefetch_related("options").exclude(pk=instance.pk):
                 if (candidate.content_hash or question_content_hash(candidate)) == self._content_identity:
                     # `detail.duplicate`, not a bare message: the client can name the question it has to
                     # remove, and the response shape matches the other whole-payload refusals in this API.
@@ -385,7 +437,7 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
                         "duplicate": (
                             "این سؤال با سؤال «"
                             + (candidate.text[:60] or "بدون متن")
-                            + "» در همین آزمون عیناً یکی است. دو نسخه از یک سؤال نگه داشته نمی‌شود؛ یکی را حذف کنید."
+                            + f"» در {where} عیناً یکی است. دو نسخه از یک سؤال نگه داشته نمی‌شود؛ یکی را حذف کنید."
                         )
                     })
         return attrs
@@ -450,17 +502,39 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
         wanted = [name.strip()[:60] for name in tag_names if name and name.strip()]
         tags = []
         for name in dict.fromkeys(wanted):
-            tag = QuestionTag.objects.filter(teacher_id=question.exam.teacher_id, name__iexact=name).first()
+            # Bank rows have no exam to inherit a teacher from, so the row's own owner decides the namespace.
+            teacher_id = question.owner_id if question.exam_id is None else question.exam.teacher_id
+            tag = QuestionTag.objects.filter(teacher_id=teacher_id, name__iexact=name).first()
             if tag is None:
-                tag = QuestionTag.objects.create(teacher_id=question.exam.teacher_id, name=name)
+                tag = QuestionTag.objects.create(teacher_id=teacher_id, name=name)
             tags.append(tag)
         question.tags.set(tags)
 
     def create(self, validated_data: dict) -> Question:
         options_data = validated_data.pop("options", [])
         tag_names = validated_data.pop("tags", None)
-        parent_exam = self.context["exam"]
+        parent_exam = self.context.get("exam")
         identity = getattr(self, "_content_identity", "")
+        if parent_exam is None:
+            # A bank row: no exam to lock, no ordering to win, no paper total to recompute. The duplicate
+            # lookup runs over the teacher's own unattached questions, which is what the partial unique index
+            # on (owner, content_hash) enforces at the database anyway.
+            owner = self.context["owner"]
+            with transaction.atomic():
+                if identity:
+                    for existing in Question.objects.filter(owner=owner, exam__isnull=True).prefetch_related("options"):
+                        if (existing.content_hash or question_content_hash(existing)) == identity:
+                            self.deduplicated = existing
+                            return existing
+                question = Question(exam=None, owner=owner, order=1, **validated_data)
+                question.content_hash = identity
+                question.full_clean()
+                question.save()
+                self._apply_tags(question, tag_names)
+                self._sync_options(question, options_data)
+                question.content_hash = question_content_hash(question)
+                question.save(update_fields=("content_hash", "updated_at"))
+                return question
         with transaction.atomic():
             # Serialising creates for one exam prevents two writers taking the same next order, and the
             # duplicate lookup below rides the same lock, so two identical saves in parallel still leave one
@@ -498,7 +572,8 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
             self._apply_tags(question, tag_names)
             question.content_hash = question_content_hash(question)
             question.save(update_fields=("content_hash", "updated_at"))
-            refresh_total_marks(question.exam)
+            if question.exam_id is not None:
+                refresh_total_marks(question.exam)
             return question
 
 
