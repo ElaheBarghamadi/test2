@@ -9,7 +9,17 @@ const apiProxyTarget = process.env.API_PROXY_TARGET?.replace(/\/$/, "");
  * real gets the full set, and the clickjacking protection is what an exam platform needs (an overlay on
  * the submit button is the classic attack on a page like this).
  */
-function securityHeaders(): Array<{ key: string; value: string }> {
+function apiCacheControl(): string {
+  /*
+   * `no-store` was the safe default for every response, and it also made every page visit a full round trip.
+   * `must-revalidate` with a zero lifetime is the same guarantee with one difference that matters: the client
+   * may keep the body and must ask whether it is still current, and the API answers with a bare 304 when it
+   * is (see `apps/core/middleware.py`). Nothing is trusted for a moment longer than the server has confirmed.
+   */
+  return "private, max-age=0, must-revalidate";
+}
+
+function securityHeaders(isApi = false): Array<{ key: string; value: string }> {
   const headers = [
     // A proxied API response is JSON, and a mislabelled body must never be sniffed into a script.
     { key: "X-Content-Type-Options", value: "nosniff" },
@@ -20,7 +30,11 @@ function securityHeaders(): Array<{ key: string; value: string }> {
     { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
     // The API is reached through this origin in the recommended deployment, and its own responses are
     // private per session: a shared cache must not hand one teacher's row set to the next visitor.
-    { key: "Cache-Control", value: "private, no-store" },
+    { key: "Cache-Control", value: isApi ? apiCacheControl() : "private, no-store" },
+    // `Authorization` is what makes "private" mean per *session* rather than per *machine*: the browser (and
+    // any proxy in front of a school) has to keep one entry per credential, so the next student to sit at
+    // this computer is served their own answer, not the last teacher's list.
+    ...(isApi ? [{ key: "Vary", value: "Authorization, Cookie" }] : []),
   ];
   if (process.env.NODE_ENV === "production") {
     headers.push(
@@ -55,7 +69,10 @@ const nextConfig: NextConfig = {
       "/admin/:path*",
       "/api/v1/:path*",
     ];
-    return sources.map((source) => ({ source, headers: securityHeaders() }));
+    return sources.map((source) => ({
+      source,
+      headers: securityHeaders(source.startsWith("/api/v1/")),
+    }));
   },
 };
 export default nextConfig;

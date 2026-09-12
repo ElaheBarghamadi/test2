@@ -837,7 +837,13 @@ class AttemptConcurrencyAndSessionApiTests(StudentExamApiTests):
         # The key set is the contract: the heartbeat exists to be small, so a field is only added here when
         # the runner would otherwise have to fetch the whole answer sheet to learn it (answer_frontier is
         # the navigation frontier, which the runner shows as a locked question).
-        self.assertEqual(set(beat.data), {"server_time", "expires_at", "remaining_seconds", "status", "answer_revision", "answer_frontier", "session_locked_by_other", "question_count"})
+        self.assertEqual(
+            set(beat.data),
+            {
+                "server_time", "expires_at", "remaining_seconds", "status", "answer_revision", "answer_frontier",
+                "session_locked_by_other", "device_locked", "integrity", "question_count",
+            },
+        )
         self.assertGreater(beat.data["remaining_seconds"], 44 * 60)
         self.assertFalse(beat.data["session_locked_by_other"])
         self.assertEqual(beat.data["question_count"], 1)
@@ -850,15 +856,21 @@ class AttemptConcurrencyAndSessionApiTests(StudentExamApiTests):
         attempt_id = self.start(exam).data["id"]
 
         hidden = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "tab_hidden"}, format="json")
-        self.assertEqual(hidden.status_code, 204)
+        self.assertEqual(hidden.status_code, 200)
+        self.assertEqual(hidden.data["policy"], "off", "the rules ride back on the signal that changed them")
         self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_HIDDEN).count(), 1)
 
         invented = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "guilty"}, format="json")
         self.assertEqual(invented.status_code, 400)
+        # Clipboard watching is the teacher's to switch on, so a paste signal is refused while the exam is
+        # unmonitored rather than being stored "just in case".
+        paste = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "paste"}, format="json")
+        self.assertEqual(paste.status_code, 400)
+        self.assertFalse(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.PASTE).exists())
 
         self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
         after_submit = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "tab_hidden"}, format="json")
-        self.assertEqual(after_submit.status_code, 204, "a finalized attempt records nothing more, and does not error")
+        self.assertEqual(after_submit.status_code, 200, "a finalized attempt records nothing more, and does not error")
         self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id).count(), 1)
 
     def test_auto_submit_is_attributed_to_the_timer(self) -> None:
@@ -1665,3 +1677,166 @@ class ResultDetailVisibilityApiTests(StudentExamApiTests):
             Exam.objects.get(id=duplicate.data["id"]).settings.result_detail,
             ExamSettings.ResultDetail.OWN_ANSWERS_WITH_FEEDBACK,
         )
+
+
+class ExamIntegrityApiTests(StudentExamApiTests):
+    """Anti-cheating is the teacher's switch: what is recorded, what is blocked, and what it costs.
+
+    The rules under test are deliberately asymmetrical. Observations are cheap and reversible, so `observe`
+    stores them; a limit that closes an exam or a lock that refuses a device changes a student's result, so
+    only `enforce` may do that, and nothing in this system decides anything while the policy is `off`.
+    """
+
+    def monitor(self, exam: Exam, *, policy: str, **rules) -> None:
+        settings = exam.settings
+        settings.integrity_policy = policy
+        for field, value in rules.items():
+            setattr(settings, field, value)
+        settings.save()
+        exam.refresh_from_db()
+
+    def signal(self, attempt_id, kind: str, **headers):
+        return self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": kind}, format="json", **headers)
+
+    def test_nothing_is_recorded_or_restricted_until_the_teacher_asks(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+
+        rules = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data["integrity"]
+        self.assertEqual(rules["policy"], "off")
+        self.assertFalse(rules["records"], "an unmonitored exam must not be watched with the badge hidden")
+        self.assertFalse(rules["enforced"])
+        self.assertIsNone(rules["tab_switches_remaining"], "no budget, so nothing to spend")
+        self.assertEqual(self.signal(attempt_id, "copy").status_code, 400)
+        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id).count(), 0)
+
+    def test_observing_records_without_consequence(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        self.monitor(exam, policy="observe", max_tab_switches=1, block_copy_paste=True)
+
+        self.assertEqual(self.signal(attempt_id, "tab_hidden").status_code, 200)
+        self.assertEqual(self.signal(attempt_id, "tab_hidden").status_code, 200)
+        self.assertEqual(self.signal(attempt_id, "copy").status_code, 200, "clipboard watching is on")
+
+        attempt = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data
+        self.assertEqual(attempt["status"], "in_progress", "observing never ends an exam")
+        self.assertEqual(attempt["integrity"]["tab_switches"], 2)
+        self.assertEqual(attempt["integrity"]["copy_events"], 1)
+        self.assertFalse(attempt["integrity"]["block_copy_paste"], "a rule that cannot bite is not sent as if it could")
+        self.assertEqual(attempt["integrity"]["tab_switches_remaining"], None)
+
+    def test_the_tab_budget_closes_the_exam_when_enforced(self) -> None:
+        from apps.results.models import ExamResult
+
+        exam = self.make_exam()
+        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        attempt_id = self.start(exam).data["id"]
+        self.monitor(exam, policy="enforce", max_tab_switches=2)
+        option = str(question.options.order_by("order").first().id)
+        self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [option]},
+            format="json",
+        )
+
+        first = self.signal(attempt_id, "tab_hidden")
+        self.assertEqual(first.data["tab_switches_remaining"], 1)
+        second = self.signal(attempt_id, "tab_hidden")
+        self.assertEqual(second.data["status"], "expired", "the last allowed switch is the one that closes it")
+        self.assertEqual(second.data["tab_switches_remaining"], 0)
+
+        self.assertTrue(
+            AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_LIMIT_REACHED).exists()
+        )
+        # Work already saved is graded, not thrown away; only the window closes.
+        result = ExamResult.objects.get(attempt_id=attempt_id)
+        self.assertEqual(float(result.score), float(question.marks))
+        refused = self.client.patch(
+            f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
+            {"selected_option_ids": [option]},
+            format="json",
+        )
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.data["code"], "attempt_finalized")
+
+    def test_a_device_lock_refuses_another_browser_but_never_a_refresh(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="enforce", lock_to_one_device=True)
+        desktop = "Mozilla/5.0 (Windows NT 10.0) Chrome/120"
+        phone = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Safari/604"
+
+        attempt_id = self.client.post(
+            f"/api/v1/student/exams/{exam.id}/start/", HTTP_X_EXAM_SESSION="tab-a", HTTP_USER_AGENT=desktop
+        ).data["id"]
+        # The same browser, a second tab: a student who closed the window must be able to carry on.
+        same_browser = self.client.post(
+            f"/api/v1/student/attempts/{attempt_id}/claim-session/", HTTP_X_EXAM_SESSION="tab-b", HTTP_USER_AGENT=desktop
+        )
+        self.assertEqual(same_browser.status_code, 200)
+
+        # A different device has to be refused, both as a quiet heartbeat and as an explicit claim.
+        ExamAttempt.objects.filter(pk=attempt_id).update(last_activity_at=timezone.now() - timedelta(minutes=2))
+        beat = self.client.post(
+            f"/api/v1/student/attempts/{attempt_id}/heartbeat/", HTTP_X_EXAM_SESSION="tab-c", HTTP_USER_AGENT=phone
+        )
+        self.assertEqual(beat.status_code, 200, "a heartbeat reports a refusal instead of failing")
+        self.assertTrue(beat.data["device_locked"])
+        self.assertTrue(beat.data["integrity"]["lock_to_one_device"])
+        refused = self.client.post(
+            f"/api/v1/student/attempts/{attempt_id}/claim-session/", HTTP_X_EXAM_SESSION="tab-c", HTTP_USER_AGENT=phone
+        )
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.data["code"], "device_locked")
+        # The refusal has to survive the error it returns: a rolled-back event would hide the attempt from the
+        # teacher's log, which is the only reason the check exists at all.
+        AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.SESSION_LOCK_REFUSED).delete()
+        self.client.post(
+            f"/api/v1/student/attempts/{attempt_id}/claim-session/", HTTP_X_EXAM_SESSION="tab-c", HTTP_USER_AGENT=phone
+        )
+        self.assertTrue(
+            AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.SESSION_LOCK_REFUSED).exists(),
+            "a refused takeover is recorded even though the request failed",
+        )
+        self.assertEqual(ExamAttempt.objects.get(pk=attempt_id).client_session, "tab-b", "ownership did not move")
+
+        # Turn the teacher's switch off and the same handover is allowed again.
+        self.monitor(exam, policy="off")
+        ExamAttempt.objects.filter(pk=attempt_id).update(last_activity_at=timezone.now() - timedelta(minutes=2))
+        allowed = self.client.post(
+            f"/api/v1/student/attempts/{attempt_id}/claim-session/", HTTP_X_EXAM_SESSION="tab-d", HTTP_USER_AGENT=phone
+        )
+        self.assertEqual(allowed.status_code, 200)
+
+    def test_enforcement_needs_both_the_master_switch_and_the_rule(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="observe", require_fullscreen=True, block_copy_paste=True)
+        attempt_id = self.start(exam).data["id"]
+        rules = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data["integrity"]
+        self.assertEqual(
+            (rules["require_fullscreen"], rules["block_copy_paste"]),
+            (False, False),
+            "a rule the teacher cannot be penalised for is not sent to the runner as one",
+        )
+        self.signal(attempt_id, "fullscreen_exit")
+        self.assertTrue(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.FULLSCREEN_EXIT).exists())
+
+    def test_the_teacher_reads_the_rules_next_to_the_counts(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="enforce", max_tab_switches=5, block_copy_paste=True)
+        attempt_id = self.start(exam).data["id"]
+        self.signal(attempt_id, "tab_hidden")
+        self.signal(attempt_id, "paste")
+
+        self.client.force_authenticate(self.teacher)
+        board = self.client.get(f"/api/v1/results/teacher/attempts/{attempt_id}/").data
+        self.assertEqual(board["integrity"]["policy"], "enforce")
+        self.assertEqual((board["integrity"]["tab_switches"], board["integrity"]["copy_events"]), (1, 1))
+        kinds = [event["kind"] for event in board["session_signals"]]
+        self.assertIn("paste", kinds)
+        self.assertIn("tab_hidden", kinds)

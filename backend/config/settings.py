@@ -63,6 +63,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Innermost, so it sees the response the view actually produced and can hash what the client will get.
+    "apps.core.conditional_get.ConditionalApiGetMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"

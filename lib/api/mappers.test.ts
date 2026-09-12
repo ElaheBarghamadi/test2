@@ -240,6 +240,13 @@ describe("toExamWritePayload", () => {
       show_correct_answers: true,
       max_attempts: 3,
       passing_percentage: 45,
+      // Monitoring travels in full on every save, "off" included: a settings payload that could only switch
+      // the rules on would not be the teacher's to control.
+      integrity_policy: "off",
+      max_tab_switches: 0,
+      block_copy_paste: false,
+      require_fullscreen: false,
+      lock_to_one_device: false,
     });
   });
 });

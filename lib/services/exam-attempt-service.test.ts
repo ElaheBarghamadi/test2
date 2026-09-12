@@ -152,7 +152,20 @@ describe("clock and session resync", () => {
   it("records only the allowed activity signals", async () => {
     recordSignal.mockResolvedValue(undefined);
     await examAttemptService.recordSignal("attempt-1", "tab_hidden", "tab-a");
-    expect(recordSignal).toHaveBeenCalledWith("attempt-1", "tab_hidden", { examSession: "tab-a" });
+    expect(recordSignal).toHaveBeenCalledWith("attempt-1", "tab_hidden", { examSession: "tab-a" }, undefined);
+  });
+
+  /**
+   * A clipboard signal carries what the teacher needs to read the log — which field, how long the text was —
+   * and nothing else. The pasted content itself is deliberately never forwarded: an exam client has no
+   * business copying student text into a request body.
+   */
+  it("forwards a signal's detail and the server's answer, without the pasted text", async () => {
+    recordSignal.mockResolvedValue({ policy: "enforce", tab_switches_remaining: 1, status: "in_progress", auto_submitted: false });
+    const summary = await examAttemptService.recordSignal("attempt-1", "paste", "tab-a", { field: "textarea", length: 480 });
+    expect(recordSignal).toHaveBeenCalledWith("attempt-1", "paste", { examSession: "tab-a" }, { field: "textarea", length: 480 });
+    expect(summary).toMatchObject({ tab_switches_remaining: 1, auto_submitted: false });
+    expect(JSON.stringify(recordSignal.mock.calls[0])).not.toContain("متن");
   });
 });
 

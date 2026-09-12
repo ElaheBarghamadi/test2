@@ -16,6 +16,7 @@ import { QuestionNavigator } from "@/components/exam/question-navigator";
 import { hasAnswer } from "@/components/exam/question-status";
 import { useExamAutosave } from "@/hooks/use-exam-autosave";
 import { useExamConnection } from "@/hooks/use-exam-connection";
+import { useExamIntegrity } from "@/hooks/use-exam-integrity";
 import { useExamKeyboardNavigation } from "@/hooks/use-exam-keyboard-navigation";
 import { useExamTimer } from "@/hooks/use-exam-timer";
 import { useExamClock } from "@/hooks/use-exam-clock";
@@ -23,6 +24,7 @@ import { useExamSession } from "@/hooks/use-exam-session";
 import { useExamAttemptStore } from "@/lib/state/exam-attempt-store";
 import { useExamSubmission } from "@/hooks/use-exam-submission";
 import { examAttemptService } from "@/lib/services/exam-attempt-service";
+import { ApiError, apiErrorMessage } from "@/lib/api/client";
 import { useToastStore } from "@/lib/state/toast-store";
 import { toPersianNumber } from "@/lib/utils";
 import { attemptsApi } from "@/lib/api/attempts";
@@ -87,14 +89,27 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
   });
   useExamConnection(setConnectionStatus);
 
-  useEffect(() => {
-    if (live?.status !== "in_progress" || !examSession) return;
-    // Reported for the teacher's activity log only. The tab cannot hide what the server already sees,
-    // and nothing here changes a score.
-    const report = () => void examAttemptService.recordSignal(live.id, document.hidden ? "tab_hidden" : "tab_visible", examSession).catch(() => undefined);
-    document.addEventListener("visibilitychange", report);
-    return () => document.removeEventListener("visibilitychange", report);
-  }, [examSession, live?.id, live?.status]);
+  /**
+   * Integrity, driven entirely by what the server said this exam requires. The hook owns the listeners — tab
+   * visibility, clipboard, fullscreen — because all three answer to one switch, and because the answer to a
+   * report is the only place the runner can learn that its attempt has just been closed.
+   */
+  const integrity = useExamIntegrity({
+    attemptId: live?.id ?? null,
+    examSession,
+    rules: attempt?.integrity,
+    active: live?.status === "in_progress",
+    onEndedByServer: (reason) => {
+      setSessionConflict("finalized");
+      toast({
+        title: "آزمون بسته شد",
+        description:
+          reason === "tab_switch_limit"
+            ? "سقف بیرون‌رفتن از تب این آزمون پر شد. پاسخ‌های ذخیره‌شده‌تان ثبت و تصحیح می‌شود."
+            : "سرور پنجرهٔ پاسخ‌دادن را بست؛ پاسخ‌های ذخیره‌شده باقی می‌مانند.",
+      });
+    },
+  });
 
   async function claimSession() {
     if (!live) return;
@@ -106,8 +121,17 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
       setSessionConflict(null);
       retrySave();
       toast({ title: "آزمون در این پنجره ادامه پیدا می‌کند", description: "پنجرهٔ دیگر دیگر نمی‌تواند روی همین نشست بنویسد.", variant: "success" });
-    } catch {
-      toast({ title: "گرفتن نشست ممکن نشد", description: "اتصال را بررسی کنید و دوباره تلاش کنید.", variant: "error" });
+    } catch (error) {
+      // A refusal by the one-device lock is a rule the teacher set, not a network problem, and it has to read
+      // that way: "check your connection" would send a student looking for the wrong thing.
+      if (error instanceof ApiError && error.code === "device_locked") {
+        toast({
+          title: "این آزمون روی همین دستگاه باز نمی‌شود",
+          description: "آزمون روی دستگاهی که با آن شروع شده قفل است. برای ادامه، معلم باید قفل را باز کند.",
+        });
+      } else {
+        toast({ title: "گرفتن نشست ممکن نشد", description: apiErrorMessage(error, "اتصال را بررسی کنید و دوباره تلاش کنید.") });
+      }
     } finally {
       setClaiming(false);
     }
@@ -219,10 +243,41 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
           </div>
         </div>
       </header>
+      {integrity.requireFullscreen && integrity.fullscreenMissing && attempt.status === "in_progress" && (
+        /*
+         * The fullscreen rule blocks the sheet instead of reporting a violation: a student out of fullscreen
+         * is, by the teacher's own definition, not taking the exam right now. Nothing is scored, lost or
+         * submitted here — one press returns them to exactly the question they were on.
+         */
+        <div role="alertdialog" aria-label="تمام‌صفحه لازم است" className="fixed inset-0 z-50 grid place-items-center bg-surface/95 p-6 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border bg-card p-5 shadow-lift">
+            <p className="text-sm font-black">این آزمون در حالت تمام‌صفحه برگزار می‌شود</p>
+            <p className="mt-2 text-xs leading-6 text-muted-foreground">
+              برای ادامه دادن، مرورگر را تمام‌صفحه کنید. پاسخ‌های ذخیره‌شده سر جایشان هستند و زمان آزمون در این فاصله هم می‌گذرد.
+            </p>
+            <div className="mt-4 flex justify-end">
+              <Button data-autofocus onClick={integrity.requestFullscreen}>
+                تمام‌صفحه
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       <main className="mx-auto flex max-w-[1480px] gap-6 px-4 py-4 pb-8 sm:px-6 sm:py-7">
         <div className="min-w-0 flex-1">
           <ExamSessionBanner attempt={attempt} onRestoreConnection={() => { setConnectionStatus(navigator.onLine ? "online" : "offline"); if (navigator.onLine) retrySave(); }}/>
           <ExamSessionNotice conflict={attempt.sessionConflict} saveStatus={attempt.saveStatus} claiming={claiming} onClaim={claimSession} onRetry={retrySave}/>
+          {(integrity.budgetNotice || integrity.notice) && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl border border-amber-400/45 bg-amber-500/10 px-3 py-2 text-[11px] font-bold text-amber-900 dark:text-amber-200">
+              <ShieldCheck className="h-3.5 w-3.5 shrink-0"/>
+              <span className="min-w-0 flex-1">{integrity.notice ?? integrity.budgetNotice}</span>
+              {integrity.notice && (
+                <Button size="sm" variant="ghost" onClick={integrity.dismissNotice}>
+                  باشه
+                </Button>
+              )}
+            </div>
+          )}
           {singlePage ? (
             <div className="space-y-4">
               {exam.questions.map((item, index) => (

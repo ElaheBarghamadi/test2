@@ -1,5 +1,6 @@
 import type {
   ApiAttemptDto,
+  ApiExamIntegrityDto,
   ApiAvailableExamDto,
   ApiExamSettingsDto,
   ApiExamWritePayload,
@@ -14,7 +15,7 @@ import type {
   ApiTeacherExamListDto,
   ApiUserDto,
 } from "@/lib/api/dtos";
-import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamDraft, ExamResult, NotificationItem, Question, Role, User } from "@/lib/types/domain";
+import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamIntegrityRules, ExamDraft, ExamResult, NotificationItem, Question, Role, User } from "@/lib/types/domain";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Only a real server UUID may be echoed back as an option id; rows the builder has not saved yet must be created. */
@@ -113,6 +114,11 @@ function toExamSettings(dto: ApiExamSettingsDto, totalMarks = 0): Exam["settings
     resultVisibility: frontendVisibility(dto.result_visibility),
     showCorrectAnswers: dto.show_correct_answers,
     resultDetail: dto.result_detail ?? null,
+    integrityPolicy: dto.integrity_policy ?? "off",
+    integrityTabLimit: dto.max_tab_switches ?? 0,
+    integrityBlockCopyPaste: dto.block_copy_paste === true,
+    integrityRequireFullscreen: dto.require_fullscreen === true,
+    integrityLockToOneDevice: dto.lock_to_one_device === true,
     attemptLimit: dto.max_attempts,
     passingPercentage: number(dto.passing_percentage),
   };
@@ -185,6 +191,13 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
       // Only sent when the teacher chose a rung: leaving it out is what keeps a legacy exam on the meaning of
       // `show_correct_answers`, which is the server's job to resolve, not the client's to guess.
       ...(draft.settings.resultDetail ? { result_detail: draft.settings.resultDetail } : {}),
+      // Sent in full every time, including the "off" and "0" cases: a monitoring switch that could only be
+      // written on, never off, would not be the teacher's to make.
+      integrity_policy: draft.settings.integrityPolicy ?? "off",
+      max_tab_switches: draft.settings.integrityTabLimit ?? 0,
+      block_copy_paste: draft.settings.integrityBlockCopyPaste === true,
+      require_fullscreen: draft.settings.integrityRequireFullscreen === true,
+      lock_to_one_device: draft.settings.integrityLockToOneDevice === true,
       randomize_options: draft.settings.randomizeOptions,
       allow_unanswered: draft.settings.allowUnanswered,
       max_attempts: draft.settings.attemptLimit,
@@ -259,6 +272,28 @@ export function toStudentDashboardExam(dto: ApiAvailableExamDto): Exam {
   };
 }
 
+/**
+ * The integrity block, with the "absent" case read as *off* rather than as a guess.
+
+ * A payload from before the switches existed must not start blocking a clipboard or counting tab switches
+ * on a client's own initiative, so no default here is a rule — only the absence of one.
+ */
+export function toIntegrityRules(dto?: ApiExamIntegrityDto): ExamIntegrityRules | undefined {
+  if (!dto) return undefined;
+  return {
+    policy: dto.policy,
+    records: dto.records === true,
+    enforced: dto.enforced === true,
+    blockCopyPaste: dto.block_copy_paste === true,
+    requireFullscreen: dto.require_fullscreen === true,
+    lockToOneDevice: dto.lock_to_one_device === true,
+    maxTabSwitches: dto.max_tab_switches ?? 0,
+    tabSwitches: dto.tab_switches ?? 0,
+    tabSwitchesRemaining: dto.tab_switches_remaining ?? null,
+    copyEvents: dto.copy_events ?? 0,
+  };
+}
+
 function answerValue(question: Question, selected: string[], text: string | null): AnswerValue {
   if (question.type === "single_choice") return selected[0] ?? null;
   if (question.type === "multiple_choice") return selected;
@@ -295,6 +330,7 @@ export function toStudentAttempt(dto: ApiAttemptDto): { exam: Exam; attempt: Exa
     answerFrontier: dto.answer_frontier ?? 0,
     connectionStatus: typeof navigator === "undefined" || navigator.onLine ? "online" : "offline",
     attemptNumber: dto.attempt_number, attemptLimit: dto.attempt_limit,
+    integrity: toIntegrityRules(dto.integrity),
   } };
 }
 

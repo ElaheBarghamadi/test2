@@ -350,6 +350,17 @@ def duplicate_exam(exam_id, owner) -> Exam:
             "result_detail",
             "max_attempts",
             "passing_percentage",
+            # A duplicated paper is the same exam for the same class tomorrow, so its discipline rules come
+            # with it; a teacher who forgot to re-enable them would otherwise run a monitored exam as an
+            # unmonitored one.
+            "randomize_options",
+            "allow_unanswered",
+            "question_layout",
+            "integrity_policy",
+            "max_tab_switches",
+            "block_copy_paste",
+            "require_fullscreen",
+            "lock_to_one_device",
         ):
             setattr(duplicate_settings, field, getattr(source_settings, field))
         duplicate_settings.full_clean()

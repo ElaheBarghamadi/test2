@@ -1,6 +1,6 @@
 import type React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { ExamCreator } from "@/components/forms/exam-creator";
 
 /**
@@ -64,5 +64,37 @@ describe("delivery layout", () => {
     // And the switch comes back: the stored value is left alone, only its row is hidden.
     fireEvent.click(screen.getByRole("button", { name: /صفحه‌به‌صفحه/ }));
     expect(screen.getByText("اجازهٔ بازگشت به سؤال‌ها")).toBeTruthy();
+  });
+});
+
+describe("integrity monitoring", () => {
+  /** The switch is the teacher's, so it starts off — and stays unreachable until they move it. */
+  it("starts off, with the saved rules inert beside it", () => {
+    openSettings();
+    const fieldset = screen.getByText("مراقبت از تقلب").closest("fieldset")!;
+    expect((within(fieldset).getByRole("radio", { name: /خاموش/ }) as HTMLInputElement).checked).toBe(true);
+    const switches = within(fieldset).getAllByRole("switch");
+    expect(switches).toHaveLength(3);
+    expect(switches.every((item) => (item as HTMLButtonElement).disabled)).toBe(true);
+    expect(within(fieldset).getByText(/پیش‌فرض خاموش است/)).toBeTruthy();
+  });
+
+  it("hands the rules to the teacher when enforcement is chosen", () => {
+    openSettings();
+    const fieldset = screen.getByText("مراقبت از تقلب").closest("fieldset")!;
+    fireEvent.click(within(fieldset).getByRole("radio", { name: /ثبت و محدودیت/ }));
+
+    const clipboard = within(fieldset).getByRole("switch", { name: /بستن کپی و چسباندن/ });
+    expect((clipboard as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(clipboard);
+    expect(clipboard.getAttribute("aria-checked")).toBe("true");
+    // A limit only exists once monitoring can act on it, so the select opens with the same switch.
+    expect((within(fieldset).getByRole("combobox", { name: /سقف بیرون‌رفتن از تب/ }) as HTMLSelectElement).disabled).toBe(false);
+  });
+
+  it("says what the mechanism cannot do, in the same breath as what it can", () => {
+    openSettings();
+    const fieldset = screen.getByText("مراقبت از تقلب").closest("fieldset")!;
+    expect(within(fieldset).getByText(/تقلب را دشوار می‌کند، نه ناممکن/)).toBeTruthy();
   });
 });

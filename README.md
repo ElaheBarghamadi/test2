@@ -46,8 +46,10 @@ npm run dev:turbo           # the same dev server on Turbopack: much faster rout
 npm run build && npm start  # pre-compiled pages — use this when the work is browsing, not editing
 ```
 
-On the backend, `manage.py runserver --threads 2` serves concurrent requests instead of queueing them,
-which matters once a page fires several fetches at once.
+On the backend, `manage.py runserver` already answers concurrent requests on one thread each (Django's
+development server is threaded by default; `--nothreading` opts out, which is what makes a page that fires
+several fetches feel queued). Add `--noreload` to stop the file watcher re-importing the whole project on
+every save, and keep `DEBUG=False` out of the picture — the slow part is the reload, not the settings.
 
 Validate a production build (do not run it concurrently with `npm run dev`):
 

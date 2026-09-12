@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 
 from apps.attempts.grading import grade_answer, requires_manual_grading, selected_option_ids, AnswerMark
 from apps.attempts.models import ExamAttempt, StudentAnswer
-from apps.attempts.services import _grade_attempt, attempt_timing
+from apps.attempts.services import _grade_attempt, attempt_timing, integrity_summary
 from apps.exams.models import Exam, Question
 from apps.organizations.models import SchoolMembership
 from apps.users.models import User
@@ -269,6 +269,10 @@ class TeacherAttemptDetailView(TeacherResultsAccessMixin, APIView):
                 # Observation, not verdict: the marking screen shows these so a teacher can see what the
                 # platform noticed, and nothing here changes a student's score.
                 "session_switch_count": attempt.session_switch_count,
+                # The rules the teacher had switched on for this exam, beside what the student did under them.
+                # Both halves travel together on purpose: a count without its rule invites a verdict the
+                # settings never authorised.
+                "integrity": integrity_summary(attempt),
                 "session_signals": TeacherAttemptEventSerializer(attempt.events.all()[:40], many=True).data,
             }
         )

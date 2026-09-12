@@ -4,6 +4,7 @@ import { create } from "zustand";
 import { authApi } from "@/lib/api/auth";
 import { apiErrorMessage, setAuthenticationFailureHandler } from "@/lib/api/client";
 import { toUser } from "@/lib/api/mappers";
+import { clearApiCache } from "@/lib/api/cache";
 import { tokenStorage } from "@/lib/api/token-storage";
 import { clearSessionMirror, syncSessionMirror } from "@/lib/api/session-mirror";
 import { rolePanel } from "@/lib/auth/roles";
@@ -42,6 +43,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       await syncSessionMirror();
     } catch {
       tokenStorage.clear();
+      clearApiCache();
       void clearSessionMirror();
       set(anonymous);
     }
@@ -69,6 +71,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Clearing local credentials is still mandatory, even if the network/logout endpoint failed.
     } finally {
       tokenStorage.clear();
+      clearApiCache();
       await clearSessionMirror();
       set(anonymous);
     }
@@ -76,7 +79,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   setUser: (user) => set({ user, status: "authenticated" }),
   // Synchronous by contract (the API client calls it from a failure handler), so the mirror is cleared
   // without awaiting it: a stale mirror only means the gate falls back to its hint on the next request.
-  clearSession: () => { tokenStorage.clear(); void clearSessionMirror(); set(anonymous); },
+  clearSession: () => {
+    tokenStorage.clear();
+    // The cache holds this user's lists; a logout that leaves them behind can be read by whoever
+    // signs in next in the same tab.
+    clearApiCache();
+    void clearSessionMirror();
+    set(anonymous);
+  },
 }));
 
 // apiRequest calls this after a failed refresh. It intentionally has no redirect side effect;

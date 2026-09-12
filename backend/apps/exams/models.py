@@ -93,6 +93,20 @@ class ExamSettings(TimeStampedUUIDModel):
         OWN_ANSWERS_WITH_FEEDBACK = "own_answers_with_feedback", "Answer sheet and the teacher's notes"
         FULL_KEY = "full_key", "Answer sheet, notes, and the correct answers"
 
+    class IntegrityPolicy(models.TextChoices):
+        """Whether the exam watches the browser at all, and whether watching has any consequence.
+
+        The teacher owns this switch, in three positions rather than two. `off` records nothing and restricts
+        nothing. `observe` writes what the browser reports next to the answers, so a human can judge it, and
+        changes nothing about the exam. `enforce` additionally applies the rules below: a copy ban, a
+        fullscreen requirement, a one-device lock and a tab-switch limit. Nothing in this class penalises a
+        student on its own while the policy is not `enforce`.
+        """
+
+        OFF = "off", "Off"
+        OBSERVE = "observe", "Record only"
+        ENFORCE = "enforce", "Record and enforce"
+
     exam = models.OneToOneField(Exam, on_delete=models.CASCADE, related_name="settings")
     allow_previous_questions = models.BooleanField(default=True)
     # Presentation only: paged shows one question at a time, single_page stacks the whole answer sheet.
@@ -114,6 +128,16 @@ class ExamSettings(TimeStampedUUIDModel):
     allow_unanswered = models.BooleanField(default=True)
     # Pass mark as a percentage of the exam total; 0 disables the pass/fail verdict everywhere.
     passing_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    # Anti-cheating, off by default: an exam that blocks the clipboard or locks a device is a decision about
+    # real students on real machines, and it is the teacher's to make, not the platform's.
+    integrity_policy = models.CharField(max_length=12, choices=IntegrityPolicy.choices, default=IntegrityPolicy.OFF)
+    # Counted from server time, over `tab_hidden` events; 0 means "no limit", so observing never submits.
+    max_tab_switches = models.PositiveSmallIntegerField(default=0)
+    block_copy_paste = models.BooleanField(default=False)
+    require_fullscreen = models.BooleanField(default=False)
+    # The lock is on the *device family* (the browser's own fingerprint), so a refresh or a new tab in the
+    # same browser keeps working and a second machine does not get to answer.
+    lock_to_one_device = models.BooleanField(default=False)
 
     @property
     def result_detail_level(self) -> str:
@@ -121,6 +145,33 @@ class ExamSettings(TimeStampedUUIDModel):
         if self.result_detail:
             return self.result_detail
         return self.ResultDetail.FULL_KEY if self.show_correct_answers else self.ResultDetail.SCORE_ONLY
+
+    @property
+    def integrity_records(self) -> bool:
+        """True when browser signals are stored at all."""
+        return self.integrity_policy != self.IntegrityPolicy.OFF
+
+    @property
+    def integrity_enforced(self) -> bool:
+        """True when the stored signals can also cost the student something."""
+        return self.integrity_policy == self.IntegrityPolicy.ENFORCE
+
+    def integrity_rules(self) -> dict:
+        """The one reading of the settings, served to the runner so no client invents a policy.
+
+        Each rule is already AND-ed with the master switch: the UI can bind a checkbox straight to it and a
+        stale client cannot re-enable enforcement by sending a flag of its own.
+        """
+        enforced = self.integrity_enforced
+        return {
+            "policy": self.integrity_policy,
+            "records": self.integrity_records,
+            "enforced": enforced,
+            "block_copy_paste": bool(enforced and self.block_copy_paste),
+            "require_fullscreen": bool(enforced and self.require_fullscreen),
+            "lock_to_one_device": bool(enforced and self.lock_to_one_device),
+            "max_tab_switches": int(self.max_tab_switches) if enforced else 0,
+        }
 
     class Meta:
         verbose_name_plural = "Exam settings"
@@ -134,6 +185,10 @@ class ExamSettings(TimeStampedUUIDModel):
             errors["max_attempts"] = "At least one attempt must be allowed."
         if self.passing_percentage < 0 or self.passing_percentage > 100:
             errors["passing_percentage"] = "Passing percentage must be between 0 and 100."
+        if self.max_tab_switches > 100:
+            errors["max_tab_switches"] = "A tab-switch limit above 100 does not describe an exam."
+        # The sub-rules stay configurable while the policy is off, so a teacher who disables monitoring for
+        # one week can turn it back on and find their settings where they left them. They are simply inert.
         if errors:
             raise ValidationError(errors)
 

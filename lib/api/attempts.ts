@@ -1,5 +1,5 @@
 import { apiRequest } from "@/lib/api/client";
-import type { ApiAttemptDto, ApiAttemptHeartbeatDto, ApiAvailableExamDto, ApiStudentAnswerDto, ApiStudentResultDto, ApiSubmitAttemptDto } from "@/lib/api/dtos";
+import type { ApiAttemptDto, ApiAttemptHeartbeatDto, ApiAvailableExamDto, ApiIntegritySignalDto, ApiStudentAnswerDto, ApiStudentResultDto, ApiSubmitAttemptDto } from "@/lib/api/dtos";
 
 export type ApiAnswerInput = { selected_option_ids: string[] } | { text: string };
 export type ApiBatchAnswerInput = ApiAnswerInput & { question_id: string };
@@ -41,6 +41,14 @@ export const attemptsApi = {
   /** Clock-only resync: the deadline and the accepted revision, without the answer sheet in the payload. */
   heartbeat: (attemptId: string, guards?: AttemptWriteGuards) => apiRequest<ApiAttemptHeartbeatDto>(`/student/attempts/${attemptId}/heartbeat/`, { method: "POST", headers: guardHeaders(guards) }),
   claimSession: (attemptId: string, guards?: AttemptWriteGuards) => apiRequest<ApiAttemptHeartbeatDto>(`/student/attempts/${attemptId}/claim-session/`, { method: "POST", headers: guardHeaders(guards) }),
-  /** Browser-observed signal. Timestamps and verdicts stay on the server. */
-  recordSignal: (attemptId: string, kind: "tab_hidden" | "tab_visible" | "disconnected" | "reconnected", guards?: AttemptWriteGuards) => apiRequest<void>(`/student/attempts/${attemptId}/signals/`, { method: "POST", body: { kind }, headers: guardHeaders(guards) }),
+  /**
+   * Browser-observed signal. Timestamps and verdicts stay on the server, and so does the clipboard content:
+   * `detail` carries a field name and a length, never the text a student copied.
+   */
+  recordSignal: (
+    attemptId: string,
+    kind: "tab_hidden" | "tab_visible" | "disconnected" | "reconnected" | "copy" | "cut" | "paste" | "fullscreen_enter" | "fullscreen_exit",
+    guards?: AttemptWriteGuards,
+    detail?: Record<string, unknown>,
+  ) => apiRequest<ApiIntegritySignalDto>(`/student/attempts/${attemptId}/signals/`, { method: "POST", body: { kind, ...(detail ? { detail } : {}) }, headers: guardHeaders(guards) }),
 };

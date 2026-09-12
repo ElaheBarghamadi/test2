@@ -232,3 +232,41 @@ describe("ExamMarkingWorkspace", () => {
     expect(replace).toHaveBeenCalledWith("/teacher/exams/exam-1/marking?mode=question&question=q-written", { scroll: false });
   });
 });
+describe("what the marking sheet says about monitoring", () => {
+  /** The rules and the counts have to be read together, on the teacher's own screen. */
+  it("names the policy beside what it counted", async () => {
+    teacherAttempt.mockResolvedValue({
+      ...sheet,
+      integrity: {
+        policy: "enforce", records: true, enforced: true, block_copy_paste: true, require_fullscreen: false,
+        lock_to_one_device: true, max_tab_switches: 3, tab_switches: 2, tab_switches_remaining: 1, copy_events: 4,
+      },
+      session_signals: [
+        ...sheet.session_signals,
+        { id: "sig-2", kind: "paste", created_at: "2026-04-02T05:42:00Z", detail: { field: "textarea", length: 120 } },
+      ],
+    });
+    await openDesk("sheet");
+
+    const panel = await screen.findByText(/^مراقبت از تقلب:/);
+    expect(panel.parentElement?.textContent).toContain("ثبت و محدودیت");
+    expect(document.body.textContent).toContain("۲ بار بیرون‌رفتن از تب از ۳");
+    expect(document.body.textContent).toContain("۴ کپی یا چسباندن");
+    // The timeline reads as sentences, not as an API's snake_case.
+    expect(await screen.findByText("متنی به پاسخ چسبانده شد")).toBeTruthy();
+  });
+
+  it("says plainly when nothing was being watched", async () => {
+    teacherAttempt.mockResolvedValue({
+      ...sheet,
+      integrity: {
+        policy: "off", records: false, enforced: false, block_copy_paste: false, require_fullscreen: false,
+        lock_to_one_device: false, max_tab_switches: 0, tab_switches: 0, tab_switches_remaining: null, copy_events: 0,
+      },
+    });
+    await openDesk("sheet");
+    expect(await screen.findByText(/^مراقبت از تقلب:/));
+    expect(document.body.textContent).toContain("خاموش است");
+    expect(document.body.textContent).toContain("۰ بار بیرون‌رفتن از تب");
+  });
+});

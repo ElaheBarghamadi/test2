@@ -91,6 +91,37 @@ export interface ApiExamSettingsDto {
   result_detail?: "score_only" | "own_answers" | "own_answers_with_feedback" | "full_key" | null;
   max_attempts: number;
   passing_percentage: number | string;
+  /** Anti-cheating. Absent on a payload stored before the switches existed, which means "off". */
+  integrity_policy?: "off" | "observe" | "enforce";
+  max_tab_switches?: number;
+  block_copy_paste?: boolean;
+  require_fullscreen?: boolean;
+  lock_to_one_device?: boolean;
+}
+
+/**
+ * The exam's integrity rules as the server reads them, plus what the student has already done under them.
+ * One object for both, because a count without the rule that produced it invites a verdict the teacher
+ * never authorised.
+ */
+/** What a recorded signal answers with: the rules, what they have cost, and whether the exam just closed. */
+export interface ApiIntegritySignalDto extends ApiExamIntegrityDto {
+  status: ApiAttemptStatus;
+  auto_submitted?: boolean;
+  reason?: string;
+}
+
+export interface ApiExamIntegrityDto {
+  policy: "off" | "observe" | "enforce";
+  records: boolean;
+  enforced: boolean;
+  block_copy_paste: boolean;
+  require_fullscreen: boolean;
+  lock_to_one_device: boolean;
+  max_tab_switches: number;
+  tab_switches: number;
+  tab_switches_remaining: number | null;
+  copy_events: number;
 }
 
 export interface ApiTeacherExamListDto {
@@ -144,6 +175,8 @@ export interface ApiAttemptDto {
   submitted_at: string | null; last_activity_at: string; server_time: string; expires_at: string;
   remaining_seconds: number; exam: ApiStudentAttemptExamDto; questions: ApiStudentQuestionDto[];
   answers: ApiStudentAnswerDto[];
+  /** Monitoring rules for this attempt. Absent on an older payload, which the runner reads as "off". */
+  integrity?: ApiExamIntegrityDto;
 }
 export interface ApiAvailableExamDto {
   id: string; title: string; description: string; subject: string; grade: string; class_name: string;
@@ -233,6 +266,7 @@ export interface ApiTeacherAttemptDetailDto {
   status: ApiAttemptStatus; started_at: string | null; submitted_at: string | null;
   attempt_number: number; server_time: string; remaining_seconds: number | null;
   session_switch_count: number; session_signals: ApiAttemptSignalDto[];
+  integrity?: ApiExamIntegrityDto;
   answers: ApiTeacherAttemptAnswerDto[];
   result: ApiTeacherResultDto | null;
 }
@@ -279,6 +313,12 @@ export interface ApiAttemptHeartbeatDto {
   answer_frontier?: number;
   server_time: string; expires_at: string | null; remaining_seconds: number | null;
   status: ApiAttemptStatus; answer_revision: number; session_locked_by_other: boolean; question_count: number;
+  /** A one-device lock refused this browser; the runner says so instead of pretending the exam is over. */
+  device_locked?: boolean;
+  integrity?: ApiExamIntegrityDto;
+  /** Set when the teacher's tab budget closed the attempt on the server mid-write. */
+  auto_submitted?: boolean;
+  reason?: string;
 }
 
 export interface ApiNotificationDto {

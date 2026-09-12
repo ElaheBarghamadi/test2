@@ -15,6 +15,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useToastStore } from "@/lib/state/toast-store";
 import { cn, formatDateTime, toPersianNumber } from "@/lib/utils";
+import { describeIntegrity, INTEGRITY_POLICY_LABELS, signalLabel } from "@/lib/exam/integrity";
+import { toIntegrityRules } from "@/lib/api/mappers";
 
 /**
  * Marking, in the two orders a teacher actually works in.
@@ -34,18 +36,6 @@ const VERDICT_LABELS: Record<string, { label: string; variant: "success" | "dest
   unanswered: { label: "بدون پاسخ", variant: "neutral" },
   pending: { label: "نیازمند نمرهٔ شما", variant: "warning" },
   manual: { label: "نمرهٔ دست شما", variant: "teal" },
-};
-
-const SIGNAL_LABELS: Record<string, string> = {
-  session_switch: "تغییر پنجرهٔ نشست",
-  tab_hidden: "پنهان‌شدن صفحهٔ آزمون",
-  tab_visible: "بازگشت به صفحهٔ آزمون",
-  disconnected: "قطع اتصال",
-  reconnected: "اتصال دوباره",
-  auto_submitted: "ارسال خودکار در پایان زمان",
-  exam_closed: "نهایی‌شدن با پایان آزمون توسط آموزگار",
-  stale_write_rejected: "رد درخواست ذخیرهٔ کهنه",
-  question_locked: "رد ویرایش سؤالی که از آن رد شده‌اید (بازگشت ممکن نیست)",
 };
 
 export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAttemptId = "", initialQuestionId = "" }: { examId: string; initialMode?: MarkingMode; initialAttemptId?: string; initialQuestionId?: string }) {
@@ -334,6 +324,24 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
             {nextOpen && <Button size="sm" variant="outline" onClick={() => document.getElementById(`mark-${nextOpen.question_id}`)?.focus()}>پرش به نمرهٔ بعدی</Button>}
             {nextStudent && <Button size="sm" variant="ghost" onClick={() => onSelectNext(nextStudent.id)}>برگهٔ بعدی <ChevronLeft className="h-4 w-4"/></Button>}
           </div>
+          {sheet.integrity && (() => {
+          const rules = toIntegrityRules(sheet.integrity);
+          if (!rules) return null;
+          // The rules and the counts are shown together on purpose. "پنج بار بیرون رفتن از تب" is not evidence
+          // of anything until the teacher's own limit is next to it — and if no limit was set, that has to be
+          // visible too, so nobody reads a number as a violation.
+          return (
+            <div className="rounded-2xl border bg-card/70 p-3 text-xs">
+              <p className="font-black">مراقبت از تقلب: {INTEGRITY_POLICY_LABELS[rules.policy]}</p>
+              <p className="mt-1 leading-6 text-muted-foreground">{describeIntegrity(rules)}</p>
+              <p className="mt-2 flex flex-wrap items-center gap-2">
+                <Badge variant={rules.tabSwitches > 0 ? "warning" : "neutral"}>{toPersianNumber(rules.tabSwitches)} بار بیرون‌رفتن از تب{rules.maxTabSwitches ? ` از ${toPersianNumber(rules.maxTabSwitches)}` : ""}</Badge>
+                <Badge variant={rules.copyEvents > 0 ? "warning" : "neutral"}>{toPersianNumber(rules.copyEvents)} کپی یا چسباندن</Badge>
+                {rules.lockToOneDevice && <Badge variant="neutral">قفل یک‌دستگاه فعال بود</Badge>}
+              </p>
+            </div>
+          );
+        })()}
         </CardContent>
       </Card>
 
@@ -341,7 +349,7 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
         <details className="rounded-2xl border bg-card/70 p-3 text-xs">
           <summary className="cursor-pointer font-black">نشانه‌های نشست ({toPersianNumber(sheet.session_signals.length)})</summary>
           <p className="mt-2 leading-6 text-muted-foreground">این‌ها مشاهدهٔ سامانه‌اند، نه مدرک تقلب؛ هیچ نمره‌ای بر پایهٔ آن‌ها تغییر نمی‌کند و زمان‌ها از سرور ثبت شده‌اند.</p>
-          <ul className="mt-2 space-y-1">{sheet.session_signals.map((signal) => <li key={signal.id} className="flex items-center justify-between gap-3 rounded-xl bg-muted/50 px-3 py-1.5"><span className="font-bold">{SIGNAL_LABELS[signal.kind] ?? signal.kind}</span><span className="text-muted-foreground">{signal.created_at ? formatDateTime(signal.created_at) : ""}</span></li>)}</ul>
+          <ul className="mt-2 space-y-1">{sheet.session_signals.map((signal) => <li key={signal.id} className="flex items-center justify-between gap-3 rounded-xl bg-muted/50 px-3 py-1.5"><span className="font-bold">{signalLabel(signal.kind)}</span><span className="text-muted-foreground">{signal.created_at ? formatDateTime(signal.created_at) : ""}</span></li>)}</ul>
         </details>
       )}
 

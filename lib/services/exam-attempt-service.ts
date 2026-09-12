@@ -66,6 +66,18 @@ export interface SaveAttemptResult {
   conflict?: AttemptWriteConflict;
 }
 
+/** What the runner may report about the browser. Every kind is an observation, never a verdict. */
+export type IntegritySignalKind =
+  | "tab_hidden"
+  | "tab_visible"
+  | "disconnected"
+  | "reconnected"
+  | "copy"
+  | "cut"
+  | "paste"
+  | "fullscreen_enter"
+  | "fullscreen_exit";
+
 export const examAttemptService = {
   /**
    * Flush the queued edits and settle any conflict the server raises, instead of dropping it.
@@ -151,9 +163,12 @@ export const examAttemptService = {
     return { status: beat.status, remainingSeconds: beat.remaining_seconds ?? 0, serverRevision: beat.answer_revision };
   },
 
-  /** Browser-observed activity signal. The server stamps the time and decides what is storable. */
-  async recordSignal(attemptId: string, kind: "tab_hidden" | "tab_visible" | "disconnected" | "reconnected", examSession?: string) {
-    await attemptsApi.recordSignal(attemptId, kind, { examSession });
+  /**
+   * Browser-observed activity signal. The server stamps the time and decides what is storable, and answers
+   * with what the teacher's rules now allow — which is how the runner learns an attempt has just closed.
+   */
+  async recordSignal(attemptId: string, kind: IntegritySignalKind, examSession?: string, detail?: Record<string, unknown>) {
+    return attemptsApi.recordSignal(attemptId, kind, { examSession }, detail);
   },
 
   async submitAttempt(attempt: ExamAttempt, options?: { examSession?: string; trigger?: "manual" | "auto" }) {

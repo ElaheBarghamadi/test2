@@ -43,6 +43,10 @@ class ExamAttempt(TimeStampedUUIDModel):
     answer_frontier = models.PositiveSmallIntegerField(default=0)
     # Tab/device ownership of the session. Enforced server-side so a second tab cannot clobber answers.
     client_session = models.CharField(max_length=64, blank=True)
+    # Fingerprint of the browser that started this attempt, computed server-side from the request. It is
+    # compared only when the teacher locked the exam to one device, and it separates "same browser, new tab"
+    # (allowed, because a refresh must never cost a student their exam) from "different machine" (refused).
+    device_signature = models.CharField(max_length=64, blank=True)
     session_switch_count = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
@@ -126,6 +130,14 @@ class AttemptEvent(TimeStampedUUIDModel):
         EXAM_CLOSED = "exam_closed", "Finalized because the teacher ended the exam"
         STALE_WRITE_REJECTED = "stale_write_rejected", "Out-of-date save request rejected"
         QUESTION_LOCKED = "question_locked", "Edit refused by the no-return rule"
+        # Browser-observed integrity signals. Recorded only when the teacher switched monitoring on.
+        COPY = "copy", "Copied text out of the exam"
+        CUT = "cut", "Cut text inside the exam"
+        PASTE = "paste", "Pasted text into an answer"
+        FULLSCREEN_ENTER = "fullscreen_enter", "Fullscreen started"
+        FULLSCREEN_EXIT = "fullscreen_exit", "Fullscreen left"
+        SESSION_LOCK_REFUSED = "session_lock_refused", "Another device was refused the attempt"
+        TAB_LIMIT_REACHED = "tab_limit_reached", "Tab-switch limit reached"
 
     attempt = models.ForeignKey(ExamAttempt, on_delete=models.CASCADE, related_name="events")
     kind = models.CharField(max_length=32, choices=Kind.choices, db_index=True)

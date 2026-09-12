@@ -858,6 +858,53 @@ class QuestionBankApiTests(TestCase):
         self.assertEqual(cleared.data["tags"], [])
 
 
+class ExamIntegritySettingsApiTests(TeacherExamApiTests):
+    """The teacher's anti-cheating switches, stored with the exam and carried by a duplicate."""
+
+    def test_integrity_settings_are_written_read_back_and_cleared(self) -> None:
+        self.authenticate(self.teacher)
+        exam_id = self.create_exam().id
+        payload = {
+            "integrity_policy": "enforce",
+            "max_tab_switches": 3,
+            "block_copy_paste": True,
+            "require_fullscreen": True,
+            "lock_to_one_device": True,
+        }
+        saved = self.client.patch(f"/api/v1/exams/{exam_id}/", {"settings": payload}, format="json")
+        self.assertEqual(saved.status_code, 200, saved.data)
+        settings = saved.data["settings"]
+        self.assertEqual((settings["integrity_policy"], settings["max_tab_switches"]), ("enforce", 3))
+        self.assertTrue(settings["block_copy_paste"] and settings["require_fullscreen"] and settings["lock_to_one_device"])
+
+        # A duplicate copies the discipline rules with the paper, because they describe the exam.
+        copy = self.client.post(f"/api/v1/exams/{exam_id}/duplicate/", format="json")
+        self.assertEqual(copy.status_code, 201)
+        copied = self.client.get(f"/api/v1/exams/{copy.data['id']}/").data["settings"]
+        self.assertEqual(copied["integrity_policy"], "enforce", copied)
+
+        off = self.client.patch(
+            f"/api/v1/exams/{exam_id}/", {"settings": {"integrity_policy": "off", "max_tab_switches": 0}}, format="json"
+        )
+        self.assertEqual(off.data["settings"]["integrity_policy"], "off")
+
+    def test_an_absurd_tab_limit_and_an_unknown_policy_are_refused(self) -> None:
+        self.authenticate(self.teacher)
+        exam_id = self.create_exam().id
+        absurd = self.client.patch(f"/api/v1/exams/{exam_id}/", {"settings": {"max_tab_switches": 5000}}, format="json")
+        self.assertEqual(absurd.status_code, 400)
+        self.assertIn("max_tab_switches", absurd.data["detail"]["settings"])
+        invented = self.client.patch(f"/api/v1/exams/{exam_id}/", {"settings": {"integrity_policy": "surveil"}}, format="json")
+        self.assertEqual(invented.status_code, 400)
+
+    def test_a_student_never_sees_the_rules_as_a_writable_field(self) -> None:
+        self.authenticate(self.teacher)
+        exam_id = self.create_exam().id
+        self.authenticate(self.student)
+        refused = self.client.patch(f"/api/v1/exams/{exam_id}/", {"settings": {"integrity_policy": "off"}}, format="json")
+        self.assertIn(refused.status_code, {403, 404})
+
+
 class QuestionBankAuthoringApiTests(QuestionBankApiTests):
     """Authoring, filing and categorising bank questions that belong to no exam.
 

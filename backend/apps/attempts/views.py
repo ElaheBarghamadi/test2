@@ -42,6 +42,15 @@ from .services import (
 )
 
 
+def _user_agent(request) -> str:  # type: ignore[no-untyped-def]
+    """The browser label a one-device lock compares, read from the request rather than from the payload.
+
+    A client could send a different string in a body field; it cannot make the request arrive with another
+    User-Agent without leaving its browser, which is a far higher cost than pressing a key.
+    """
+    return (request.headers.get("User-Agent") or "")[:512]
+
+
 def _session_context(request) -> tuple[str, int | None]:  # type: ignore[no-untyped-def]
     """Read the two optional write guards. Absent headers simply mean "no guard", so old clients work.
 
@@ -189,7 +198,9 @@ class StudentExamStartView(APIView):
     def post(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
         client_session, _ = _session_context(request)
         try:
-            attempt, created = start_attempt(exam_id, request.user, client_session=client_session)
+            attempt, created = start_attempt(
+                exam_id, request.user, client_session=client_session, user_agent=_user_agent(request)
+            )
         except (DjangoValidationError, Exam.DoesNotExist) as exc:
             if isinstance(exc, Exam.DoesNotExist):
                 raise serializers.ValidationError({"exam": ["This exam is not available to start."]}) from exc
@@ -234,7 +245,9 @@ class StudentAttemptHeartbeatView(StudentAttemptAccessMixin, APIView):
         client_session, _ = _session_context(request)
         get_object_or_404(ExamAttempt.objects.filter(student=request.user), pk=attempt_id)
         try:
-            return Response(heartbeat(attempt_id, request.user, client_session=client_session))
+            return Response(
+                heartbeat(attempt_id, request.user, client_session=client_session, user_agent=_user_agent(request))
+            )
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
 
@@ -249,22 +262,36 @@ class StudentAttemptClaimView(StudentAttemptAccessMixin, APIView):
         if not client_session:
             raise serializers.ValidationError({"session": ["A session identifier is required."]})
         try:
-            return Response(claim_session(attempt_id, request.user, client_session=client_session))
+            return Response(
+                claim_session(attempt_id, request.user, client_session=client_session, user_agent=_user_agent(request))
+            )
+        except AttemptConflict as exc:
+            # A teacher who locked the exam to one device has to be able to say "no" from the other machine,
+            # and the student has to read that as a rule, not as a network failure.
+            return _conflict_response(exc)
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
 
 
 class StudentAttemptSignalView(StudentAttemptAccessMixin, APIView):
-    """Records a browser-observed signal (tab hidden, connection lost). Never a verdict, never a timestamp."""
+    """Records a browser-observed signal, and answers with what the teacher's rules now allow.
+
+    Never a verdict and never a client timestamp. The response matters: a tab switch may be the last thing
+    the runner does before the server closes the attempt, and the client has to learn that from this call
+    rather than discover it on the next autosave.
+    """
 
     def post(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
         kind = (request.data.get("kind") or "").strip()
+        detail = request.data.get("detail")
         get_object_or_404(ExamAttempt.objects.filter(student=request.user), pk=attempt_id)
         try:
-            record_client_signal(attempt_id, request.user, kind=kind)
+            summary = record_client_signal(
+                attempt_id, request.user, kind=kind, detail=detail if isinstance(detail, dict) else None
+            )
         except DjangoValidationError as exc:
             raise _drf_validation_error(exc) from exc
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(summary)
 
 
 class StudentAttemptAnswerView(StudentAttemptAccessMixin, APIView):

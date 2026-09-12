@@ -137,7 +137,20 @@ class ExamSettingsSerializer(serializers.ModelSerializer):
             "passing_percentage",
             "randomize_options",
             "allow_unanswered",
+            # Anti-cheating, off unless the teacher turns it on. The three positions and the rules that belong
+            # to them travel as ordinary settings, so they are validated, duplicated and read back like any
+            # other answer to "how should this exam behave".
+            "integrity_policy",
+            "max_tab_switches",
+            "block_copy_paste",
+            "require_fullscreen",
+            "lock_to_one_device",
         )
+
+    def validate_max_tab_switches(self, value: int) -> int:
+        if value > 100:
+            raise serializers.ValidationError("A tab-switch limit above 100 does not describe an exam.")
+        return value
 
     def validate_max_attempts(self, value: int) -> int:
         if value < 1:

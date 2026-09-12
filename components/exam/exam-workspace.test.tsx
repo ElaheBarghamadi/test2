@@ -137,10 +137,10 @@ describe("ExamWorkspace session handling", () => {
     // A tab switch is reported for the teacher's activity log, tagged with this tab's session id.
     Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
     document.dispatchEvent(new Event("visibilitychange"));
-    await waitFor(() => expect(recordSignal).toHaveBeenCalledWith("attempt-1", "tab_hidden", expect.objectContaining({ examSession: expect.any(String) })));
+    await waitFor(() => expect(recordSignal).toHaveBeenCalledWith("attempt-1", "tab_hidden", expect.objectContaining({ examSession: expect.any(String) }), undefined));
     Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
     document.dispatchEvent(new Event("visibilitychange"));
-    await waitFor(() => expect(recordSignal).toHaveBeenCalledWith("attempt-1", "tab_visible", expect.objectContaining({ examSession: expect.any(String) })));
+    await waitFor(() => expect(recordSignal).toHaveBeenCalledWith("attempt-1", "tab_visible", expect.objectContaining({ examSession: expect.any(String) }), undefined));
 
     unmount();
     useExamAttemptStore.setState({ attempt: attemptFixture({ status: "submitted" }) });

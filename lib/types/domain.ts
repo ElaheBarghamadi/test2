@@ -91,6 +91,30 @@ export interface ExamSchedule {
   timezone: string;
 }
 
+export type IntegrityPolicy = "off" | "observe" | "enforce";
+
+/**
+ * What the teacher decided about browser monitoring for one exam, and what the student has spent under it.
+ *
+ * The rules arrive already AND-ed with the master switch, so no screen has to remember that a saved
+ * `block_copy_paste` means nothing while the policy is `off` — and no client can switch enforcement back on
+ * by sending a flag of its own.
+ */
+export interface ExamIntegrityRules {
+  policy: IntegrityPolicy;
+  records: boolean;
+  enforced: boolean;
+  blockCopyPaste: boolean;
+  requireFullscreen: boolean;
+  lockToOneDevice: boolean;
+  /** 0 means "no budget set", which is not the same thing as a budget of zero. */
+  maxTabSwitches: number;
+  tabSwitches: number;
+  /** Null when there is no limit; the runner shows a number only when there is one. */
+  tabSwitchesRemaining: number | null;
+  copyEvents: number;
+}
+
 export interface ExamSettings {
   durationMinutes: number;
   totalMarks: number;
@@ -106,6 +130,12 @@ export interface ExamSettings {
    */
   questionLayout: QuestionLayout;
   showResultImmediately: boolean;
+  /** Anti-cheating, off unless the teacher turns it on. Optional so a draft predating it stays valid. */
+  integrityPolicy?: IntegrityPolicy;
+  integrityTabLimit?: number;
+  integrityBlockCopyPaste?: boolean;
+  integrityRequireFullscreen?: boolean;
+  integrityLockToOneDevice?: boolean;
   resultVisibility: ResultVisibility;
   showCorrectAnswers: boolean;
   /** Absent or `null` = the teacher never chose, so the legacy `showCorrectAnswers` switch decides. */
@@ -205,6 +235,8 @@ export interface ExamAttempt {
   /** Another window owns this attempt right now; writes are refused until the student takes over. */
   sessionConflict?: "another_session" | "finalized" | null;
   connectionStatus: "online" | "offline";
+  /** The exam's integrity rules and what has been spent under them, straight from the attempt payload. */
+  integrity?: ExamIntegrityRules;
   submissionError?: string;
   /** Attempt 1-based index and the exam's allowed total, shown in the session header. */
   attemptNumber?: number;

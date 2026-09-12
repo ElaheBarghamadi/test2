@@ -4,6 +4,7 @@ import Link from "next/link";
 import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Clock3, Copy, Eye, ListChecks, PlusCircle, RotateCcw, Timer, UsersRound } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Exam } from "@/lib/types/domain";
+import { INTEGRITY_POLICY_LABELS, rulesFromSettings } from "@/lib/exam/integrity";
 import { RESULT_DETAIL_LABELS, resolveResultDetail } from "@/lib/exam/result-detail";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -127,6 +128,12 @@ export function TeacherExamDetailWorkspace({ examId }: { examId: string }) {
         // line, so an exam created before the ladder exists still reads truthfully here.
         label: "محتوای نتیجهٔ منتشرشده",
         value: RESULT_DETAIL_LABELS[resolveResultDetail(exam.settings)] ?? "فقط نمره",
+      },
+      {
+        label: "مراقبت از تقلب",
+        // The teacher set this on the exam, so the detail page repeats it in the same words the builder used
+        // — including the case where rules are configured but monitoring is switched off.
+        value: INTEGRITY_POLICY_LABELS[rulesFromSettings(exam.settings).policy],
       },
       { label: "تعداد تلاش", value: `${toPersianNumber(exam.settings.attemptLimit)} بار` },
       { label: "حدنصاب قبولی", value: exam.settings.passingPercentage > 0 ? `${toPersianNumber(exam.settings.passingPercentage)}٪` : "بدون حکم قبولی" },

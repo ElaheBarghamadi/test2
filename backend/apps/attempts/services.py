@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta
+import hashlib
 from decimal import Decimal, ROUND_HALF_UP
 from math import ceil
 from random import SystemRandom
@@ -237,7 +238,40 @@ def _validate_start_access(exam: Exam, student: User, now: datetime) -> None:
         })
 
 
-def start_attempt(exam_id: Any, student: User, *, client_session: str = "") -> tuple[ExamAttempt, bool]:
+def device_fingerprint(user_agent: str) -> str:
+    """A stable, non-reversible label for the browser an attempt was started in.
+
+    It is deliberately weak in one direction and strong in the other: two tabs of the same browser share a
+    signature (so a refresh, a crash or a re-login never costs a student their exam), while a different
+    machine or a different browser family does not. That is the distinction a one-device lock is actually
+    able to make from a server; pretending it could identify a person would be a lie with consequences.
+    """
+    raw = (user_agent or "").strip()[:512]
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _tab_switch_count(attempt: ExamAttempt) -> int:
+    return attempt.events.filter(kind=AttemptEvent.Kind.TAB_HIDDEN).count()
+
+
+def integrity_summary(attempt: ExamAttempt) -> dict[str, Any]:
+    """The exam's rules plus what the student has already done under them, for one round trip.
+
+    The client never derives a limit from its own settings copy, and never counts its own switches: both
+    come from here, so a refreshed tab and a tab that has been open for an hour see the same numbers.
+    """
+    rules = attempt.exam.settings.integrity_rules()
+    used = _tab_switch_count(attempt)
+    limit = int(rules["max_tab_switches"] or 0)
+    return {
+        **rules,
+        "tab_switches": used,
+        "tab_switches_remaining": (max(0, limit - used) if limit else None),
+        "copy_events": attempt.events.filter(kind__in=[AttemptEvent.Kind.COPY, AttemptEvent.Kind.PASTE, AttemptEvent.Kind.CUT]).count(),
+    }
+
+
+def start_attempt(exam_id: Any, student: User, *, client_session: str = "", user_agent: str = "") -> tuple[ExamAttempt, bool]:
     """Start one active attempt, reusing an existing valid one for duplicate start requests."""
     with transaction.atomic():
         exam = Exam.objects.select_for_update().select_related("settings").get(pk=exam_id)
@@ -256,7 +290,9 @@ def start_attempt(exam_id: Any, student: User, *, client_session: str = "") -> t
                 # A refresh or a second tab reuses the attempt; claiming it is an explicit action so an
                 # accidental duplicate cannot quietly take ownership away.
                 if client_session and active_attempt.client_session != client_session:
-                    adopt_client_session(active_attempt, client_session, reason="start")
+                    # Reusing a live attempt is not a takeover, so a refused device never blocks a refresh;
+                    # the lock is applied where work is actually written.
+                    adopt_client_session(active_attempt, client_session, reason="start", user_agent=user_agent, enforce=False)
                 return active_attempt, False
 
         attempt_count = ExamAttempt.objects.filter(exam=exam, student=student).count()
@@ -278,6 +314,7 @@ def start_attempt(exam_id: Any, student: User, *, client_session: str = "") -> t
             question_order=[str(question_id) for question_id in question_ids],
             option_order=build_option_order(exam),
             client_session=client_session[:64],
+            device_signature=device_fingerprint(user_agent),
         )
         attempt.full_clean()
         attempt.save()
@@ -312,17 +349,33 @@ def record_attempt_event(attempt: ExamAttempt, kind: str, *, detail: dict[str, A
     AttemptEvent.objects.create(attempt=attempt, kind=kind, detail=detail or {})
 
 
-def adopt_client_session(attempt: ExamAttempt, client_session: str, *, reason: str) -> bool:
-    """Move attempt ownership to `client_session`; returns True when it was a real handover."""
+def adopt_client_session(
+    attempt: ExamAttempt,
+    client_session: str,
+    *,
+    reason: str,
+    user_agent: str = "",
+    enforce: bool = True,
+) -> str:
+    """Move attempt ownership to `client_session`. Answers "adopted", "unchanged" or "refused".
+
+    The three-way result exists because the callers want different things: a heartbeat reports a refusal, an
+    explicit claim raises it, and a start reusing a live attempt ignores it. `enforce=False` is the last one.
+    """
     client_session = (client_session or "")[:64]
+    settings = attempt.exam.settings
+    if enforce and settings.integrity_enforced and settings.lock_to_one_device and attempt.device_signature:
+        if device_fingerprint(user_agent) != attempt.device_signature:
+            record_attempt_event(attempt, AttemptEvent.Kind.SESSION_LOCK_REFUSED, detail={"reason": reason})
+            return "refused"
     if not client_session or attempt.client_session == client_session:
-        return False
+        return "unchanged"
     previous = attempt.client_session
     attempt.client_session = client_session
     attempt.session_switch_count = (attempt.session_switch_count or 0) + 1
     attempt.save(update_fields=("client_session", "session_switch_count", "updated_at"))
     record_attempt_event(attempt, AttemptEvent.Kind.SESSION_SWITCH, detail={"reason": reason, "previous_seen": bool(previous)})
-    return True
+    return "adopted"
 
 
 def session_is_locked_by_other(attempt: ExamAttempt, client_session: str, *, ttl_seconds: int = 45) -> bool:
@@ -333,7 +386,7 @@ def session_is_locked_by_other(attempt: ExamAttempt, client_session: str, *, ttl
     return idle < ttl_seconds
 
 
-def heartbeat(attempt_id: Any, student: User, *, client_session: str = "") -> dict[str, Any]:
+def heartbeat(attempt_id: Any, student: User, *, client_session: str = "", user_agent: str = "") -> dict[str, Any]:
     """Cheap liveness ping: the client's clock is re-synchronised without the full attempt payload."""
     with transaction.atomic():
         attempt = _locked_attempt(attempt_id)
@@ -342,12 +395,16 @@ def heartbeat(attempt_id: Any, student: User, *, client_session: str = "") -> di
         attempt = finalize_expired_attempt(attempt)
         if attempt.status == ExamAttempt.Status.IN_PROGRESS:
             other_session = session_is_locked_by_other(attempt, client_session)
+            device_locked = False
             if not other_session and client_session:
-                adopt_client_session(attempt, client_session, reason="heartbeat")
+                device_locked = (
+                    adopt_client_session(attempt, client_session, reason="heartbeat", user_agent=user_agent) == "refused"
+                )
             attempt.last_activity_at = timezone.now()
             attempt.save(update_fields=("last_activity_at", "updated_at"))
         else:
             other_session = False
+            device_locked = False
         timing = attempt_timing(attempt)
         return {
             **timing,
@@ -358,11 +415,15 @@ def heartbeat(attempt_id: Any, student: User, *, client_session: str = "") -> di
             # instead of waiting for a full detail read.
             "answer_frontier": int(attempt.answer_frontier or 0),
             "session_locked_by_other": other_session,
+            # A refused device lock has to reach the student while they are still writing, not only when the
+            # teacher opens the report afterwards: this is the one call the runner makes on a timer.
+            "device_locked": device_locked,
+            "integrity": integrity_summary(attempt),
             "question_count": len(attempt_question_ids(attempt)),
         }
 
 
-def claim_session(attempt_id: Any, student: User, *, client_session: str) -> dict[str, Any]:
+def claim_session(attempt_id: Any, student: User, *, client_session: str, user_agent: str = "") -> dict[str, Any]:
     """Explicit takeover: a student pressing "continue here" moves the attempt to this tab."""
     with transaction.atomic():
         attempt = _locked_attempt(attempt_id)
@@ -371,29 +432,87 @@ def claim_session(attempt_id: Any, student: User, *, client_session: str) -> dic
         attempt = finalize_expired_attempt(attempt)
         if attempt.status != ExamAttempt.Status.IN_PROGRESS:
             raise ValidationError({"attempt": ["This exam session can no longer be changed."]})
-        adopt_client_session(attempt, client_session, reason="claimed")
-        attempt.last_activity_at = timezone.now()
-        attempt.save(update_fields=("last_activity_at", "updated_at"))
-    return {**attempt_timing(attempt), "status": attempt.status, "answer_revision": attempt.answer_revision}
+        # A refusal is committed, then raised outside the transaction. Raising from inside would roll the
+        # whole block back — including the event that tells the teacher somebody tried to continue the exam
+        # from another machine, which is the one piece of this exchange worth keeping.
+        refused = adopt_client_session(attempt, client_session, reason="claimed", user_agent=user_agent) == "refused"
+        if not refused:
+            attempt.last_activity_at = timezone.now()
+            attempt.save(update_fields=("last_activity_at", "updated_at"))
+        payload = {**attempt_timing(attempt), "status": attempt.status, "answer_revision": attempt.answer_revision}
+    if refused:
+        raise AttemptConflict(
+            "این آزمون روی دستگاهی که با آن شروع شده قفل است. برای ادامه دادن به معلم بگویید.",
+            code="device_locked",
+        )
+    return payload
 
 
-def record_client_signal(attempt_id: Any, student: User, *, kind: str, detail: dict[str, Any] | None = None) -> None:
-    """Store a browser-reported signal. The client supplies no timestamps and no verdicts."""
+# Signals the runner has always reported, and which say as much about a flaky network as about a student.
+BASELINE_SIGNALS = {
+    AttemptEvent.Kind.TAB_HIDDEN,
+    AttemptEvent.Kind.TAB_VISIBLE,
+    AttemptEvent.Kind.DISCONNECTED,
+    AttemptEvent.Kind.RECONNECTED,
+}
+# Signals that only exist because a teacher asked for clipboard and fullscreen watching.
+INTEGRITY_SIGNALS = {
+    AttemptEvent.Kind.COPY,
+    AttemptEvent.Kind.CUT,
+    AttemptEvent.Kind.PASTE,
+    AttemptEvent.Kind.FULLSCREEN_ENTER,
+    AttemptEvent.Kind.FULLSCREEN_EXIT,
+}
+
+
+def record_client_signal(
+    attempt_id: Any, student: User, *, kind: str, detail: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Store a browser-reported signal, and apply the exam's integrity rules to it.
+
+    The client supplies no timestamps and no verdicts. What it does supply is the *observation*; the decision
+    about whether an observation costs anything lives here, in `integrity_policy`, which the teacher set.
+    """
     with transaction.atomic():
         attempt = _locked_attempt(attempt_id)
         if attempt.student_id != student.id:
             raise ValidationError({"attempt": ["This exam session is not available."]})
         if attempt.status != ExamAttempt.Status.IN_PROGRESS:
-            return
-        allowed = {
-            AttemptEvent.Kind.TAB_HIDDEN,
-            AttemptEvent.Kind.TAB_VISIBLE,
-            AttemptEvent.Kind.DISCONNECTED,
-            AttemptEvent.Kind.RECONNECTED,
-        }
+            return {**integrity_summary(attempt), "status": attempt.status}
+        settings = attempt.exam.settings
+        allowed = set(BASELINE_SIGNALS)
+        if settings.integrity_records:
+            allowed |= INTEGRITY_SIGNALS
         if kind not in allowed:
             raise ValidationError({"kind": ["This signal is not recorded."]})
         record_attempt_event(attempt, kind, detail=(detail or {}) if isinstance(detail, dict) else {})
+        # The only automatic penalty in this system: a teacher-chosen budget of tab switches, counted by the
+        # server, spent means the writing window closes with the answers that are already saved.
+        limit = settings.max_tab_switches if settings.integrity_enforced else 0
+        closed = False
+        if limit and kind == AttemptEvent.Kind.TAB_HIDDEN and _tab_switch_count(attempt) >= int(limit):
+            record_attempt_event(attempt, AttemptEvent.Kind.TAB_LIMIT_REACHED, detail={"limit": int(limit)})
+            finalize_attempt_for_integrity(attempt)
+            closed = True
+        summary = {**integrity_summary(attempt), "status": attempt.status}
+        if closed:
+            # The runner has to learn from this very response that there is nothing left to answer, so it can
+            # stop the timer and move on instead of finding out on the next autosave.
+            summary["auto_submitted"] = True
+            summary["reason"] = "tab_switch_limit"
+        return summary
+
+
+def finalize_attempt_for_integrity(attempt: ExamAttempt) -> None:
+    """Close one open attempt now, grading what is already saved. Saved work is never discarded."""
+    now = timezone.now()
+    deadline = attempt_expires_at(attempt)
+    attempt.expires_at = now if deadline is None else min(deadline, now)
+    attempt.status = ExamAttempt.Status.EXPIRED
+    attempt.submitted_at = now
+    attempt.last_activity_at = now
+    attempt.save(update_fields=("expires_at", "status", "submitted_at", "last_activity_at", "updated_at"))
+    _grade_attempt(attempt, finalized_at=now)
 
 
 def close_exam_attempts(exam: Exam, *, reason: str = "exam_closed") -> int:

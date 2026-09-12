@@ -225,6 +225,10 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
     # Which answers are final. Meaningless unless the exam is paged and forbids returning, but always
     # reported so the runner does not have to guess the rule from two other fields.
     answer_frontier = serializers.IntegerField(read_only=True)
+    # The teacher's integrity rules for this exam, and what the student has already spent under them. The
+    # runner binds its listeners to this and never to a guess of its own, because "monitoring off" has to
+    # mean the browser is not watched at all — not "watched quietly, with the badge hidden".
+    integrity = serializers.SerializerMethodField()
 
     class Meta:
         model = ExamAttempt
@@ -244,8 +248,14 @@ class StudentAttemptDetailSerializer(serializers.ModelSerializer):
             "exam",
             "questions",
             "answers",
+            "integrity",
         )
         read_only_fields = fields
+
+    def get_integrity(self, attempt: ExamAttempt) -> dict:
+        from .services import integrity_summary
+
+        return integrity_summary(attempt)
 
     def get_questions(self, attempt: ExamAttempt) -> list[dict]:
         questions = getattr(attempt, "student_questions", None)
