@@ -2,6 +2,8 @@ from django.urls import path
 
 from .views import (
     ExamActionView,
+    ExamExportView,
+    ExamImportView,
     ExamQuestionImportView,
     ExamQuestionListCreateView,
     ExamQuestionReorderView,
@@ -23,4 +25,7 @@ urlpatterns = [
     path("<uuid:exam_id>/questions/", ExamQuestionListCreateView.as_view(), name="exam-question-list-create"),
     path("<uuid:exam_id>/questions/reorder/", ExamQuestionReorderView.as_view(), name="exam-question-reorder"),
     path("<uuid:exam_id>/questions/import/", ExamQuestionImportView.as_view(), name="exam-question-import"),
+    # Backup and restore of a paper, as one file the teacher can keep.
+    path("<uuid:exam_id>/export/", ExamExportView.as_view(), name="exam-export"),
+    path("import/", ExamImportView.as_view(), name="exam-import"),
 ]

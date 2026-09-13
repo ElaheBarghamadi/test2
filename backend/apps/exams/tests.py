@@ -1341,3 +1341,99 @@ class QuestionDuplicateTests(TestCase):
         row = Question.objects.get(pk=question["id"])
         self.assertEqual(migration._identity(row), question_content_hash(row))
         self.assertEqual(row.content_hash, question_content_hash(row), "the write path stored the same value")
+
+
+class ExamBackupApiTests(TeacherExamApiTests):
+    """A paper as a file the teacher can keep, and the same file read back into a new draft.
+
+    The two directions have to be tested together: an export nobody can import is a dump, and an import that
+    accepts anything a browser was told to send is a hole.
+    """
+
+    def paper_with_questions(self) -> Exam:
+        exam = self.create_exam()
+        self.client.post(
+            f"/api/v1/exams/{exam.id}/questions/",
+            {
+                "type": "multiple_choice",
+                "text": "Which unit is power?",
+                "marks": 2,
+                "difficulty": "hard",
+                "tags": ["units"],
+                "options": [{"text": "Watt", "is_correct": True}, {"text": "Joule", "is_correct": False}],
+            },
+            format="json",
+        )
+        self.client.post(
+            f"/api/v1/exams/{exam.id}/questions/",
+            {"type": "written", "text": "Define power in one sentence.", "marks": 3, "options": []},
+            format="json",
+        )
+        return Exam.objects.get(pk=exam.id)
+
+    def test_export_is_the_paper_itself_and_nothing_about_a_student(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.paper_with_questions()
+        exported = self.client.get(f"/api/v1/exams/{exam.id}/export/")
+        self.assertEqual(exported.status_code, 200)
+        self.assertEqual(exported.data["kind"], "examora.exam.v1")
+        self.assertEqual([question["text"] for question in exported.data["questions"]], ["Which unit is power?", "Define power in one sentence."])
+        self.assertIn("attachment", exported["Content-Disposition"])
+        body = str(exported.data)
+        # A backup of a paper is not a copy of a class. These are the key names a student's work travels
+        # under, and the counts are allowed to say that attempts exist without ever saying whose or what.
+        for forbidden in ("written_text", "selected_option_ids", "your_answer", "student", "attempt_id"):
+            self.assertNotIn(forbidden, body, f"a paper backup must not carry {forbidden} data")
+
+    def test_import_rebuilds_a_draft_the_importer_owns(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.paper_with_questions()
+        bundle = self.client.get(f"/api/v1/exams/{exam.id}/export/").data
+
+        self.authenticate(self.other_teacher)
+        imported = self.client.post("/api/v1/exams/import/", bundle, format="json")
+        self.assertEqual(imported.status_code, 201, imported.data)
+        created = Exam.objects.get(pk=imported.data["id"])
+        self.assertEqual(created.status, Exam.Status.DRAFT, "a file must not open a sitting by itself")
+        self.assertIsNone(created.start_at)
+        self.assertEqual(created.teacher_id, self.other_teacher.id, "the importer owns what they imported")
+        self.assertEqual(created.questions.count(), 2)
+        self.assertEqual(float(created.total_marks), 5.0, "the marks are recomputed, not trusted from the file")
+        self.assertEqual(imported.data["imported"], {"questions": 2, "settings_imported": True})
+        # The key survives, because it is the teacher's own material, and the schedule does not.
+        restored = created.questions.order_by("order").first()
+        self.assertTrue(restored.options.get(text="Watt").is_correct)
+        self.assertEqual(restored.difficulty, "hard")
+
+    def test_the_settings_come_back_as_they_went(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.paper_with_questions()
+        self.client.patch(
+            f"/api/v1/exams/{exam.id}/",
+            {"settings": {"result_detail": "own_answers_with_feedback", "integrity_policy": "enforce", "lock_to_one_device": True}},
+            format="json",
+        )
+        bundle = self.client.get(f"/api/v1/exams/{exam.id}/export/").data
+        imported = self.client.post("/api/v1/exams/import/", bundle, format="json")
+        settings = imported.data["settings"]
+        self.assertEqual(settings["result_detail"], "own_answers_with_feedback")
+        self.assertEqual((settings["integrity_policy"], settings["lock_to_one_device"]), ("enforce", True))
+
+    def test_a_file_that_is_not_a_backup_is_refused(self) -> None:
+        self.authenticate(self.teacher)
+        empty = self.client.post("/api/v1/exams/import/", {}, format="json")
+        self.assertEqual(empty.status_code, 400)
+        self.assertIn("bundle", empty.data["detail"])
+        no_questions = self.client.post(
+            "/api/v1/exams/import/", {"kind": "examora.exam.v1", "exam": {"title": "X"}, "questions": []}, format="json"
+        )
+        self.assertEqual(no_questions.status_code, 400)
+        self.assertIn("questions", no_questions.data["detail"])
+
+    def test_the_backup_family_respects_who_may_read_a_paper(self) -> None:
+        self.authenticate(self.teacher)
+        exam = self.paper_with_questions()
+        self.authenticate(self.student)
+        self.assertEqual(self.client.get(f"/api/v1/exams/{exam.id}/export/").status_code, 403)
+        self.authenticate(self.other_teacher)
+        self.assertEqual(self.client.get(f"/api/v1/exams/{exam.id}/export/").status_code, 404)

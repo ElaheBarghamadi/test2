@@ -36,14 +36,32 @@ export function ExamCreator({ examId }: { examId?: string }) {
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<ExamDraft>(emptyDraft);
   const [saving, setSaving] = useState<"draft" | "publish" | null>(null);
+  /**
+   * Whether the screen holds work the server does not have.
+   *
+   * Set by the edit helpers rather than computed from a snapshot of the draft: a signature of a form this
+   * large changes for reasons unrelated to the teacher's intent (key order, a date the picker rewrote), and
+   * an indicator that lies about unsaved work is worse than no indicator.
+   */
+  const [dirty, setDirty] = useState(false);
+  const [savedAt, setSavedAt] = useState<Date | null>(null);
   const existing = examId ? exams.find((exam) => exam.id === examId) : undefined;
   useEffect(() => { if (examId) void loadExam(examId); }, [examId, loadExam]);
   useEffect(() => { if (existing) setDraft(asDraft(existing)); }, [existing?.id]);
   const totalMarks = useMemo(() => draft.questions.reduce((sum, question) => sum + question.points, 0), [draft.questions]);
   const validation = useMemo(() => validateDraft(draft), [draft]);
-  const update = <K extends keyof ExamDraft>(key: K, value: ExamDraft[K]) => setDraft((current) => ({ ...current, [key]: value }));
-  const updateSettings = (patch: Partial<ExamSettings>) => setDraft((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
-  const updateSchedule = (patch: Partial<ExamDraft["schedule"]>) => setDraft((current) => ({ ...current, schedule: { ...current.schedule, ...patch } }));
+  const update = <K extends keyof ExamDraft>(key: K, value: ExamDraft[K]) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+    setDirty(true);
+  };
+  const updateSettings = (patch: Partial<ExamSettings>) => {
+    setDraft((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
+    setDirty(true);
+  };
+  const updateSchedule = (patch: Partial<ExamDraft["schedule"]>) => {
+    setDraft((current) => ({ ...current, schedule: { ...current.schedule, ...patch } }));
+    setDirty(true);
+  };
   function validateStep(index: number) { return validation.filter((item) => item.step === index); }
   function goTo(target: number) { setStep(Math.max(0, Math.min(steps.length - 1, target))); }
   async function persist(mode: "draft" | "publish") {
@@ -63,6 +81,8 @@ export function ExamCreator({ examId }: { examId?: string }) {
       // ids of questions that already exist on the server, and the next save creates a second copy of every
       // one of them — and deletes the answered originals.
       setDraft(asDraft(saved));
+      setDirty(false);
+      setSavedAt(new Date());
       toast({
         title: mode === "publish" ? "آزمون زمان‌بندی و منتشر شد" : "پیش‌نویس ذخیره شد",
         description: mode === "publish" ? "دانش‌آموزان در بازهٔ تعیین‌شده به آزمون دسترسی خواهند داشت." : "می‌توانید بعداً این آزمون را تکمیل کنید.",
@@ -74,9 +94,43 @@ export function ExamCreator({ examId }: { examId?: string }) {
       else if (!examId) router.replace(`/teacher/exams/${saved.id}/edit`);
     } catch { /* Store exposes a recoverable error state below. */ } finally { setSaving(null); }
   }
+  // Two things an editor of a 40-question paper should never have to do by hand.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  useEffect(() => {
+    // Ctrl/Cmd+S is the gesture people already reach for; sending it to this screen's own save keeps it from
+    // meaning "save this page as HTML", which is what the browser would otherwise do.
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        if (!saving) void persist("draft");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty, saving]);
+
   if (examId && !existing && (loading || !initialized || detailLoadingId === examId)) return <BuilderSkeleton/>;
   if (examId && initialized && !existing) return <Card className="p-8 text-center"><h2 className="font-black">آزمون موردنظر پیدا نشد</h2><p className="mt-2 text-sm text-muted-foreground">ممکن است آزمون بایگانی یا حذف شده باشد.</p><Button className="mt-5" onClick={() => router.push("/teacher/exams")}>بازگشت به آزمون‌ها</Button></Card>;
-  return <div className="grid gap-6 xl:grid-cols-[250px_minmax(0,1fr)]"><BuilderStepper step={step} issues={validation} onStep={goTo}/><Card className="min-h-[600px]"><CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="section-label">{examId ? "ویرایش آزمون" : "آزمون جدید"} · گام {toPersianNumber(step + 1)} از {toPersianNumber(steps.length)}</p><CardTitle className="mt-1 text-xl">{steps[step].title}</CardTitle><CardDescription className="mt-1">{steps[step].description}</CardDescription></div>{step < 4 && <Button variant="outline" size="sm" onClick={() => void persist("draft")} disabled={saving !== null}><Save className="h-3.5 w-3.5"/>{examId ? "ذخیرهٔ تغییرات" : "ذخیره پیش‌نویس"}</Button>}</div></CardHeader><CardContent className="p-5 sm:p-6"><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} transition={{ duration: .18 }}>{step === 0 && <BasicInformation draft={draft} update={update} errors={validateStep(0)}/>} {step === 1 && <ExamSettingsForm settings={draft.settings} totalMarks={totalMarks} onChange={updateSettings}/>} {step === 2 && <div className="space-y-3">
+  return <div className="grid gap-6 xl:grid-cols-[250px_minmax(0,1fr)]"><BuilderStepper step={step} issues={validation} onStep={goTo}/><Card className="min-h-[600px]"><CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="section-label">{examId ? "ویرایش آزمون" : "آزمون جدید"} · گام {toPersianNumber(step + 1)} از {toPersianNumber(steps.length)}</p><CardTitle className="mt-1 text-xl">{steps[step].title}</CardTitle><CardDescription className="mt-1">{steps[step].description}</CardDescription></div><div className="flex flex-wrap items-center justify-end gap-2">
+                <span className={cn("text-[11px] font-bold", dirty ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground")}>
+                  {saving === "draft" ? "در حال ذخیره…" : dirty ? "تغییر ذخیره‌نشده دارید" : savedAt ? `ذخیره شد · ${savedAt.toLocaleTimeString("fa-IR", { hour: "2-digit", minute: "2-digit" })}` : "همه‌چیز ذخیره است"}
+                </span>
+                <Button variant={dirty ? "default" : "outline"} size="sm" onClick={() => void persist("draft")} disabled={saving !== null}>
+                  <Save className="h-3.5 w-3.5"/>
+                  {examId ? "ذخیرهٔ تغییرات" : "ذخیره پیش‌نویس"}
+                  <kbd className="mr-1 hidden rounded border bg-background/60 px-1 text-[9px] font-bold sm:inline">Ctrl S</kbd>
+                </Button>
+              </div></div></CardHeader><CardContent className="p-5 sm:p-6"><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} transition={{ duration: .18 }}>{step === 0 && <BasicInformation draft={draft} update={update} errors={validateStep(0)}/>} {step === 1 && <ExamSettingsForm settings={draft.settings} totalMarks={totalMarks} onChange={updateSettings}/>} {step === 2 && <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-muted/35 p-3">
                 <p className="min-w-0 flex-1 text-[11px] leading-5 text-muted-foreground">{examId ? "سؤال‌های آزمون‌های قبلی در بانک‌اند؛ کپی‌شان کنید یا همین‌جا یکی تازه بسازید. با بازگشت، این صفحه از سرور تازه می‌شود." : "برای افزودن از بانک، اول پیش‌نویس را ذخیره کنید تا آزمون شناسه بگیرد."}</p>
                 {examId ? <Button asChild variant="outline" size="sm"><Link href={`/teacher/questions?exam=${examId}`}><ListChecks className="h-3.5 w-3.5"/>افزودن از بانک</Link></Button> : <Button variant="outline" size="sm" onClick={() => void persist("draft")} disabled={saving !== null}><Save className="h-3.5 w-3.5"/>{saving === "draft" ? "در حال ذخیره…" : "ذخیرهٔ پیش‌نویس برای افزودن از بانک"}</Button>}

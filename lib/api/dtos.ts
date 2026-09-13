@@ -280,6 +280,59 @@ export interface ApiManualGradeResponseDto {
   result: ApiTeacherResultDto;
 }
 
+/** One day of a console series. Quiet days are sent as zero so a chart never has holes. */
+export interface ApiAdminSeriesPointDto { date: string; count: number }
+
+export interface ApiAdminStatsDto {
+  scope: { kind: "platform" | "school"; school: { id: string; name: string } | null };
+  generated_at: string;
+  totals: {
+    users: number; users_by_role: Record<string, number>; active_users: number; inactive_users: number;
+    schools: number; exams: number; exams_by_status: Record<string, number>; questions: number;
+    bank_questions: number; attempts: number; attempts_by_status: Record<string, number>; answers: number;
+    results_published: number; results_awaiting_grading: number; notifications: number; unread_notifications: number;
+  };
+  grading: { written_ungraded: number; teacher_marked: number; exams_awaiting: number; share_of_results: number };
+  scores: { results_scored: number; average_percentage: number; pass_rate: number; marks_awarded: number };
+  activity: {
+    days: number;
+    submissions: ApiAdminSeriesPointDto[]; starts: ApiAdminSeriesPointDto[]; exams_created: ApiAdminSeriesPointDto[];
+    signups: ApiAdminSeriesPointDto[]; signals: ApiAdminSeriesPointDto[];
+    live_now: { attempts_in_progress: number; students_writing: number; exams_live: number; exams_overdue: number };
+  };
+  top: {
+    teachers: Array<{ id: string; name: string; exams: number; attempts: number }>;
+    schools: Array<{ id: string; name: string; users: number; exams: number }>;
+  };
+  health: {
+    database: { engine: string; size_bytes: number | null };
+    debug: boolean;
+    django: string;
+    signals_by_kind: Record<string, number>;
+  };
+}
+
+export interface ApiAdminDatabaseDto {
+  scope: { kind: "platform" | "school"; school: string | null };
+  tables: Array<{ key: string; label: string; rows: number }>;
+  issues: Record<string, number>;
+  repairable: number;
+  size_bytes: number | null;
+  engine: string;
+}
+
+export interface ApiAdminRepairDto { repaired: { results: number; totals: number; content_hashes: number }; at: string }
+
+export interface ApiAdminLiveAttemptDto {
+  id: string; exam: { id: string; title: string }; student: { id: string; name: string; email: string };
+  attempt_number: number; status: ApiAttemptStatus; started_at: string | null; last_activity_at: string;
+  remaining_seconds: number | null; device_locked: boolean; session_switches: number; tab_switches: number;
+  score: number | null;
+}
+
+/** A paper as one file: what the teacher can keep, and what `/exams/import/` reads back. */
+export interface ApiExamBundleDto { kind: string; exported_at: string; exam: ApiTeacherExamDto; questions: ApiQuestionDto[] }
+
 export interface ApiSchoolDto {
   id: string; name: string; city: string; join_code: string; is_active: boolean;
   user_count: number; exam_count: number; created_at: string; updated_at: string;

@@ -10,6 +10,7 @@ const teacherAttempt = vi.fn();
 const gradingQuestion = vi.fn();
 const saveQuestionGrades = vi.fn();
 const gradeAnswer = vi.fn();
+const autoMarks = vi.fn();
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), replace, back: vi.fn(), refresh: vi.fn() }) }));
 vi.mock("@/lib/api/results", () => ({
@@ -21,6 +22,8 @@ vi.mock("@/lib/api/results", () => ({
     saveQuestionGrades: (...args: unknown[]) => saveQuestionGrades(...args),
     gradeAnswer: (...args: unknown[]) => gradeAnswer(...args),
     updateFeedback: vi.fn().mockResolvedValue({}),
+    autoMarks: (...args: unknown[]) => autoMarks(...args),
+    exportCsv: vi.fn().mockResolvedValue("دانش‌آموز,نمره\n"),
   },
 }));
 
@@ -85,6 +88,7 @@ beforeEach(() => {
   gradingQuestion.mockReset().mockResolvedValue(writtenPage);
   saveQuestionGrades.mockReset().mockResolvedValue({ saved: 2, results: [], questions: board.questions, progress: { total: 4, graded: 4, percent: 100 }, rows: writtenPage.rows.map((row) => ({ ...row, manual_score: "3", verdict: "manual" })) });
   gradeAnswer.mockReset().mockResolvedValue({});
+  autoMarks.mockReset().mockResolvedValue({ confirmed: 2, zeroed: 1, left_for_a_human: 1, attempts: 2, results: 2, progress: { total: 4, graded: 4, percent: 100 }, questions: [] });
 });
 
 async function openDesk(mode: "sheet" | "question" = "sheet") {
@@ -110,9 +114,14 @@ describe("ExamMarkingWorkspace", () => {
     expect(within(keyed).getByText("خودکار · ۲ از ۲ نمره")).toBeTruthy();
     // The keyed row is scored, not sealed: the pen is here too, so a wrong key can be corrected in place.
     expect(within(keyed).getByLabelText("نمرهٔ شما")).toBeTruthy();
-    // …and it is empty, because the key's number stands unless the teacher writes over it.
-    expect((within(keyed).getByLabelText("نمرهٔ شما") as HTMLInputElement).value).toBe("");
-    expect(within(keyed).getByText(/کلید این سؤال را نمره داده است/)).toBeTruthy();
+    // The box opens with the number the key awarded — readable, editable, and not a decision yet. The id is
+    // the desk's own handle: it is what "jump to the next mark" focuses.
+    // The pen is present and writable on a keyed row; what the box is seeded with is pinned in
+    // "the desk's bulk actions" below, where the sheet is read after the desk has settled.
+    const markBox = keyed.querySelector("#mark-q-keyed") as HTMLInputElement;
+    expect(markBox.disabled).toBe(false);
+    expect(markBox.readOnly).toBe(false);
+    expect(within(keyed).getByText(/این عدد را کلید داده است/)).toBeTruthy();
 
     const written = (await screen.findByText("توان را تعریف کنید و واحدش را بنویسید.")).closest("[data-answer-id]") as HTMLElement;
     expect(within(written).getByText("نیازمند نمرهٔ شما")).toBeTruthy();
@@ -126,7 +135,7 @@ describe("ExamMarkingWorkspace", () => {
     const keyed = (await screen.findByText("کدام‌یک واحد توان است؟")).closest("[data-answer-id]") as HTMLElement;
     fireEvent.change(within(keyed).getByLabelText("نمرهٔ شما"), { target: { value: "1" } });
     fireEvent.change(within(keyed).getByLabelText("بازخورد این سؤال"), { target: { value: "گزینهٔ درست ناقص بود." } });
-    fireEvent.click(within(keyed).getByRole("button", { name: "ذخیره" }));
+    fireEvent.click(within(keyed).getByRole("button", { name: "ذخیرهٔ نمره" }));
     await waitFor(() =>
       expect(gradeAnswer).toHaveBeenCalledWith("attempt-1", "q-keyed", { manual_score: 1, feedback: "گزینهٔ درست ناقص بود." }),
     );
@@ -165,7 +174,7 @@ describe("ExamMarkingWorkspace", () => {
     await openDesk();
     const written = (await screen.findByText("توان را تعریف کنید و واحدش را بنویسید.")).closest("[data-answer-id]") as HTMLElement;
     fireEvent.change(within(written).getByLabelText("نمرهٔ شما"), { target: { value: "3.5" } });
-    fireEvent.click(within(written).getByRole("button", { name: "ذخیره" }));
+    fireEvent.click(within(written).getByRole("button", { name: "ذخیرهٔ نمره" }));
     await waitFor(() => expect(gradeAnswer).toHaveBeenCalledWith("attempt-1", "q-written", { manual_score: 3.5, feedback: "" }));
     await waitFor(() => expect(gradingBoard).toHaveBeenCalledTimes(2));
   });
@@ -174,7 +183,7 @@ describe("ExamMarkingWorkspace", () => {
     await openDesk();
     const written = (await screen.findByText("توان را تعریف کنید و واحدش را بنویسید.")).closest("[data-answer-id]") as HTMLElement;
     fireEvent.change(within(written).getByLabelText("نمرهٔ شما"), { target: { value: "9" } });
-    fireEvent.click(within(written).getByRole("button", { name: "ذخیره" }));
+    fireEvent.click(within(written).getByRole("button", { name: "ذخیرهٔ نمره" }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(gradeAnswer).not.toHaveBeenCalled();
   });
@@ -268,5 +277,39 @@ describe("what the marking sheet says about monitoring", () => {
     expect(await screen.findByText(/^مراقبت از تقلب:/));
     expect(document.body.textContent).toContain("خاموش است");
     expect(document.body.textContent).toContain("۰ بار بیرون‌رفتن از تب");
+  });
+});
+
+describe("the desk's bulk actions", () => {
+  /** The box opens with the number the exam already awarded, so a mark is edited rather than invented. */
+  it("seeds a keyed row with the mark the key awarded", async () => {
+    await openDesk("sheet");
+    const keyed = (await screen.findByText("کدام‌یک واحد توان است؟")).closest("[data-answer-id]") as HTMLElement;
+    // `mark-{question_id}` is the id the "jump to the next mark" control focuses, so it is the honest handle.
+    const mark = keyed.querySelector("#mark-q-keyed") as HTMLInputElement;
+    expect(mark.value).toBe("2");
+    expect(mark.disabled).toBe(false);
+    expect(mark.readOnly).toBe(false);
+    // A keyed row the teacher has not touched is not a change, so no save-all is offered.
+    expect(screen.queryByRole("button", { name: /ذخیرهٔ ۱ تغییر/ })).toBeNull();
+  });
+
+  it("applies the exam's own verdicts in one action and reloads the desk", async () => {
+    await openDesk("sheet");
+    fireEvent.click(await screen.findByRole("button", { name: /اعمال نمره‌های خودکار/ }));
+    await waitFor(() => expect(autoMarks).toHaveBeenCalledWith("exam-1", { confirm_key: true, zero_unanswered: true }));
+    await waitFor(() => expect(gradingBoard).toHaveBeenCalledTimes(2));
+    // The panel the teacher is standing on has to re-read what the batch wrote, not only the rail beside it.
+    await waitFor(() => expect(teacherAttempt).toHaveBeenCalledTimes(2));
+  });
+
+  it("counts only the rows the teacher actually changed, and saves exactly those", async () => {
+    await openDesk("sheet");
+    const keyed = (await screen.findByText("کدام‌یک واحد توان است؟")).closest("[data-answer-id]") as HTMLElement;
+    expect(screen.queryByRole("button", { name: /ذخیرهٔ \d+ تغییر/ })).toBeNull();
+    fireEvent.change(within(keyed).getByLabelText("نمرهٔ شما"), { target: { value: "1" } });
+    const save = await screen.findByRole("button", { name: /ذخیرهٔ ۱ تغییر/ });
+    fireEvent.click(save);
+    await waitFor(() => expect(gradeAnswer).toHaveBeenCalledWith("attempt-1", "q-keyed", { manual_score: 1, feedback: "" }));
   });
 });

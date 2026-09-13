@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .views import (
+    TeacherExamAutoMarksView,
+    TeacherExamExportView,
     TeacherAttemptDetailView,
     TeacherGradingQueueView,
     TeacherExamGradingBoardView,
@@ -21,6 +23,9 @@ urlpatterns = [
     path("teacher/exams/<uuid:exam_id>/", TeacherExamResultsView.as_view(), name="teacher-exam-results"),
     path("teacher/exams/<uuid:exam_id>/publish/", TeacherPublishResultsView.as_view(), name="teacher-publish-results"),
     path("teacher/exams/<uuid:exam_id>/grading/", TeacherExamGradingBoardView.as_view(), name="teacher-grading-board"),
+    # The desk's bulk actions: a spreadsheet of the paper, and "fill in what the exam already knows".
+    path("teacher/exams/<uuid:exam_id>/export/", TeacherExamExportView.as_view(), name="teacher-exam-export"),
+    path("teacher/exams/<uuid:exam_id>/auto-marks/", TeacherExamAutoMarksView.as_view(), name="teacher-exam-auto-marks"),
     path(
         "teacher/exams/<uuid:exam_id>/grading/<uuid:question_id>/",
         TeacherExamQuestionGradingView.as_view(),

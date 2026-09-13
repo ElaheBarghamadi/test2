@@ -1,5 +1,5 @@
 import type { Role } from "@/lib/types/domain";
-import { BarChart3, BookOpenCheck, Building2, ClipboardList, FileText, GraduationCap, Home, LayoutDashboard, ListChecks, School, Settings2, Users, UserRoundCog } from "lucide-react";
+import { BarChart3, BookOpenCheck, Building2, ClipboardList, FileText, GraduationCap, Home, KeyRound, LayoutDashboard, ListChecks, School, Settings2, UserRoundCog, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 export interface NavItem { label: string; href: string; icon: LucideIcon; }
 export const roleNavigation: Record<Role, NavItem[]> = {
@@ -20,6 +20,8 @@ export const roleNavigation: Record<Role, NavItem[]> = {
     { label: "کاربران", href: "/admin/users", icon: Users },
     { label: "مدارس", href: "/admin/schools", icon: School },
     { label: "آزمون‌ها", href: "/admin/exams", icon: FileText },
+    { label: "آمار و داده‌ها", href: "/admin/stats", icon: BarChart3 },
+    { label: "دسترسی و نشست‌ها", href: "/admin/access", icon: KeyRound },
   ],
   // The same console, without the network-wide surfaces a school administrator may not reach: schools are
   // read-only for them and creating one is refused by the API, so it is not offered here either.
@@ -27,6 +29,9 @@ export const roleNavigation: Record<Role, NavItem[]> = {
     { label: "نمای کلی", href: "/admin/dashboard", icon: LayoutDashboard },
     { label: "کاربران مدرسه", href: "/admin/users", icon: Users },
     { label: "آزمون‌های مدرسه", href: "/admin/exams", icon: FileText },
+    // The same figures, one school wide; the actions that change other people's data stay with the platform.
+    { label: "آمار مدرسه", href: "/admin/stats", icon: BarChart3 },
+    { label: "دسترسی و نشست‌ها", href: "/admin/access", icon: KeyRound },
   ],
 };
 export const roleLabel: Record<Role, string> = { student: "دانش‌آموز", teacher: "آموزگار", admin: "مدیر سامانه", school_admin: "مدیر مدرسه" };

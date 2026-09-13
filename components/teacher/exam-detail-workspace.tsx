@@ -7,6 +7,7 @@ import type { Exam } from "@/lib/types/domain";
 import { INTEGRITY_POLICY_LABELS, rulesFromSettings } from "@/lib/exam/integrity";
 import { RESULT_DETAIL_LABELS, resolveResultDetail } from "@/lib/exam/result-detail";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
+import { ExamDataPanel } from "@/components/teacher/exam-data-panel";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -117,6 +118,8 @@ export function TeacherExamDetailWorkspace({ examId }: { examId: string }) {
       {exam.status === "archived" ? <Button variant="outline" onClick={() => void restore()}><RotateCcw className="h-4 w-4"/>بازیابی آزمون</Button> : <Button variant="outline" className="text-destructive hover:text-destructive" onClick={() => setArchiveOpen(true)}><Archive className="h-4 w-4"/>بایگانی آزمون</Button>}
       {["active", "completed"].includes(exam.status) && <Button asChild variant="outline"><Link href="/teacher/results"><UsersRound className="h-4 w-4"/>مشاهده نتایج</Link></Button>}
     </CardContent></Card>
+
+    <ExamDataPanel examId={exam.id} examTitle={exam.title} questionCount={exam.questions.length}/>
 
     <Card><CardHeader><CardTitle>تنظیمات آزمون</CardTitle></CardHeader><CardContent className="space-y-3 text-sm"><div className="grid gap-2 text-xs text-muted-foreground">{[
       { label: "چیدمان سؤال‌ها", value: exam.settings.questionLayout === "single_page" ? "همه سؤال‌ها در یک صفحه" : "صفحه‌به‌صفحه" },

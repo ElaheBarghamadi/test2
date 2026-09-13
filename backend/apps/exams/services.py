@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from datetime import timedelta
@@ -537,3 +539,118 @@ def resequence_questions(exam_id) -> None:
     exam.questions.update(order=F("order") + max_order + len(question_ids) + 1)
     for order, question_id in enumerate(question_ids, start=1):
         Question.objects.filter(pk=question_id, exam=exam).update(order=order)
+
+
+# ---------------------------------------------------------------------------
+# Portable backup: a paper as one JSON file, and the same file read back.
+# ---------------------------------------------------------------------------
+
+BUNDLE_KIND = "examora.exam.v1"
+# The settings an imported paper carries with it. `id`-like and derived values are never read from a file:
+# totals, counts and timestamps are the server's to compute, and trusting them from a bundle would let a
+# crafted file state a marks total that its own questions do not add up to.
+IMPORTABLE_SETTINGS = (
+    "allow_previous_questions",
+    "question_layout",
+    "randomize_questions",
+    "randomize_options",
+    "allow_unanswered",
+    "result_visibility",
+    "show_correct_answers",
+    "result_detail",
+    "max_attempts",
+    "passing_percentage",
+    "integrity_policy",
+    "max_tab_switches",
+    "block_copy_paste",
+    "require_fullscreen",
+    "lock_to_one_device",
+)
+
+
+def export_exam_bundle(exam: Exam) -> dict:
+    """One exam, its settings and its questions, as the file the teacher can keep or move.
+
+    Student answers are deliberately absent: a backup of a *paper* is not a copy of anybody's result, and the
+    answer sheets are a separate, permissioned export (`/results/.../export/`) precisely because they carry
+    personal data with a different life span.
+    """
+    from .serializers import TeacherExamSerializer, TeacherQuestionSerializer
+
+    return {
+        "kind": BUNDLE_KIND,
+        "exported_at": timezone.now().isoformat(),
+        "exam": TeacherExamSerializer(exam).data,
+        "questions": [TeacherQuestionSerializer(question).data for question in exam.questions.prefetch_related("options", "tags").order_by("order")],
+    }
+
+
+def import_exam_bundle(teacher: User, payload: dict) -> tuple[Exam, dict]:
+    """Rebuild a paper from its own export, owned by whoever imported it.
+
+    The importer always owns the result, whatever the file says about whose exam it used to be: a JSON
+    document is not a permission. Question identity is checked the same way the builder checks it, so
+    importing the same file twice into one account does not double the bank.
+    """
+    from .content_identity import question_content_hash
+
+    exam_data = payload.get("exam") if isinstance(payload, dict) else None
+    if not isinstance(exam_data, dict):
+        raise ValidationError({"bundle": ["این فایل، فایل پشتیبان یک آزمون نیست."]})
+    questions = payload.get("questions")
+    if not isinstance(questions, list) or not questions:
+        raise ValidationError({"questions": ["فایل پشتیبان هیچ سؤالی ندارد."]})
+
+    with transaction.atomic():
+        exam = Exam.objects.create(
+            teacher=teacher,
+            title=str(exam_data.get("title") or "آزمون واردشده")[:200],
+            description=str(exam_data.get("description") or "")[:2000],
+            subject=str(exam_data.get("subject") or "")[:150],
+            grade=str(exam_data.get("grade") or "")[:40],
+            class_name=str(exam_data.get("class_name") or "")[:40],
+            instructions=str(exam_data.get("instructions") or "")[:2000],
+            duration_minutes=int(exam_data.get("duration_minutes") or 45),
+            # A schedule is never imported: a file from last term must not silently be "open" today, so the
+            # teacher sets the window when they mean to publish.
+            status=Exam.Status.DRAFT,
+            start_at=None,
+            end_at=None,
+        )
+        settings_payload = exam_data.get("settings") if isinstance(exam_data.get("settings"), dict) else {}
+        for field in IMPORTABLE_SETTINGS:
+            if field in settings_payload:
+                setattr(exam.settings, field, settings_payload[field])
+        exam.settings.full_clean()
+        exam.settings.save()
+
+        created = 0
+        for item in questions[:500]:
+            if not isinstance(item, dict) or not str(item.get("text") or "").strip():
+                continue
+            question = Question.objects.create(
+                exam=exam,
+                order=created + 1,
+                type=item.get("type") or Question.Type.MULTIPLE_CHOICE,
+                text=str(item["text"]).strip()[:4000],
+                instructions=str(item.get("instructions") or "")[:2000],
+                marks=Decimal(str(item.get("marks") or "1")),
+                configuration=item.get("configuration") if isinstance(item.get("configuration"), dict) else {},
+                explanation=str(item.get("explanation") or "")[:4000],
+                difficulty=item.get("difficulty") or Question.Difficulty.MEDIUM,
+                status=Question.Status.READY,
+            )
+            for option_index, option in enumerate((item.get("options") or [])[:20]):
+                if not isinstance(option, dict) or not str(option.get("text") or "").strip():
+                    continue
+                QuestionOption.objects.create(
+                    question=question,
+                    order=option_index + 1,
+                    text=str(option["text"]).strip()[:1000],
+                    is_correct=bool(option.get("is_correct")),
+                )
+            question.content_hash = question_content_hash(question)
+            question.save(update_fields=("content_hash", "updated_at"))
+            created += 1
+        refresh_total_marks(exam)
+    return exam, {"questions": created, "settings_imported": bool(settings_payload)}

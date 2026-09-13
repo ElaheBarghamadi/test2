@@ -1840,3 +1840,119 @@ class ExamIntegrityApiTests(StudentExamApiTests):
         kinds = [event["kind"] for event in board["session_signals"]]
         self.assertIn("paste", kinds)
         self.assertIn("tab_hidden", kinds)
+
+
+class AutoMarksAndExportApiTests(CohortGradingApiTests):
+    """The desk's bulk actions: confirm what the exam already decided, and never grade an essay by batch.
+
+    `finalize` in the class above always writes both answers; these tests need sheets with a blank in them,
+    which is exactly the case where a bulk action is useful (zero the empty rows) and where it is dangerous
+    (zero a page of prose nobody has read yet).
+    """
+
+    def submit_sheet(self, student: User, *, option: QuestionOption | None = None, text: str | None = None) -> ExamAttempt:
+        client = self.client_for(student)
+        started = client.post(f"/api/v1/student/exams/{self.exam.id}/start/")
+        self.assertEqual(started.status_code, 201)
+        attempt_id = started.data["id"]
+        if option is not None:
+            client.patch(
+                f"/api/v1/student/attempts/{attempt_id}/answers/{self.keyed.id}/",
+                {"selected_option_ids": [str(option.id)]},
+                format="json",
+            )
+        if text is not None:
+            client.patch(
+                f"/api/v1/student/attempts/{attempt_id}/answers/{self.written.id}/",
+                {"text": text},
+                format="json",
+            )
+        self.assertEqual(client.post(f"/api/v1/student/attempts/{attempt_id}/submit/").status_code, 200)
+        return ExamAttempt.objects.get(pk=attempt_id)
+
+    def test_confirming_the_key_leaves_every_score_where_it_was(self) -> None:
+        from apps.results.models import ExamResult
+
+        right = self.submit_sheet(self.student, option=self.right_option, text="Movement of particles.")
+        wrong = self.submit_sheet(self.second_student, option=self.wrong_option, text="A shorter answer.")
+        before = {str(attempt.id): ExamResult.objects.get(attempt=attempt).score for attempt in (right, wrong)}
+
+        done = self.teacher_client.post(
+            f"/api/v1/results/teacher/exams/{self.exam.id}/auto-marks/", {"confirm_key": True}, format="json"
+        )
+        self.assertEqual(done.status_code, 200, done.data)
+        # Two keyed rows get the teacher's name on them; the two essays still need a human.
+        self.assertEqual(done.data["confirmed"], 2)
+        self.assertEqual(done.data["left_for_a_human"], 2)
+        self.assertEqual(done.data["zeroed"], 0)
+        for attempt in (right, wrong):
+            result = ExamResult.objects.get(attempt=attempt)
+            self.assertEqual(result.score, before[str(attempt.id)], "confirming must not move a number")
+
+        keyed_rows = self.teacher_client.get(self.question_url(self.keyed)).data["rows"]
+        self.assertTrue(all(row["manual_score"] is not None for row in keyed_rows), "each keyed row is now an ordinary editable mark")
+
+    def test_a_bulk_action_never_grades_an_essay_the_teacher_has_not_read(self) -> None:
+        attempt = self.submit_sheet(self.student, option=self.right_option, text="Diffusion is the net movement of particles.")
+        done = self.teacher_client.post(f"/api/v1/results/teacher/exams/{self.exam.id}/auto-marks/", {}, format="json")
+        self.assertEqual(done.status_code, 200)
+        self.assertEqual(done.data["left_for_a_human"], 1)
+        answer = StudentAnswer.objects.get(attempt=attempt, question=self.written)
+        self.assertIsNone(answer.manual_score, "an answered written row stays pending unless the teacher zeroes it on purpose")
+        result = ExamResult.objects.get(attempt=attempt)
+        self.assertEqual(result.pending_manual_grading_count, 1)
+
+    def test_zeroing_the_blank_rows_is_explicit_and_clears_the_queue(self) -> None:
+        from apps.results.models import ExamResult
+
+        attempt = self.submit_sheet(self.student, option=self.right_option)  # no essay at all
+        done = self.teacher_client.post(
+            f"/api/v1/results/teacher/exams/{self.exam.id}/auto-marks/",
+            {"confirm_key": False, "zero_unanswered": True},
+            format="json",
+        )
+        self.assertEqual(done.status_code, 200)
+        # The blank essay was already awarded zero by the key, so this only closes the queue entry.
+        self.assertEqual(done.data["zeroed"], 1)
+        self.assertEqual(done.data["confirmed"], 0)
+        result = ExamResult.objects.get(attempt=attempt)
+        self.assertEqual(result.pending_manual_grading_count, 0)
+        self.assertEqual(float(result.score), 2.0, "a zero the teacher chose is still the same zero")
+
+    def test_a_teacher_mark_on_a_row_outranks_the_bulk_action(self) -> None:
+        attempt = self.submit_sheet(self.student, option=self.wrong_option, text="x")
+        self.teacher_client.patch(
+            f"/api/v1/results/teacher/attempts/{attempt.id}/answers/{self.keyed.id}/grade/",
+            {"manual_score": "1.00", "feedback": "یک واحد درست."},
+            format="json",
+        )
+        done = self.teacher_client.post(f"/api/v1/results/teacher/exams/{self.exam.id}/auto-marks/", {}, format="json")
+        self.assertEqual(done.status_code, 200)
+        self.assertEqual(done.data["confirmed"], 0, "the sheet has nothing left for the bulk action to decide")
+        self.assertEqual(
+            StudentAnswer.objects.get(attempt=attempt, question=self.keyed).manual_score,
+            Decimal("1.00"),
+            "a written override is not overwritten by a button",
+        )
+
+    def test_somebody_elses_paper_is_not_markable_and_not_exportable(self) -> None:
+        self.submit_sheet(self.student, option=self.right_option, text="x")
+        refused = self.other_client.post(f"/api/v1/results/teacher/exams/{self.exam.id}/auto-marks/", {}, format="json")
+        self.assertEqual(refused.status_code, 404, "a foreign paper does not exist for this teacher")
+        self.assertEqual(self.other_client.get(f"/api/v1/results/teacher/exams/{self.exam.id}/export/").status_code, 404)
+
+    def test_the_export_is_a_spreadsheet_of_what_the_desk_shows(self) -> None:
+        self.submit_sheet(self.student, option=self.right_option, text="Movement of particles.")
+        self.submit_sheet(self.second_student, option=self.wrong_option)
+        response = self.teacher_client.get(f"/api/v1/results/teacher/exams/{self.exam.id}/export/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/csv", response["Content-Type"])
+        self.assertIn("attachment", response["Content-Disposition"])
+        body = response.content.decode("utf-8-sig")
+        header, *rows = [line for line in body.strip().split("\n")]
+        self.assertEqual(len(rows), 2, "one row per finalized attempt")
+        self.assertIn("دانش‌آموز", header)
+        self.assertIn("سؤال 1", header)
+        self.assertEqual(len(header.split(",")), 10 + 2, "totals plus one column per question")
+        self.assertTrue(any("سارا" in row for row in rows), "names are in the file, in Persian")
+        self.assertTrue(any(row.split(",")[5] == "2.00" for row in rows), "the awarded mark is the one on screen")

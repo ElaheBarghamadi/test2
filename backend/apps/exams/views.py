@@ -24,6 +24,8 @@ from .serializers import (
 )
 from .services import (
     archive_exam,
+    export_exam_bundle,
+    import_exam_bundle,
     close_overdue_exams,
     complete_exam,
     duplicate_exam,
@@ -263,6 +265,46 @@ class ExamQuestionListCreateView(QuestionAccessMixin, APIView):
             # says so in the status itself, and the flag lets the builder explain it to the teacher.
             payload["deduplicated"] = True
             return Response(payload, status=status.HTTP_200_OK)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+class ExamExportView(QuestionAccessMixin, APIView):
+    """Download a paper as one JSON file: settings, questions, options — nothing about any student.
+
+    It rides the question permissions rather than the supervision pair on purpose. A school administrator may
+    read a school's scores and lifecycle, and reading *every question text of every teacher* into a
+    downloadable file is authoring territory: that file is a reusable copy of somebody's bank.
+    """
+
+    def get(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
+        exam = self.get_exam(exam_id)
+        bundle = export_exam_bundle(exam)
+        slug = "-".join((exam.subject or "exam").split())[:40] or "exam"
+        response = Response(bundle)
+        # The filename is a convenience, not a contract; the ASCII slug keeps it valid whatever the title is.
+        response["Content-Disposition"] = f'attachment; filename="exam-{slug}.json"'
+        response["Content-Type"] = "application/json"
+        return response
+
+
+class ExamImportView(TeacherExamAccessMixin, APIView):
+    """Create a draft paper from a bundle this teacher exported.
+
+    The importer owns the result whatever the file claims, and the new exam is a draft with no schedule: a
+    document from last term cannot open itself on students today.
+    """
+
+    # Authoring, so the stricter pair — and `authoring_only` is what keeps a school administrator out.
+    permission_classes = (IsTeacherOrAdministrator, IsExamOwnerOrAdministrator)
+    authoring_only = True
+
+    def post(self, request) -> Response:  # type: ignore[no-untyped-def]
+        try:
+            exam, stats = import_exam_bundle(request.user, request.data)
+        except DjangoValidationError as exc:
+            raise _drf_validation_error(exc) from exc
+        payload = TeacherExamSerializer(exam).data
+        payload["imported"] = stats
         return Response(payload, status=status.HTTP_201_CREATED)
 
 

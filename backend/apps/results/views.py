@@ -5,13 +5,22 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Avg, Count, F, Q, Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.attempts.grading import grade_answer, requires_manual_grading, selected_option_ids, AnswerMark
+from django.http import HttpResponse
+
+from apps.attempts.grading import (
+    AnswerMark,
+    answer_has_value,
+    grade_answer,
+    requires_manual_grading,
+    selected_option_ids,
+)
 from apps.attempts.models import ExamAttempt, StudentAnswer
 from apps.attempts.services import _grade_attempt, attempt_timing, integrity_summary
 from apps.exams.models import Exam, Question
@@ -696,3 +705,151 @@ class TeacherStudentsOverviewView(TeacherResultsAccessMixin, APIView):
                 "last_exam_title": latest.exam.title if latest else "",
             })
         return Response(rows)
+
+
+class TeacherExamExportView(TeacherResultsAccessMixin, APIView):
+    """The results of one paper as a CSV: one row per attempt, one column per question.
+
+    Two details are load-bearing. The file starts with a UTF-8 BOM, because Excel on Windows reads a
+    BOM-less file as latin-1 and Persian names arrive as noise; and the rows come from the same board the
+    marking desk uses, so the numbers in the spreadsheet are the numbers on the screen — a second query path
+    would be a second truth about who passed.
+    """
+
+    @staticmethod
+    def _verdict(result, exam: Exam) -> str:
+        """The pass mark as a word, computed by the same rule the result page uses.
+
+        `passed` is not a column: it is `percentage >= this exam's pass mark`, and `None` (an unset mark or a
+        score that is not final) has to stay empty in the file rather than read as a fail.
+        """
+        if result is None or result.percentage is None:
+            return ""
+        passing = float(exam.settings.passing_percentage)
+        if passing <= 0:
+            return ""
+        return "بله" if float(result.percentage) >= passing else "نه"
+
+    def get(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
+        import csv
+        import io
+
+        exam = self.get_exam(exam_id)
+        attempts = _finalized_attempts(self.attempts(), exam)
+        board = _grading_board(exam, attempts)
+        questions = board["questions"]
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["دانش‌آموز", "ایمیل", "کلاس", "تلاش", "وضعیت", "نمره", "از", "درصد", "قبول؟", "وضعیت نتیجه"] + [
+            f"سؤال {question['order']}: {question['text'][:40]} ({question['marks']})" for question in questions
+        ])
+        marks_by_attempt: dict[str, dict[str, str]] = {}
+        for answer in StudentAnswer.objects.filter(attempt__in=attempts, question__exam=exam).prefetch_related(
+            "question__options", "selected_options"
+        ):
+            mark = grade_answer(answer.question, answer)
+            marks_by_attempt.setdefault(str(answer.attempt_id), {})[str(answer.question_id)] = f"{mark.awarded:.2f}"
+        for attempt in attempts:
+            result = getattr(attempt, "result", None)
+            awarded = {str(question["id"]): marks_by_attempt.get(str(attempt.id), {}).get(str(question["id"]), "0.00") for question in questions}
+            writer.writerow([
+                attempt.student.get_full_name() or attempt.student.email,
+                attempt.student.email,
+                getattr(getattr(attempt.student, "student_profile", None), "class_name", "") or "",
+                attempt.attempt_number,
+                attempt.status,
+                f"{result.score:.2f}" if result and result.score is not None else "",
+                f"{exam.total_marks:.2f}",
+                f"{result.percentage:.1f}" if result and result.percentage is not None else "",
+                self._verdict(result, exam),
+                result.status if result else "none",
+                *[awarded[str(question["id"])] for question in questions],
+            ])
+        response = HttpResponse(buffer.getvalue(), content_type="text/csv; charset=utf-8")
+        # The BOM is what makes Excel open Persian names as Persian instead of mojibake.
+        response.content = "\ufeff".encode("utf-8") + buffer.getvalue().encode("utf-8")
+        slug = "-".join((exam.title or "results").split())[:60] or "results"
+        response["Content-Disposition"] = f'attachment; filename="results-{slug}.csv"'
+        return response
+
+
+class TeacherExamAutoMarksView(TeacherResultsAccessMixin, APIView):
+    """Fill the marking desk with the marks the exam already knows, and let the teacher correct any of them.
+
+    What this is for: a paper with two hundred keyed questions and a handful of written ones, where the
+    teacher wants the auto verdicts *confirmed* (so the sheet reads as graded, and the numbers are theirs to
+    edit) and the empty written answers zeroed (so nothing sits in the queue pretending to be unjudged work).
+    Two guards keep it safe:
+
+      * a row the teacher has already marked is never touched — an override always outranks a bulk action;
+      * a written answer with text in it is left pending unless `zero_unanswered` is explicitly sent. A tool
+        that silently gave zero to every essay it was asked to "finish" would be the worst possible default.
+    """
+
+    # Marks are authoring, so a school administrator does not reach this at all: the strict role pair, plus
+    # `TeacherResultsAccessMixin.exams()`, which already narrows every paper to the caller's own.
+    permission_classes = (IsTeacherOrAdministrator,)
+
+    def post(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
+        exam = self.get_exam(exam_id)
+        confirm_key = bool(request.data.get("confirm_key", True))
+        zero_unanswered = bool(request.data.get("zero_unanswered", False))
+        attempts = list(_finalized_attempts(self.attempts(), exam))
+        if not attempts:
+            raise serializers.ValidationError({"exam": ["این آزمون هنوز پاسخ‌برگ نهایی‌شده‌ای ندارد."]})
+
+        questions = list(Question.objects.filter(exam=exam).prefetch_related("options"))
+        answers = {
+            (str(answer.attempt_id), str(answer.question_id)): answer
+            for answer in StudentAnswer.objects.filter(attempt__in=attempts, question__in=questions)
+        }
+        touched: set[str] = set()
+        confirmed = 0
+        zeroed = 0
+        left_pending = 0
+        with transaction.atomic():
+            for attempt in attempts:
+                for question in questions:
+                    answer = answers.get((str(attempt.id), str(question.id)))
+                    manual_needed = requires_manual_grading(question)
+                    has_value = answer is not None and answer_has_value(question, answer)
+                    if answer is not None and answer.manual_score is not None:
+                        continue  # the teacher already decided this row
+                    if manual_needed:
+                        if has_value:
+                            left_pending += 1  # a human has to read it; a bulk action must not pretend otherwise
+                        elif zero_unanswered:
+                            if answer is None:
+                                answer = StudentAnswer.objects.create(attempt=attempt, question=question)
+                            answer.manual_score = Decimal("0.00")
+                            answer.save(update_fields=("manual_score", "updated_at"))
+                            zeroed += 1
+                            touched.add(str(attempt.id))
+                        continue
+                    if not confirm_key:
+                        continue
+                    # The key's own verdict, written down as the teacher's confirmed mark. The number does not
+                    # change — `grade_answer` would have awarded the same — so the score cannot drift; what
+                    # changes is that the row is now editable as an ordinary decision instead of a locked one.
+                    award = grade_answer(question, answer, ignore_manual=True).awarded
+                    if answer is None:
+                        answer = StudentAnswer.objects.create(attempt=attempt, question=question)
+                    answer.manual_score = Decimal(f"{award:.2f}")
+                    answer.save(update_fields=("manual_score", "updated_at"))
+                    confirmed += 1
+                    touched.add(str(attempt.id))
+            results = []
+            for attempt in [row for row in attempts if str(row.id) in touched]:
+                results.append(_grade_attempt(attempt, finalized_at=timezone.now()))
+
+        board = _grading_board(exam, _finalized_attempts(self.attempts(), exam))
+        return Response({
+            "confirmed": confirmed,
+            "zeroed": zeroed,
+            "left_for_a_human": left_pending,
+            "attempts": len(touched),
+            "results": len(results),
+            "progress": board["progress"],
+            "questions": board["questions"],
+        })

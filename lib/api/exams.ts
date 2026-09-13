@@ -1,5 +1,5 @@
 import { apiRequest } from "@/lib/api/client";
-import type { ApiExamSettingsDto, ApiExamWritePayload, ApiQuestionCategoryDto, ApiQuestionFolderDto, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
+import type { ApiExamBundleDto, ApiExamSettingsDto, ApiExamWritePayload, ApiQuestionCategoryDto, ApiQuestionFolderDto, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
 
 /**
  * How long a list may be painted from memory before the network is asked again.
@@ -23,6 +23,13 @@ export const examsApi = {
    * A settings-only PATCH. The exam write serializer takes `settings` on its own, so choosing what a published
    * result reveals does not require resending the title, the schedule, or anything else about the exam.
    */
+  /** A paper as one JSON file — settings and questions, never a student's answers. */
+  exportExam: (examId: string) => apiRequest<ApiExamBundleDto>(`/exams/${examId}/export/`),
+  /** Rebuild a draft from that file. The importer owns the result; the schedule never comes back. */
+  importExam: (bundle: unknown) => apiRequest<ApiTeacherExamDto & { imported?: { questions: number; settings_imported: boolean } }>(
+    "/exams/import/",
+    { method: "POST", body: bundle, invalidate: ["/exams/", "/questions/"] },
+  ),
   updateSettings: (examId: string, settings: Partial<ApiExamSettingsDto>) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/`, { method: "PATCH", body: { settings } }),
   publish: (examId: string) => apiRequest<ApiTeacherExamDto>(`/exams/${examId}/publish/`, { method: "POST" }),
   /** Opens a scheduled exam immediately; used when the class is already sitting in the room. */

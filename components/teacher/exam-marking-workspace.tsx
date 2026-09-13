@@ -43,6 +43,9 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
   const toast = useToastStore((state) => state.push);
   const [mode, setMode] = useState<MarkingMode>(initialMode);
   const [board, setBoard] = useState<ApiGradingBoardDto | null>(null);
+  /** Bumped by a bulk action: the panel has to re-read what the batch just wrote. */
+  const [reloadKey, setReloadKey] = useState(0);
+  const [applying, setApplying] = useState(false);
   const [rows, setRows] = useState<ApiTeacherResultRowDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -92,7 +95,7 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
       }
     })();
     return () => { cancelled = true; };
-  }, [attemptId, mode, toast]);
+  }, [attemptId, mode, reloadKey, toast]);
 
   useEffect(() => {
     if (mode !== "question" || !questionId) return;
@@ -106,7 +109,7 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
       }
     })();
     return () => { cancelled = true; };
-  }, [examId, mode, questionId, toast]);
+  }, [examId, mode, questionId, reloadKey, toast]);
 
   /** Keep the address bar in step, so a reload or a shared link lands on the same screen. */
   function remember(next: { mode: MarkingMode; attempt?: string; question?: string }) {
@@ -124,6 +127,34 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
     if (next === mode) return;
     setMode(next);
     remember({ mode: next });
+  }
+
+
+  /**
+   * Fill the desk with the marks the exam already knows.
+   *
+   * Two things are deliberately NOT done here. A row the teacher has already marked is left alone — a bulk
+   * action must never outvote a decision — and an essay with words in it is not zeroed by this button unless
+   * `zero_unanswered` says so, because "finish marking" must not quietly mean "give zero to everything unread".
+   */
+  async function applyAutoMarks() {
+    setApplying(true);
+    try {
+      const result = await resultsApi.autoMarks(examId, { confirm_key: true, zero_unanswered: true });
+      setReloadKey((key) => key + 1);
+      await load();
+      toast({
+        title: `نمره‌های خودکار اعمال شد`,
+        description: `${toPersianNumber(result.confirmed)} ردیف از کلید تأیید شد، ${toPersianNumber(result.zeroed)} پاسخ خالی صفر گرفت${
+          result.left_for_a_human ? ` و ${toPersianNumber(result.left_for_a_human)} پاسخ تشریحی برای قضاوت شما باقی ماند` : ""
+        }. هر عددی را می‌توانید عوض کنید.`,
+        variant: "success",
+      });
+    } catch (reason) {
+      toast({ title: "اعمال نشد", description: apiErrorMessage(reason), variant: "error" });
+    } finally {
+      setApplying(false);
+    }
   }
 
   const openQuestions = useMemo(() => (board ? board.questions.filter((item) => item.pending_count > 0).length : 0), [board]);
@@ -145,6 +176,9 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
             {openQuestions > 0 && <Badge variant="warning">{toPersianNumber(openQuestions)} سؤال در انتظار نمره</Badge>}
             {pendingStudents > 0 && <Badge variant="neutral">{toPersianNumber(pendingStudents)} برگهٔ ناتمام</Badge>}
             {openQuestions === 0 && pendingStudents === 0 && !loading && <Badge variant="success"><Check className="ml-1 h-3.5 w-3.5"/>برگه‌ها کامل است</Badge>}
+            <Button variant="outline" size="sm" onClick={() => void applyAutoMarks()} disabled={applying || loading} title="نمرهٔ کلید را روی ردیف‌ها بگذارید و پاسخ‌های خالی را صفر کنید">
+              <Wand2 className="h-4 w-4"/>{applying ? "در حال اعمال…" : "اعمال نمره‌های خودکار"}
+            </Button>
             <Button variant="outline" size="sm" onClick={() => void load()}>تازه‌سازی</Button>
           </div>
         </CardContent>
@@ -236,20 +270,49 @@ function QuestionRail({ questions, activeId, onSelect }: { questions: ApiGrading
 }
 
 /** The whole paper of one student: keyed rows carry their awarded mark and stay read-only. */
+/**
+ * What the box shows when the sheet opens.
+ *
+ * The teacher's own number wins, as always. After that the box is never left empty on a row the exam has
+ * already decided — a keyed question shows the mark the key awarded, a skipped question shows zero — because
+ * an empty box next to a score the system has computed invites a guess, and every one of them stays a plain
+ * editable input.
+ */
+function seedMark(answer: ApiTeacherAttemptDetailDto["answers"][number]): [string, string] {
+  if (answer.manual_score !== null && answer.manual_score !== undefined) return [answer.question_id, String(Number(answer.manual_score))];
+  if (!answer.manual_grading_required) return [answer.question_id, String(Number(answer.awarded_score ?? 0))];
+  if (answer.verdict === "unanswered") return [answer.question_id, "0"];
+  return [answer.question_id, ""];
+}
+
 function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherAttemptDetailDto | null; onSaved: () => void; rows: ApiTeacherResultRowDto[]; onSelectNext: (id: string) => void }) {
   const toast = useToastStore((state) => state.push);
   const [marks, setMarks] = useState<Record<string, string>>({});
   const [feedback, setFeedback] = useState<Record<string, string>>({});
   const [overall, setOverall] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  /** What the server had on record when the sheet opened, so "changed" means changed. */
+  const [seeded, setSeeded] = useState<Record<string, string>>({});
   useEffect(() => {
     if (!sheet) return;
-    setMarks(Object.fromEntries(sheet.answers.map((answer) => [answer.question_id, answer.manual_score === null || answer.manual_score === undefined ? "" : String(answer.manual_score)])));
+    const seed = Object.fromEntries(sheet.answers.map(seedMark));
+    setMarks(seed);
+    setSeeded(seed);
     setFeedback(Object.fromEntries(sheet.answers.map((answer) => [answer.question_id, answer.feedback || ""])));
     setOverall(sheet.result?.feedback || "");
   }, [sheet]);
 
   const manual = useMemo(() => sheet?.answers.filter((answer) => answer.manual_grading_required) ?? [], [sheet]);
+  /** Rows whose number differs from what the server holds — the only rows a save has to write. */
+  const dirty = useMemo(
+    () =>
+      sheet
+        ? sheet.answers
+            .filter((answer) => (marks[answer.question_id] ?? "") !== (seeded[answer.question_id] ?? ""))
+            .map((answer) => answer.question_id)
+        : [],
+    [marks, seeded, sheet],
+  );
   const gradedCount = manual.filter((answer) => answer.manual_score !== null && answer.manual_score !== undefined).length;
   const nextOpen = manual.find((answer) => answer.manual_score === null || answer.manual_score === undefined);
   const autoScore = useMemo(() => (sheet ? sheet.answers.filter((answer) => !answer.manual_grading_required).reduce((sum, answer) => sum + numeric(answer.awarded_score), 0) : 0), [sheet]);
@@ -287,6 +350,41 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
     }
   }
 
+  /**
+   * Save every changed row at once.
+   *
+   * The desk writes per row because a mark is a per-row decision, but a teacher working a whole sheet should
+   * not press "save" thirty times. This sends exactly the rows that differ from the server and reloads once.
+   */
+  async function saveAll() {
+    if (!sheet || !dirty.length) return;
+    setBusy("all");
+    const failures: string[] = [];
+    for (const questionId of dirty) {
+      const value = Number(marks[questionId]);
+      if (!Number.isFinite(value) || value < 0) {
+        failures.push(questionId);
+        continue;
+      }
+      try {
+        await resultsApi.gradeAnswer(sheet.id, questionId, { manual_score: value, feedback: feedback[questionId] || "" });
+      } catch {
+        failures.push(questionId);
+      }
+    }
+    setBusy(null);
+    if (failures.length === dirty.length) {
+      toast({ title: "ذخیرهٔ تغییرات انجام نشد", description: "هیچ ردیفی نوشته نشد؛ مقادیر را بررسی کنید.", variant: "error" });
+      return;
+    }
+    onSaved();
+    toast({
+      title: failures.length ? `${toPersianNumber(dirty.length - failures.length)} ردیف ذخیره شد` : "تغییرات ذخیره شد",
+      description: failures.length ? `${toPersianNumber(failures.length)} ردیف به‌دلیل مقدار نامعتبر نماند.` : undefined,
+      variant: failures.length ? "error" : "success",
+    });
+  }
+
   async function saveOverall() {
     if (!sheet) return;
     setBusy("overall");
@@ -322,6 +420,12 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
             <Badge variant="neutral">نمرهٔ خودکار {toPersianNumber(numeric(autoScore.toFixed(2)))}</Badge>
             {manual.length > 0 && <Badge variant={gradedCount === manual.length ? "success" : "warning"}>{toPersianNumber(gradedCount)} از {toPersianNumber(manual.length)} دستی</Badge>}
             {nextOpen && <Button size="sm" variant="outline" onClick={() => document.getElementById(`mark-${nextOpen.question_id}`)?.focus()}>پرش به نمرهٔ بعدی</Button>}
+            {dirty.length > 0 && (
+              <Button size="sm" onClick={() => void saveAll()} disabled={busy === "all"}>
+                <Save className="h-4 w-4"/>
+                ذخیرهٔ {toPersianNumber(dirty.length)} تغییر
+              </Button>
+            )}
             {nextStudent && <Button size="sm" variant="ghost" onClick={() => onSelectNext(nextStudent.id)}>برگهٔ بعدی <ChevronLeft className="h-4 w-4"/></Button>}
           </div>
           {sheet.integrity && (() => {
@@ -359,6 +463,7 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
             key={answer.id}
             answer={answer}
             mark={marks[answer.question_id] ?? ""}
+            markChanged={(marks[answer.question_id] ?? "") !== (seeded[answer.question_id] ?? "")}
             feedback={feedback[answer.question_id] ?? ""}
             onMark={(value) => setMarks((current) => ({ ...current, [answer.question_id]: value }))}
             onFeedback={(value) => setFeedback((current) => ({ ...current, [answer.question_id]: value }))}
@@ -379,7 +484,7 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
   );
 }
 
-function AnswerRow({ answer, mark, feedback, onMark, onFeedback, onSave, saving }: { answer: ApiTeacherAttemptDetailDto["answers"][number]; mark: string; feedback: string; onMark: (value: string) => void; onFeedback: (value: string) => void; onSave: (action: "mark" | "note" | "clear") => void; saving: boolean }) {
+function AnswerRow({ answer, mark, markChanged, feedback, onMark, onFeedback, onSave, saving }: { answer: ApiTeacherAttemptDetailDto["answers"][number]; mark: string; markChanged: boolean; feedback: string; onMark: (value: string) => void; onFeedback: (value: string) => void; onSave: (action: "mark" | "note" | "clear") => void; saving: boolean }) {
   const verdict = VERDICT_LABELS[answer.verdict] ?? VERDICT_LABELS.unanswered!;
   const maximum = numeric(answer.maximum_score);
   // A keyed row is writable too. `needsDecision` is the amber "still open" signal - only a question that
@@ -410,16 +515,30 @@ function AnswerRow({ answer, mark, feedback, onMark, onFeedback, onSave, saving 
         <div className="rounded-2xl bg-muted/45 p-3 text-xs leading-6">
           {answer.text || (answer.selected_option_texts.length ? answer.selected_option_texts.join("، ") : "—")}
         </div>
-        {!answer.manual_grading_required && mark === "" && (
+        {!answer.manual_grading_required && !markChanged && (
           <p className="text-[11px] leading-6 text-muted-foreground">
-            کلید این سؤال را نمره داده است. نمره‌ای اینجا بنویسید اگر می‌خواهید نظر خودتان جای آن را بگیرد؛
-            خالی گذاشتنش یعنی همان نمرهٔ کلید.
+            این عدد را کلید داده است. عوضش کنید اگر نظر خودتان جای آن را می‌گیرد؛ بی‌تغییر گذاشتنش همان نمرهٔ
+            کلید را نگه می‌دارد و چیزی را به‌عنوان تصمیم شما ذخیره نمی‌کند.
           </p>
         )}
         <div className="grid gap-3 sm:grid-cols-[130px_1fr_auto] sm:items-start">
             <label className="block text-[11px] font-bold">
               <span className="mb-1 block text-muted-foreground">نمرهٔ شما</span>
-              <Input id={`mark-${answer.question_id}`} type="number" min="0" max={maximum} step="0.25" value={mark} onChange={(event) => onMark(event.target.value)} className="h-10"/>
+              <Input
+                id={`mark-${answer.question_id}`}
+                type="number"
+                min="0"
+                max={maximum}
+                step="0.25"
+                value={mark}
+                onChange={(event) => onMark(event.target.value)}
+                onKeyDown={(event) => {
+                  // Enter is the whole gesture: write this number and move on, without hunting for the button.
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    onSave("mark");
+                  }
+                }} className="h-10"/>
             </label>
             <label className="block text-[11px] font-bold">
               <span className="mb-1 block text-muted-foreground">بازخورد این سؤال</span>
@@ -428,10 +547,21 @@ function AnswerRow({ answer, mark, feedback, onMark, onFeedback, onSave, saving 
             <div className="flex items-end gap-1.5 pt-0 sm:pt-5">
               <Button type="button" variant="outline" size="sm" onClick={() => onMark("0")}>۰</Button>
               <Button type="button" variant="outline" size="sm" onClick={() => onMark(String(maximum))}>تمام بارم</Button>
-              {mark === "" ? (
-                <Button type="button" size="sm" onClick={() => onSave("note")} disabled={saving}><Save className="h-4 w-4"/>{saving ? "در حال ذخیره" : "ذخیرهٔ نکته"}</Button>
+              {/*
+                The primary button follows what the teacher actually changed, not whether the box is empty. A
+                keyed row now opens holding the key's own number, so "empty" no longer means "nothing decided" —
+                and a note written next to an untouched number must still save as a note alone.
+              */}
+              {markChanged ? (
+                <Button type="button" size="sm" onClick={() => onSave("mark")} disabled={saving}>
+                  <Save className="h-4 w-4"/>
+                  {saving ? "در حال ذخیره" : "ذخیرهٔ نمره"}
+                </Button>
               ) : (
-                <Button type="button" size="sm" onClick={() => onSave("mark")} disabled={saving}><Save className="h-4 w-4"/>{saving ? "در حال ذخیره" : "ذخیره"}</Button>
+                <Button type="button" size="sm" onClick={() => onSave("note")} disabled={saving}>
+                  <Save className="h-4 w-4"/>
+                  {saving ? "در حال ذخیره" : "ذخیرهٔ نکته"}
+                </Button>
               )}
               {overridden && (
                 <Button type="button" variant="ghost" size="sm" onClick={() => onSave("clear")}>بازگشت به نمرهٔ خودکار</Button>
