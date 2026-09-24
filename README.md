@@ -17,14 +17,39 @@ backend/                          Django 5 + Django REST Framework service
   docs/api-v1.md                  Implemented API request/response reference
 ```
 
+## One-command development stack
+
+`npm run dev` is the whole app, not just the frontend. `scripts/dev-stack.mjs` prepares and starts
+everything, in order, and a single Ctrl+C stops both sides:
+
+1. Creates `backend/.env` (with a freshly generated `DJANGO_SECRET_KEY`) and `.env.local` from the
+   shipped examples when they are missing.
+2. Creates the Python environment in `backend/.venv` and installs `backend/requirements.lock` —
+   only when the lockfile changed since the last run.
+3. Applies database migrations (`migrate`); when models moved ahead of the migration files it runs
+   `makemigrations` first, so a fresh clone never serves a stale schema.
+4. Starts Django on `http://127.0.0.1:8000` and waits for `/health/` before starting Next.js on
+   `http://localhost:3000`. If a healthy API already answers on the port it is reused untouched.
+
+```bash
+npm run dev            # frontend + backend + migrations (the default)
+npm run dev:turbo      # the same stack, with Next.js on Turbopack
+npm run dev:web        # only the Next.js dev server (the old `npm run dev`)
+npm run dev:api        # only backend setup + Django
+npm run setup          # prepare env/venv/dependencies/migrations, then exit
+```
+
+The only prerequisites are Node.js and Python 3.12+ on `PATH`. The script needs no extra npm
+packages and works the same on Windows, macOS and Linux.
+
 ## Frontend
 
 The frontend remains the repository root. Copy the public-safe API example and start the app:
 
 ```bash
-cp .env.local.example .env.local
+cp .env.local.example .env.local   # optional: `npm run dev` creates it for you
 npm ci
-npm run dev
+npm run dev                        # boots Django (setup + migrate) and Next.js together
 ```
 
 `NEXT_PUBLIC_API_BASE_URL=/api/v1` uses the server-only `API_PROXY_TARGET` rewrite in local development, so browser code never embeds a localhost API URL. For a deployed HTTPS API, set `NEXT_PUBLIC_API_BASE_URL` to its `/api/v1` origin and configure Django CORS for the frontend origin.

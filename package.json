@@ -3,8 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "dev:turbo": "next dev --turbo",
+    "dev": "node scripts/dev-stack.mjs",
+    "dev:turbo": "node scripts/dev-stack.mjs --turbo",
+    "dev:web": "node scripts/dev-stack.mjs --web-only",
+    "dev:api": "node scripts/dev-stack.mjs --api-only",
+    "setup": "node scripts/dev-stack.mjs --setup-only",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
