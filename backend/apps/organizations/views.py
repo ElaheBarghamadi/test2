@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
@@ -54,7 +54,7 @@ def apply_profile(user: User, data: dict) -> None:
     teacher_data = data.get("teacher_profile")
     if student_data is not None:
         if user.role != User.Role.STUDENT:
-            raise serializers.ValidationError({"student_profile": "Only student users may have a student profile."})
+            raise serializers.ValidationError({"student_profile": "پروفایل دانش‌آموزی فقط برای حساب دانش‌آموز است."})
         allowed = {"grade", "class_name"}
         unsupported = set(student_data).difference(allowed)
         if unsupported:
@@ -159,13 +159,20 @@ class AdminUserListCreateView(APIView):
             serializer = AdminUserCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        with transaction.atomic():
-            user = User.objects.create_user(
-                email=data["email"], password=data["password"], first_name=data.get("first_name", ""),
-                last_name=data.get("last_name", ""), role=data.get("role", User.Role.STUDENT), is_active=data.get("is_active", True),
-            )
-            apply_school(user, data)
-            apply_profile(user, data)
+        try:
+            with transaction.atomic():
+                user = User.objects.create_user(
+                    email=data["email"], password=data["password"], first_name=data.get("first_name", ""),
+                    last_name=data.get("last_name", ""), role=data.get("role", User.Role.STUDENT), is_active=data.get("is_active", True),
+                )
+                apply_school(user, data)
+                apply_profile(user, data)
+        except IntegrityError as exc:
+            # Two administrators (or one and a public sign-up) submitting the same address at the same
+            # moment: the index decides, and the answer is still a field error rather than a 500.
+            raise serializers.ValidationError(
+                {"email": "این ایمیل همین حالا ثبت شد؛ فهرست را تازه کنید و همان حساب را ویرایش کنید."}
+            ) from exc
         return Response(AdminUserSerializer(users_queryset().get(pk=user.pk)).data, status=status.HTTP_201_CREATED)
 
 

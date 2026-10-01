@@ -2,6 +2,7 @@ import re
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -274,3 +275,122 @@ class RequestSizeCeilingTests(TestCase):
         self.assertLessEqual(settings.FILE_UPLOAD_MAX_MEMORY_SIZE, settings.DATA_UPLOAD_MAX_MEMORY_SIZE)
         self.assertLessEqual(settings.DATA_UPLOAD_MAX_NUMBER_FIELDS, 1000)
         self.assertEqual(settings.FILE_UPLOAD_PERMISSIONS, 0o640)
+
+
+class RegistrationCorrectnessTests(TestCase):
+    """Signing up, and signing in afterwards, has to work for the address the user actually typed.
+
+    Every case here is a real failure this project had: an address stored with a capital letter could never
+    be signed into again, duplicate accounts could share one address in different casing, and sign-up was
+    two requests, so a drop between them left an account with an empty profile behind a form claiming the
+    account had not been created.
+    """
+
+    password = "A-strong-test-password-927"
+
+    def setUp(self) -> None:
+        self.client = APIClient()
+
+    def register(self, **overrides):
+        payload = {
+            "email": "sara.mohammadi@school.ir",
+            "first_name": "سارا",
+            "last_name": "محمدی",
+            "password": self.password,
+            "role": User.Role.STUDENT,
+        }
+        payload.update(overrides)
+        return self.client.post("/api/v1/auth/register/", payload, format="json")
+
+    def test_an_address_keeps_only_one_casing_and_can_be_typed_any_way_afterwards(self) -> None:
+        created = self.register(email="  Sara.Mohammadi@School.IR  ")
+        self.assertEqual(created.status_code, 201)
+        # Stored canonically: trimmed, whole address in lower case.
+        self.assertEqual(created.data["email"], "sara.mohammadi@school.ir")
+        self.assertEqual(User.objects.get(pk=created.data["id"]).email, "sara.mohammadi@school.ir")
+
+        for typed in ("sara.mohammadi@school.ir", "SARA.MOHAMMADI@SCHOOL.IR", "Sara.Mohammadi@School.IR"):
+            login = self.client.post(
+                "/api/v1/auth/login/", {"email": typed, "password": self.password}, format="json"
+            )
+            self.assertEqual(login.status_code, 200, f"could not sign in when typing {typed}")
+
+    def test_an_account_created_by_an_administrator_with_capitals_can_still_sign_in(self) -> None:
+        # Rows that predate the lower-casing rule exist in the wild; they must keep working.
+        User.objects.create_user(email="Old.Admin-Made@Example.com", password=self.password)
+        login = self.client.post(
+            "/api/v1/auth/login/",
+            {"email": "old.admin-made@example.com", "password": self.password},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+
+    def test_registration_returns_a_session_that_works_immediately(self) -> None:
+        created = self.register()
+        self.assertIn("access", created.data)
+        self.assertIn("refresh", created.data)
+        self.assertNotIn("password", created.data)
+
+        me = self.client.get("/api/v1/auth/me/", HTTP_AUTHORIZATION=f"Bearer {created.data['access']}")
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.data["email"], "sara.mohammadi@school.ir")
+
+        refreshed = self.client.post(
+            "/api/v1/auth/token/refresh/", {"refresh": created.data["refresh"]}, format="json"
+        )
+        self.assertEqual(refreshed.status_code, 200)
+
+    def test_grade_and_class_are_written_in_the_same_request_as_the_account(self) -> None:
+        created = self.register(grade="پایه دوازدهم", class_name="تجربی ۲")
+        self.assertEqual(created.status_code, 201)
+        profile = StudentProfile.objects.get(user_id=created.data["id"])
+        self.assertEqual(profile.grade, "پایه دوازدهم")
+        self.assertEqual(profile.class_name, "تجربی ۲")
+        # The response already carries the finished profile, so no follow-up request is needed.
+        self.assertEqual(created.data["profile"]["grade"], "پایه دوازدهم")
+
+    def test_grade_and_class_are_dropped_for_a_teacher_rather_than_failing_the_signup(self) -> None:
+        created = self.register(role=User.Role.TEACHER, grade="پایه دهم", class_name="ریاضی ۱")
+        self.assertEqual(created.status_code, 201)
+        self.assertFalse(StudentProfile.objects.filter(user_id=created.data["id"]).exists())
+        self.assertTrue(TeacherProfile.objects.filter(user_id=created.data["id"]).exists())
+
+    def test_a_taken_address_is_refused_in_persian_whatever_its_casing(self) -> None:
+        self.assertEqual(self.register().status_code, 201)
+        again = self.register(email="SARA.MOHAMMADI@school.ir")
+        self.assertEqual(again.status_code, 400)
+        message = str(again.data["detail"]["email"])
+        self.assertIn("قبلاً ثبت شده", message)
+        self.assertEqual(User.objects.filter(email__iexact="sara.mohammadi@school.ir").count(), 1)
+
+    def test_the_database_itself_refuses_a_second_account_differing_only_by_case(self) -> None:
+        # The API check is friendly; this is the guarantee underneath it, for two sign-ups racing.
+        User.objects.create_user(email="race@example.com", password=self.password)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                User.objects.create(email="RACE@example.com", password=self.password)
+
+    def test_every_refusal_the_signup_form_can_hit_is_written_in_persian(self) -> None:
+        cases = {
+            "short password": self.register(password="short"),
+            "common password": self.register(email="a@example.com", password="12345678"),
+            "unknown school code": self.register(email="b@example.com", school_code="NOPE1234"),
+            "unsupported field": self.register(email="c@example.com", is_staff=True),
+        }
+        for label, response in cases.items():
+            self.assertEqual(response.status_code, 400, label)
+            text = str(response.data)
+            self.assertRegex(text, r"[\u0600-\u06FF]", f"{label} was answered in English: {text}")
+
+    def test_wrong_credentials_do_not_reveal_which_half_was_wrong(self) -> None:
+        self.register()
+        wrong_password = self.client.post(
+            "/api/v1/auth/login/", {"email": "sara.mohammadi@school.ir", "password": "wrong-password-123"}, format="json"
+        )
+        unknown_account = self.client.post(
+            "/api/v1/auth/login/", {"email": "nobody@school.ir", "password": "wrong-password-123"}, format="json"
+        )
+        self.assertEqual(wrong_password.status_code, 401)
+        self.assertEqual(unknown_account.status_code, 401)
+        self.assertEqual(str(wrong_password.data["detail"]["detail"]), str(unknown_account.data["detail"]["detail"]))
+        self.assertIn("درست نیست", str(wrong_password.data["detail"]["detail"]))

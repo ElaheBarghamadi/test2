@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const me = vi.fn();
 const login = vi.fn();
+const register = vi.fn();
 const logout = vi.fn();
 const syncSessionMirror = vi.fn();
 const clearSessionMirror = vi.fn();
@@ -11,7 +12,7 @@ vi.mock("@/lib/api/auth", () => ({
     me: () => me(),
     login: (...args: unknown[]) => login(...args),
     logout: (...args: unknown[]) => logout(...args),
-    register: vi.fn(),
+    register: (...args: unknown[]) => register(...args),
   },
 }));
 vi.mock("@/lib/api/session-mirror", () => ({
@@ -36,6 +37,7 @@ beforeEach(() => {
   me.mockReset().mockResolvedValue(userDto);
   login.mockReset().mockResolvedValue({ access: "a", refresh: "r" });
   logout.mockReset().mockResolvedValue(undefined);
+  register.mockReset().mockResolvedValue({ ...userDto, access: "fresh.access", refresh: "fresh.refresh" });
   syncSessionMirror.mockReset().mockResolvedValue(undefined);
   clearSessionMirror.mockReset().mockResolvedValue(undefined);
   useAuthStore.setState({ user: null, status: "checking" });
@@ -72,6 +74,32 @@ describe("auth store across tabs", () => {
     expect(tokenStorage.get()).toBeNull();
     expect(useAuthStore.getState().status).toBe("anonymous");
     expect(clearSessionMirror).toHaveBeenCalled();
+  });
+
+  it("opens the session the register endpoint returned, without a second login call", async () => {
+    // The account and its session now arrive together. When they were two calls, a network drop between
+    // them left a real account on the server and a form telling the user that sign-up had failed.
+    const user = await useAuthStore.getState().register({
+      email: "new@example.ir", first_name: "سارا", last_name: "محمدی", password: "A-strong-test-password-927", role: "student",
+    });
+
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(login).not.toHaveBeenCalled();
+    expect(user.role).toBe("teacher");
+    expect(tokenStorage.get()).toEqual({ access: "fresh.access", refresh: "fresh.refresh" });
+    expect(syncSessionMirror).toHaveBeenCalled();
+    expect(useAuthStore.getState().status).toBe("authenticated");
+  });
+
+  it("leaves no session behind when registration itself is refused", async () => {
+    register.mockRejectedValue(new Error("این ایمیل قبلاً ثبت شده است."));
+
+    await expect(useAuthStore.getState().register({
+      email: "taken@example.ir", first_name: "سارا", last_name: "محمدی", password: "A-strong-test-password-927", role: "student",
+    })).rejects.toThrow();
+
+    expect(tokenStorage.get()).toBeNull();
+    expect(useAuthStore.getState().status).not.toBe("authenticated");
   });
 
   it("writes the server's mirror before redirecting after a login", async () => {

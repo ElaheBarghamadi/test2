@@ -63,8 +63,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     return user;
   },
   register: async (payload) => {
-    await authApi.register(payload);
-    return get().login(payload.email, payload.password);
+    /**
+     * One request, one outcome.
+     *
+     * This used to POST the account and then sign in as a second call. When that second call failed — a
+     * dropped connection, a phone switching network, the login throttle — the account existed on the
+     * server while the form said the sign-up had failed, and a retry was answered with "email already
+     * registered". The register endpoint now returns the session it opened, so there is no in-between
+     * state left to fall into.
+     */
+    const created = await authApi.register(payload);
+    tokenStorage.set({ access: created.access, refresh: created.refresh });
+    // Awaited before the redirect: the server-side gate has to know about this session by the time the
+    // very next navigation asks it.
+    await syncSessionMirror();
+    const user = toUser(created);
+    set({ user, status: "authenticated" });
+    return user;
   },
   logout: async () => {
     const refresh = tokenStorage.get()?.refresh;

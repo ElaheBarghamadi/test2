@@ -75,11 +75,11 @@ class AdminUserWriteSerializer(serializers.Serializer):
     def validate(self, attrs: dict) -> dict:
         unexpected = set(self.initial_data).difference(self.fields)
         if unexpected:
-            raise serializers.ValidationError({field: "This is not a supported user field." for field in unexpected})
+            raise serializers.ValidationError({field: "این فیلد در فرم کاربر پشتیبانی نمی‌شود." for field in unexpected})
         if "school_id" in attrs and attrs["school_id"] is not None:
             attrs["school"] = School.objects.filter(pk=attrs["school_id"], is_active=True).first()
             if attrs["school"] is None:
-                raise serializers.ValidationError({"school_id": "An active school is required."})
+                raise serializers.ValidationError({"school_id": "مدرسه باید فعال و موجود باشد."})
         return attrs
 
 
@@ -88,9 +88,13 @@ class AdminUserCreateSerializer(AdminUserWriteSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
 
     def validate_email(self, value: str) -> str:
-        value = User.objects.normalize_email(value)
+        # The same canonical form the public sign-up writes: an administrator who types the address with a
+        # capital letter must not create a second account that only differs by case.
+        value = User.objects.normalize_email(value).strip().lower()
         if User.objects.filter(email__iexact=value).exists():
-            raise serializers.ValidationError("A user with this email already exists.")
+            raise serializers.ValidationError(
+                "این ایمیل قبلاً ثبت شده است؛ برای این شخص همان حساب موجود را ویرایش کنید."
+            )
         return value
 
 

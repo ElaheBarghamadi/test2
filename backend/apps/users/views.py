@@ -23,6 +23,19 @@ from .models import User
 
 
 class RegisterView(generics.CreateAPIView):
+    """
+    Create an account, and sign it in, in one request.
+
+    The response carries the created account *and* the token pair, because the client used to need a second
+    call (`/auth/login/`) right after this one — and that call is exactly where a slow connection leaves a
+    user who exists on the server staring at a form that says sign-up failed. Anyone who retries then hits
+    "email already registered". One request means one outcome: either the account and its session exist, or
+    nothing was created.
+
+    The account fields stay at the top level of the response so clients written against the earlier shape
+    keep working; `access`/`refresh` are added beside them.
+    """
+
     permission_classes = (permissions.AllowAny,)
     serializer_class = RegisterSerializer
     throttle_scope = "register"
@@ -31,7 +44,11 @@ class RegisterView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        return Response(CurrentUserSerializer(user).data, status=status.HTTP_201_CREATED)
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {**CurrentUserSerializer(user).data, "access": str(refresh.access_token), "refresh": str(refresh)},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class LoginView(TokenObtainPairView):
@@ -68,7 +85,7 @@ class PasswordResetRequestView(APIView):
                 fail_silently=False,
             )
         # This response deliberately has the same shape for known and unknown email addresses.
-        return Response({"detail": "If this email belongs to an active account, a reset link has been sent."})
+        return Response({"detail": "اگر این ایمیل به یک حساب فعال تعلق داشته باشد، پیوند بازیابی ارسال شده است."})
 
 
 class PasswordResetConfirmView(APIView):
@@ -79,7 +96,7 @@ class PasswordResetConfirmView(APIView):
         serializer = PasswordResetConfirmSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        return Response({"detail": "Password has been reset."})
+        return Response({"detail": "گذرواژه با موفقیت تغییر کرد."})
 
 
 class LogoutView(APIView):
@@ -90,18 +107,18 @@ class LogoutView(APIView):
     def post(self, request) -> Response:  # type: ignore[no-untyped-def]
         refresh_token = request.data.get("refresh")
         if not refresh_token:
-            raise serializers.ValidationError({"refresh": "A refresh token is required."})
+            raise serializers.ValidationError({"refresh": "برای خروج، توکن تازه‌سازی نشست لازم است."})
         try:
             token = RefreshToken(refresh_token)
         except Exception as exc:
-            raise serializers.ValidationError({"refresh": "The refresh token is invalid."}) from exc
+            raise serializers.ValidationError({"refresh": "توکن تازه‌سازی نشست نامعتبر است."}) from exc
         # A logout request may only revoke its own session: without this, possession of any other
         # user's refresh string (a leaked reset email, a shared browser) would be a denial-of-service
         # against that account.
         # `user_id` is the user model's primary key as a string: this project's User is UUID-keyed, so
         # it is compared as text (int() here would raise a 500 on every logout).
         if str(token.payload.get("user_id")) != str(request.user.pk):
-            raise serializers.ValidationError({"refresh": "The refresh token does not belong to this account."})
+            raise serializers.ValidationError({"refresh": "این نشست به حساب شما تعلق ندارد."})
         token.blacklist()
         return Response(status=status.HTTP_204_NO_CONTENT)
 

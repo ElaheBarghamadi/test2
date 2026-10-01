@@ -19,7 +19,11 @@ export interface ApiAuthResponseDto { access: string; refresh: string; user: Api
 export interface ApiRegisterPayload {
   email: string; first_name: string; last_name: string; password: string;
   role: Extract<ApiRole, "student" | "teacher">; school_code?: string;
+  /** A pupil's grade and class, written by the server in the same request that creates the account. */
+  grade?: string; class_name?: string;
 }
+/** Registration answers with the created account *and* the session it opened, so it is one round trip. */
+export interface ApiRegisterResponseDto extends ApiUserDto { access: string; refresh: string; }
 
 export interface ApiOptionDto { id: string; text: string; order: number; is_correct?: boolean; }
 /** `count` is only present on the bank's tag list, where it drives the filter chips. */
