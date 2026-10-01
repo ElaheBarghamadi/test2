@@ -102,7 +102,36 @@ export default function AdminExamsPage() {
           <Input value={query} onChange={(event) => setQuery(event.target.value)} className="pr-9" placeholder="جست‌وجوی آزمون، آموزگار یا مدرسه..."/>
         </div>
         {loading ? <div className="h-60 animate-soft-pulse rounded-xl bg-muted"/> : !shown.length ? <p className="p-6 text-center text-sm text-muted-foreground">آزمونی پیدا نشد.</p> : (
-          <div className="overflow-x-auto">
+          <>
+            {/* Seven columns and a 900px floor: on a phone that is a sideways strip, so the same rows are cards. */}
+            <div className="space-y-2.5 sm:hidden" data-testid="admin-exam-cards">
+              {shown.map((exam) => (
+                <Card className="p-4" key={exam.id}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold">{exam.title}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{exam.subject} · {exam.grade}{exam.class_name ? ` · ${exam.class_name}` : ""}</p>
+                    </div>
+                    <Badge variant={exam.status === "active" ? "success" : exam.status === "draft" ? "warning" : "neutral"}>{labels[exam.status]}</Badge>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
+                    <p className="truncate">آموزگار: <span className="font-bold text-foreground">{exam.teacher_name}</span></p>
+                    <p className="truncate">مدرسه: <span className="font-bold text-foreground">{exam.school?.name || "—"}</span></p>
+                    <p>برگزاری: <span className="font-bold text-foreground">{exam.start_at ? formatDate(exam.start_at) : "بدون زمان‌بندی"}</span></p>
+                    <p>{toPersianNumber(exam.question_count)} سؤال · {toPersianNumber(exam.participant_count)} شرکت‌کننده</p>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-1.5 border-t pt-3">
+                    {actionsFor(exam.status).map((action) => (
+                      <Button key={action} size="sm" variant={action === "publish" || action === "start" ? "default" : "outline"} disabled={busy !== null} onClick={() => void run(exam, action)}>
+                        {busy === `${exam.id}:${action}` ? <RefreshCw className="h-3.5 w-3.5 animate-spin"/> : action === "publish" ? <CheckCircle2 className="h-3.5 w-3.5"/> : action === "start" ? <PlayCircle className="h-3.5 w-3.5"/> : action === "complete" ? <PauseCircle className="h-3.5 w-3.5"/> : action === "results" ? <ClipboardList className="h-3.5 w-3.5"/> : <RotateCcw className="h-3.5 w-3.5"/>}
+                        {ACTION_COPY[action]}
+                      </Button>
+                    ))}
+                  </div>
+                </Card>
+              ))}
+            </div>
+            <div className="hidden overflow-x-auto sm:block" data-testid="admin-exam-table">
             <table className="w-full min-w-[900px] text-right">
               <thead className="border-y bg-muted/50 text-[11px] text-muted-foreground">
                 <tr><th className="p-3 font-bold">آزمون</th><th className="p-3 font-bold">آموزگار / مدرسه</th><th className="p-3 font-bold">زمان برگزاری</th><th className="p-3 font-bold">سؤال‌ها</th><th className="p-3 font-bold">مشارکت</th><th className="p-3 font-bold">وضعیت</th><th className="p-3 font-bold">اقدام</th></tr>
@@ -128,7 +157,8 @@ export default function AdminExamsPage() {
                 </tr>)}
               </tbody>
             </table>
-          </div>
+            </div>
+          </>
         )}
       </CardContent>
     </Card>

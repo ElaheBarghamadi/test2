@@ -210,12 +210,12 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
   const saveLine = <AutosaveIndicator status={attempt.saveStatus} className="hidden xl:inline-flex"/>;
   const rulesNote = (
     <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground sm:flex-nowrap">
-      <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-600"/>
+      <ShieldCheck className="h-4 w-4 shrink-0 text-success"/>
       <span>{noReturn ? "پاسخ هر سؤالی که رد می‌کنید ذخیره و قفل می‌شود؛ تا پایان آزمون می‌توانید سؤال‌های بعدی را کامل کنید." : "پاسخ‌ها به‌صورت خودکار ذخیره می‌شوند و پیش از ارسال نهایی قابل ویرایش‌اند."}</span>
     </div>
   );
   return (
-    <div className="min-h-screen bg-surface">
+    <div className="min-h-dvh bg-surface">
       <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur-xl sm:border-b sm:bg-background/92">
         {/*
           Phones get exactly one piece of chrome: a floating bar with four rounded corners, carrying the
@@ -319,4 +319,4 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
     </div>
   );
 }
-function ExamSkeleton() { return <div className="min-h-screen bg-surface p-4 sm:p-8"><div className="mx-auto max-w-5xl animate-soft-pulse space-y-6"><div className="h-16 rounded-2xl bg-muted"/><div className="h-[440px] rounded-3xl bg-muted"/><div className="h-16 rounded-2xl bg-muted"/></div></div>; }
+function ExamSkeleton() { return <div className="min-h-dvh bg-surface p-4 sm:p-8"><div className="mx-auto max-w-5xl animate-soft-pulse space-y-6"><div className="h-16 rounded-2xl bg-muted"/><div className="h-[440px] rounded-3xl bg-muted"/><div className="h-16 rounded-2xl bg-muted"/></div></div>; }

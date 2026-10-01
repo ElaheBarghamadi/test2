@@ -144,7 +144,7 @@ export function PersianDateTimeField({ label, value, onChange, timezone, min, ma
                   className={cn(
                     "grid h-9 min-w-0 place-items-center rounded-lg text-[11px] font-bold transition-colors",
                     !cell.inMonth && "text-muted-foreground/55",
-                    isSelected ? "bg-primary text-white" : "hover:bg-muted",
+                    isSelected ? "bg-primary text-primary-foreground" : "hover:bg-muted",
                     cell.isToday && !isSelected && "ring-1 ring-primary/45",
                     blocked && "cursor-not-allowed opacity-35 hover:bg-transparent",
                   )}

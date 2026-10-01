@@ -264,7 +264,7 @@ function StudentRail({ rows, activeId, onSelect }: { rows: ApiTeacherResultRowDt
                 <span className="block truncate text-xs font-black">{row.student_name}</span>
                 <span className="mt-0.5 block text-[10px] text-muted-foreground">{[row.grade, row.class_name].filter(Boolean).join(" · ") || "بدون کلاس"}</span>
               </span>
-              {open > 0 ? <span className="shrink-0 rounded-lg bg-amber-500/12 px-1.5 py-1 text-[10px] font-black text-amber-700 dark:text-amber-400">{toPersianNumber(open)}</span> : <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600"/>}
+              {open > 0 ? <span className="shrink-0 rounded-lg bg-amber-500/12 px-1.5 py-1 text-[10px] font-black text-amber-700 dark:text-amber-400">{toPersianNumber(open)}</span> : <Check className="h-3.5 w-3.5 shrink-0 text-success"/>}
             </button>
           );
         })}
@@ -708,7 +708,7 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
       <Card className="border-primary/20 bg-primary/[.03]">
         <CardHeader className="gap-3">
           <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold text-muted-foreground">
-            <span className="rounded-lg bg-primary px-2 py-1 text-[11px] font-black text-white">سؤال {toPersianNumber(page.question.order)} از {toPersianNumber(page.progress.total)}</span>
+            <span className="rounded-lg bg-primary px-2 py-1 text-[11px] font-black text-primary-foreground">سؤال {toPersianNumber(page.question.order)} از {toPersianNumber(page.progress.total)}</span>
             <Badge variant="neutral">بارم {toPersianNumber(maximum)}</Badge>
             {page.question.requires_manual_grading ? <Badge variant="warning">نمره‌گذاری دست‌ی</Badge> : <Badge variant="teal">کلیددار · نمرهٔ خودکار</Badge>}
             {page.stats.answered_count !== undefined && <span>{toPersianNumber(page.stats.answered_count)} پاسخ از {toPersianNumber(page.stats.attempt_count)}</span>}

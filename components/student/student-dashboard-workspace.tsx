@@ -143,7 +143,7 @@ export function StudentDashboardWorkspace() {
             onClick={() => setFilter(item.key)}
             className={cn(
               "inline-flex items-center gap-2 rounded-2xl border px-3.5 py-2.5 text-xs font-black transition-all",
-              active ? "border-primary bg-primary text-white shadow-soft" : "bg-card hover:border-primary/45",
+              active ? "border-primary bg-primary text-primary-foreground shadow-soft" : "bg-card hover:border-primary/45",
               !active && count === 0 && "text-muted-foreground",
             )}
           >
@@ -191,7 +191,7 @@ export function StudentDashboardWorkspace() {
         <Card>
           <CardHeader><CardTitle className="text-sm">دسترسی امن آزمون</CardTitle><CardDescription>اطلاعات هر آزمون تنها هنگام شروع و از سرور دریافت می‌شود.</CardDescription></CardHeader>
           <CardContent>
-            <div className="rounded-2xl bg-primary/5 p-4 text-xs leading-6 text-muted-foreground"><ShieldCheck className="ml-1.5 inline h-4 w-4 text-emerald-600 align-text-bottom"/>زمان، ترتیب سؤال‌ها و نمرهٔ نهایی در سرور محاسبه می‌شود؛ کلید پاسخ برای دانش‌آموز ارسال نمی‌شود.</div>
+            <div className="rounded-2xl bg-primary/5 p-4 text-xs leading-6 text-muted-foreground"><ShieldCheck className="ml-1.5 inline h-4 w-4 text-success align-text-bottom"/>زمان، ترتیب سؤال‌ها و نمرهٔ نهایی در سرور محاسبه می‌شود؛ کلید پاسخ برای دانش‌آموز ارسال نمی‌شود.</div>
             {refreshedAt && <p className="mt-3 text-[11px] text-muted-foreground">آخرین به‌روزرسانی: {formatDateTime(refreshedAt.toISOString())}</p>}
           </CardContent>
         </Card>
@@ -312,7 +312,7 @@ function windowProgress(exam: Exam, now: number) {
 /** A ring instead of a bare number: the percentage reads instantly, and the colour carries the verdict. */
 function ResultRing({ result }: { result: NonNullable<Exam["resultSummary"]> }) {
   const percent = result.percentage === null ? null : Math.max(0, Math.min(100, Math.round(result.percentage)));
-  const tone = percent === null ? "text-muted-foreground" : result.passed === false ? "text-amber-600" : "text-emerald-600";
+  const tone = percent === null ? "text-muted-foreground" : result.passed === false ? "text-warning" : "text-success";
   const circumference = 2 * Math.PI * 22;
   return (
     <div className="flex w-[132px] shrink-0 items-center gap-3 rounded-2xl border bg-muted/30 p-2.5">
@@ -376,7 +376,7 @@ function HowItWorksCard() {
             </span>
           </div>
         ))}
-        <p className="flex items-center gap-1.5 pt-1 text-[10px] font-bold text-muted-foreground"><Lightbulb className="h-3.5 w-3.5 text-amber-500"/>اگر زمان آزمون به پایان برسد، آخرین پاسخ‌های ذخیره‌شده ارسال می‌شود.</p>
+        <p className="flex items-center gap-1.5 pt-1 text-[10px] font-bold text-muted-foreground"><Lightbulb className="h-3.5 w-3.5 text-warning"/>اگر زمان آزمون به پایان برسد، آخرین پاسخ‌های ذخیره‌شده ارسال می‌شود.</p>
       </CardContent>
     </Card>
   );

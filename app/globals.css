@@ -18,8 +18,15 @@
     --muted-foreground: 224 12% 46%;
     --accent: 181 66% 93%;
     --accent-foreground: 181 55% 24%;
-    --destructive: 0 72% 55%;
+    --destructive: 0 72% 45%;
     --destructive-foreground: 0 0% 100%;
+    /* Status text: measured against card, background and their own 10% tint. */
+    --success: 162 88% 24%;
+    --success-foreground: 0 0% 100%;
+    --warning: 28 88% 30%;
+    --warning-foreground: 0 0% 100%;
+    --danger: 343 80% 36%;
+    --danger-foreground: 0 0% 100%;
     --border: 225 24% 90%;
     --input: 225 24% 90%;
     --ring: 234 74% 57%;
@@ -32,7 +39,7 @@
     --card-foreground: 220 25% 93%;
     --popover: 224 25% 13%;
     --popover-foreground: 220 25% 93%;
-    --primary: 235 89% 72%;
+    --primary: 235 90% 76%;
     --primary-foreground: 229 37% 12%;
     --secondary: 224 20% 19%;
     --secondary-foreground: 220 25% 93%;
@@ -40,8 +47,15 @@
     --muted-foreground: 220 12% 64%;
     --accent: 181 34% 18%;
     --accent-foreground: 181 55% 77%;
-    --destructive: 0 68% 61%;
-    --destructive-foreground: 0 0% 100%;
+    --destructive: 0 68% 66%;
+    /* Dark text on the light red: white on it was 3.7:1, below AA for a badge label. */
+    --destructive-foreground: 0 70% 14%;
+    --success: 158 64% 52%;
+    --success-foreground: 160 60% 12%;
+    --warning: 43 96% 56%;
+    --warning-foreground: 30 70% 12%;
+    --danger: 351 95% 71%;
+    --danger-foreground: 350 60% 14%;
     --border: 224 19% 23%;
     --input: 224 19% 23%;
     --ring: 235 89% 72%;
@@ -49,7 +63,7 @@
   }
   * { @apply border-border; }
   html { scroll-behavior: smooth; }
-  body { @apply min-h-screen bg-background text-foreground antialiased; font-family: Vazirmatn, IRANSansX, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { @apply min-h-dvh bg-background text-foreground antialiased; font-family: Vazirmatn, IRANSansX, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   /*
    * A phone must never be able to scroll the page sideways. One decoration with a negative offset or a
    * table one pixel too wide is enough to cause it, and the symptom (the whole layout sliding under the
@@ -66,7 +80,7 @@
 }
 
 @layer components {
-  .app-shell { @apply min-h-screen bg-background; }
+  .app-shell { @apply min-h-dvh bg-background; }
   .soft-grid { background-image: linear-gradient(hsl(var(--border) / .45) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--border) / .45) 1px, transparent 1px); background-size: 34px 34px; }
   .page-enter { animation: page-enter .35s ease-out both; }
   .section-label { @apply text-xs font-bold tracking-[.08em] text-primary; }
@@ -75,3 +89,18 @@
 @keyframes page-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; } }
+
+/*
+ * Phone typography floor.
+ *
+ * The interface leans on 10-11px metadata labels (dates, counters, hints). They are legible on a laptop and
+ * too small on a phone, where the same element is also the only way to read that information. Rather than
+ * sprinkle a mobile size class over ~200 call sites and let them drift apart again, the two smallest steps
+ * are raised below `sm` in one place. Only `font-size` is touched, so any explicit `leading-*` still wins.
+ * The attribute selector matches the literal utility names Tailwind emits.
+ */
+@media (max-width: 639px) {
+  [class~="text-[9px]"] { font-size: 10.5px; }
+  [class~="text-[10px]"] { font-size: 11.5px; }
+  [class~="text-[11px]"] { font-size: 12.5px; }
+}

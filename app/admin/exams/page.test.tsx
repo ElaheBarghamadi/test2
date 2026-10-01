@@ -73,12 +73,20 @@ beforeEach(() => {
 
 async function page() {
   render(<AdminExamsPage/>);
-  await screen.findByText("آزمون draft-1");
+  await screen.findByTestId("admin-exam-cards");
+  await waitFor(() => expect(screen.getAllByText("آزمون draft-1").length).toBeGreaterThan(0));
+}
+
+/** The desktop table is the row contract; the phone cards are asserted separately. Both render in jsdom. */
+function tableRow(title: string) {
+  const table = screen.getByTestId("admin-exam-table");
+  const row = Array.from(table.querySelectorAll("tr")).find((candidate) => candidate.textContent?.includes(title));
+  if (!row) throw new Error(`no table row for ${title}`);
+  return row as HTMLElement;
 }
 
 function rowActions(title: string) {
-  const row = screen.getByText(title).closest("tr") as HTMLElement;
-  return Array.from(row.querySelectorAll("button")).map((button) => button.textContent?.trim());
+  return Array.from(tableRow(title).querySelectorAll("button")).map((button) => button.textContent?.trim());
 }
 
 describe("admin exam lifecycle", () => {
@@ -91,7 +99,7 @@ describe("admin exam lifecycle", () => {
 
   it("publishes through the exam endpoint and reloads the table", async () => {
     await page();
-    fireEvent.click(screen.getByRole("button", { name: /زمان‌بندی و انتشار/ }));
+    fireEvent.click(within(screen.getByTestId("admin-exam-table")).getByRole("button", { name: /زمان‌بندی و انتشار/ }));
     await waitFor(() => expect(api.publish).toHaveBeenCalledWith("draft-1"));
     await waitFor(() => expect(api.exams).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/زمان‌بندی و انتشار انجام شد/)).toBeTruthy();
@@ -99,7 +107,7 @@ describe("admin exam lifecycle", () => {
 
   it("reports what publishing results actually released, including what is still pending", async () => {
     await page();
-    const finished = screen.getByText("آزمون done-1").closest("tr") as HTMLElement;
+    const finished = tableRow("آزمون done-1");
     fireEvent.click(within(finished).getByRole("button", { name: /انتشار نتایج/ }));
     await waitFor(() => expect(api.publishResults).toHaveBeenCalledWith("done-1"));
     const notice = await screen.findByText(/نتیجه منتشر شد/);
@@ -111,7 +119,7 @@ describe("admin exam lifecycle", () => {
     // The API's own error type, because `apiErrorMessage` reads the payload it carries.
     api.publish.mockRejectedValueOnce(new ApiError(400, { detail: "آزمون هنوز سؤال کاملی ندارد." }));
     await page();
-    fireEvent.click(screen.getByRole("button", { name: /زمان‌بندی و انتشار/ }));
+    fireEvent.click(within(screen.getByTestId("admin-exam-table")).getByRole("button", { name: /زمان‌بندی و انتشار/ }));
     expect(await screen.findByText("آزمون هنوز سؤال کاملی ندارد.")).toBeTruthy();
     expect(api.exams).toHaveBeenCalledTimes(1);
   });
@@ -123,6 +131,16 @@ describe("admin exam lifecycle", () => {
     session.role = "admin";
     render(<AdminExamsPage/>);
     expect(await screen.findByText(/تغییر محتوای آزمون همچنان فقط از مسیر مالک آزمون/)).toBeTruthy();
+  });
+
+  it("offers the same moves as cards on a phone, where the table is scrolled off screen", async () => {
+    // Below `sm` the seven-column table is replaced by cards; the lifecycle buttons have to come with it,
+    // otherwise the principal's whole job on this page is behind a horizontal scroll.
+    await page();
+    const cards = screen.getByTestId("admin-exam-cards");
+    const card = Array.from(cards.querySelectorAll("div")).find((node) => node.textContent?.includes("آزمون live-1"))!;
+    const moves = Array.from(card.querySelectorAll("button")).map((button) => button.textContent?.trim());
+    expect(moves).toEqual(["تمدید ۱۵ دقیقه", "پایان آزمون", "انتشار نتایج"]);
   });
 
   it("titles itself for the school when a principal is looking", async () => {

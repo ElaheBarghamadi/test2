@@ -29,7 +29,7 @@ export function ExamSessionNotice({
     return (
       <Card role="alert" className="mb-4 border-amber-500/40 bg-amber-500/[.08]">
         <div className="flex flex-wrap items-center gap-3 p-3.5">
-          <MonitorSmartphone className="h-5 w-5 shrink-0 text-amber-600" />
+          <MonitorSmartphone className="h-5 w-5 shrink-0 text-warning" />
           <div className="min-w-0 flex-1">
             <p className="text-sm font-black">این آزمون در پنجرهٔ دیگری باز است</p>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">

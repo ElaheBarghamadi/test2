@@ -42,7 +42,7 @@ export function TrueFalseQuestion({ question, value, onChange, disabled = false 
               )}
             >
               <input id={inputId} type="radio" name={`${question.id}-true-false`} value={String(choice.value)} checked={checked} onChange={() => onChange(choice.value)} disabled={disabled} className="sr-only"/>
-              <span className={cn("grid h-10 w-10 shrink-0 place-items-center rounded-xl border transition-colors", checked ? "border-primary bg-primary text-white" : "border-muted-foreground/25 text-muted-foreground")}><Icon className="h-5 w-5"/></span>
+              <span className={cn("grid h-10 w-10 shrink-0 place-items-center rounded-xl border transition-colors", checked ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/25 text-muted-foreground")}><Icon className="h-5 w-5"/></span>
               <span className="min-w-0">
                 <span className="block text-sm font-black">{choice.label}</span>
                 <span className="mt-0.5 block text-[11px] leading-5 text-muted-foreground">{choice.hint}</span>

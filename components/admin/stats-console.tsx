@@ -210,7 +210,7 @@ export function AdminStatsConsole({ canControl }: { canControl: boolean }) {
                 <li className="flex justify-between gap-2"><span>در حال نوشتن</span><b className="text-foreground">{toPersianNumber(stats.activity.live_now.attempts_in_progress)}</b></li>
                 <li className="flex justify-between gap-2"><span>دانش‌آموز فعال</span><b className="text-foreground">{toPersianNumber(stats.activity.live_now.students_writing)}</b></li>
                 <li className="flex justify-between gap-2"><span>آزمون فعال</span><b className="text-foreground">{toPersianNumber(stats.activity.live_now.exams_live)}</b></li>
-                <li className="flex justify-between gap-2"><span>از زمانش گذشته</span><b className={cn(stats.activity.live_now.exams_overdue && "text-amber-700 dark:text-amber-400")}>{toPersianNumber(stats.activity.live_now.exams_overdue)}</b></li>
+                <li className="flex justify-between gap-2"><span>از زمانش گذشته</span><b className={cn(stats.activity.live_now.exams_overdue && "text-warning")}>{toPersianNumber(stats.activity.live_now.exams_overdue)}</b></li>
               </ul>
               <p className="mt-3 text-[10px] leading-5">معیار «همین حالا» نشستِ بازِ سرور است، نه کلیک مرورگر.</p>
             </div>
@@ -244,7 +244,7 @@ export function AdminStatsConsole({ canControl }: { canControl: boolean }) {
                   <p className="flex justify-between gap-2"><span>موتور</span><b className="text-foreground">{stats.health.database.engine}</b></p>
                   <p className="flex justify-between gap-2"><span>حجم</span><b className="text-foreground">{formatBytes(stats.health.database.size_bytes)}</b></p>
                   <p className="flex justify-between gap-2"><span>مهاجرت‌های باز</span><b className="text-foreground">—</b></p>
-                  <p className="flex items-center gap-1.5 pt-1"><ShieldCheck className="h-3.5 w-3.5 text-emerald-600"/>Django {stats.health.django}{stats.health.debug ? " · حالت توسعه" : ""}</p>
+                  <p className="flex items-center gap-1.5 pt-1"><ShieldCheck className="h-3.5 w-3.5 text-success"/>Django {stats.health.django}{stats.health.debug ? " · حالت توسعه" : ""}</p>
                 </div>
               )}
             </div>
@@ -313,7 +313,41 @@ export function AdminStatsConsole({ canControl }: { canControl: boolean }) {
         </CardHeader>
         <CardContent>
           {live.length ? (
-            <div className="overflow-x-auto">
+            <>
+              {/* The live monitor is the page a principal opens on a phone during an exam; the table below is
+                  seven columns wide, so the same rows have to be readable and actionable as cards. */}
+              <div className="space-y-2.5 sm:hidden" data-testid="live-attempt-cards">
+                {live.map((row) => (
+                  <div className="rounded-xl border p-3.5" key={row.id}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-bold">{row.student.name}</p>
+                        <p className="truncate text-[10px] text-muted-foreground">{row.student.email}</p>
+                      </div>
+                      {row.device_locked && <Badge variant="warning">قفل دستگاه</Badge>}
+                    </div>
+                    <p className="mt-2 truncate text-xs text-muted-foreground">{row.exam.title} · تلاش {toPersianNumber(row.attempt_number)}</p>
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
+                      <p>زمان باقی‌مانده: <span className="font-bold">{row.remaining_seconds === null ? "—" : `${toPersianNumber(Math.max(0, Math.round(row.remaining_seconds / 60)))} دقیقه`}</span></p>
+                      <p>خروج از تب: <span className="font-bold">{toPersianNumber(row.tab_switches)}</span></p>
+                      <p className="col-span-2 text-muted-foreground">آخرین فعالیت: {formatDateTime(row.last_activity_at)}</p>
+                    </div>
+                    {canControl && (
+                      <div className="mt-3 flex flex-wrap gap-1.5 border-t pt-3">
+                        <Button size="sm" variant="ghost" disabled={busy === row.id} onClick={() => void run(row.id, () => adminApi.attemptAction(row.id, "finalize"), "پاسخ‌برگ بسته شد")} aria-label={`بستن پاسخ‌برگ ${row.student.name}`}>
+                          <Archive className="h-3.5 w-3.5"/>بستن
+                        </Button>
+                        {row.device_locked && (
+                          <Button size="sm" variant="ghost" disabled={busy === row.id} onClick={() => void run(row.id, () => adminApi.attemptAction(row.id, "unlock-device"), "قفل دستگاه باز شد")} aria-label={`بازکردن قفل دستگاه ${row.student.name}`}>
+                            <LockOpen className="h-3.5 w-3.5"/>بازکردن قفل
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="hidden overflow-x-auto sm:block" data-testid="admin-live-table">
               <table className="w-full min-w-[640px] text-xs">
                 <thead className="text-[10px] uppercase text-muted-foreground">
                   <tr className="border-b">
@@ -356,7 +390,8 @@ export function AdminStatsConsole({ canControl }: { canControl: boolean }) {
                   ))}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           ) : (
             <p className="rounded-xl bg-muted/50 px-3 py-6 text-center text-xs text-muted-foreground">همین حالا کسی در حال نوشتن نیست.</p>
           )}

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ApiAdminDatabaseDto, ApiAdminLiveAttemptDto, ApiAdminStatsDto } from "@/lib/api/dtos";
 import { toPersianNumber } from "@/lib/utils";
 
@@ -129,13 +129,25 @@ describe("control", () => {
 
   it("closes an open sheet from the live list, and releases a device lock only where one is set", async () => {
     render(<AdminStatsConsole canControl/>);
-    const close = await screen.findByRole("button", { name: /بستن پاسخ‌برگ سارا محمدی/ });
+    // Both the desktop table and the phone card list render in jsdom; the flow is asserted on the table, and
+    // the card list carries the same controls (asserted in the test below).
+    const table = await screen.findByTestId("admin-live-table");
+    const close = within(table).getByRole("button", { name: /بستن پاسخ‌برگ سارا محمدی/ });
     fireEvent.click(close);
     await waitFor(() => expect(api.attemptAction).toHaveBeenCalledWith("attempt-1", "finalize"));
 
-    const unlock = screen.getByRole("button", { name: /بازکردن قفل دستگاه سارا محمدی/ });
+    const unlock = within(table).getByRole("button", { name: /بازکردن قفل دستگاه سارا محمدی/ });
     fireEvent.click(unlock);
     await waitFor(() => expect(api.attemptAction).toHaveBeenCalledWith("attempt-1", "unlock-device"));
+  });
+
+  it("gives the phone card list the same controls as the table", async () => {
+    // Below `sm` the seven-column monitor is replaced by cards; a principal on a phone still has to be able to
+    // close a sheet or release a locked device, so the two renderings must carry the same controls.
+    render(<AdminStatsConsole canControl/>);
+    const cards = await screen.findByTestId("live-attempt-cards");
+    expect(within(cards).getByRole("button", { name: /بستن پاسخ‌برگ سارا محمدی/ })).toBeTruthy();
+    expect(within(cards).getByRole("button", { name: /بازکردن قفل دستگاه سارا محمدی/ })).toBeTruthy();
   });
 
   it("does not draw actions for a school administrator, and still shows them the numbers", async () => {

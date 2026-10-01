@@ -6,7 +6,7 @@ import { dashboardForRole, useAuthStore } from "@/lib/state/auth-store";
 import type { Role } from "@/lib/types/domain";
 
 function LoadingScreen() {
-  return <main className="grid min-h-screen place-items-center bg-background"><div className="flex items-center gap-3 text-sm font-bold text-muted-foreground"><span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent"/>در حال بررسی دسترسی…</div></main>;
+  return <main className="grid min-h-dvh place-items-center bg-background"><div className="flex items-center gap-3 text-sm font-bold text-muted-foreground"><span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent"/>در حال بررسی دسترسی…</div></main>;
 }
 
 /**
