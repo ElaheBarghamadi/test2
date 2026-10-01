@@ -5,12 +5,15 @@ from decimal import Decimal
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import F, Max, Prefetch, Sum
 from django.utils import timezone
+
+if TYPE_CHECKING:
+    from apps.users.models import User
 
 from .content_identity import question_content_hash
 from .models import Exam, ExamSettings, Question, QuestionOption

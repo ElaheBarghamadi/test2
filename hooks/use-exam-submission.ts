@@ -3,6 +3,7 @@
 import { useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import type { Exam } from "@/lib/types/domain";
+import { dropJournal } from "@/lib/exam/answer-journal";
 import { examAttemptService } from "@/lib/services/exam-attempt-service";
 import { useExamAttemptStore } from "@/lib/state/exam-attempt-store";
 import { useToastStore } from "@/lib/state/toast-store";
@@ -52,6 +53,9 @@ export function useExamSubmission(exam: Exam, options?: { examSession?: string }
       beginSubmission();
       await examAttemptService.submitAttempt(attempt, { examSession, trigger: submitOptions?.auto ? "auto" : "manual" });
       finishSubmission();
+      // The server owns the sheet now and has already graded what it accepted: the local copy of the
+      // queue has done its job and must not be restorable on the next load.
+      void dropJournal(attemptId);
       setSessionConflict(null);
       toast({
         title: submitOptions?.auto ? "زمان آزمون پایان یافت؛ پاسخ‌ها ارسال شدند" : "آزمون با موفقیت ارسال شد",

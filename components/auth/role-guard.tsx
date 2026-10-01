@@ -9,18 +9,33 @@ function LoadingScreen() {
   return <main className="grid min-h-screen place-items-center bg-background"><div className="flex items-center gap-3 text-sm font-bold text-muted-foreground"><span className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent"/>در حال بررسی دسترسی…</div></main>;
 }
 
-export function RoleGuard({ role, children }: { role: Role; children: React.ReactNode }) {
+/**
+ * Which roles may stand on a screen.
+ *
+ * The guard takes a list, not one role, because the panels are not one-role-per-path: `/admin/*` belongs to
+ * the platform administrator *and* the school administrator (one console, with the data narrowed to one
+ * school), and `/teacher/*` also admits administrators, whose API accepts them. `lib/auth/page-access.ts`
+ * states exactly the same policy for the server-side gate, and the two must agree: a single-role guard here
+ * turned every allowed-but-not-equal role into a bounce toward a dashboard the visitor was already standing
+ * on — a redirect loop that left the school administrator (and an administrator opening a teacher screen)
+ * on the loading screen forever.
+ */
+export function RoleGuard({ roles, children }: { roles: readonly Role[]; children: React.ReactNode }) {
   const status = useAuthStore((state) => state.status);
   const user = useAuthStore((state) => state.user);
   const router = useRouter();
   const pathname = usePathname();
+  // The callers pass an array literal, so the effect keys off the joined set instead of the array identity:
+  // re-running the same redirect on every render would be noise, not policy.
+  const allowedRoles = roles.join(",");
+  const admitted = status === "authenticated" && user ? allowedRoles.split(",").includes(user.role) : false;
 
   useEffect(() => {
     if (status === "checking") return;
     if (!user) { router.replace(`/login?next=${encodeURIComponent(pathname)}`); return; }
-    if (user.role !== role) router.replace(dashboardForRole(user.role));
-  }, [pathname, role, router, status, user]);
+    if (!allowedRoles.split(",").includes(user.role)) router.replace(dashboardForRole(user.role));
+  }, [allowedRoles, pathname, router, status, user]);
 
-  if (status === "checking" || !user || user.role !== role) return <LoadingScreen />;
+  if (!admitted) return <LoadingScreen />;
   return <>{children}</>;
 }

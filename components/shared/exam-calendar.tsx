@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { buildMonthGrid, persianMonthLabel, PERSIAN_WEEKDAYS, supportsPersianCalendar, tehranDayKey, toPersianDigits, shiftMonth } from "@/lib/utils/persian-calendar";
+import { buildMonthGrid, persianMonthLabel, PERSIAN_WEEKDAYS, supportsPersianCalendar, tehranDayKey, TEHRAN, toPersianDigits, shiftMonth } from "@/lib/utils/persian-calendar";
 import { formatDate, formatDateTime, cn } from "@/lib/utils";
 import type { Exam } from "@/lib/types/domain";
 
@@ -98,7 +98,11 @@ export function ExamCalendar({ exams, role, onSelect }: { exams: Exam[]; role: "
         <div className="mt-1 grid grid-cols-7 gap-1">
           {flat.map((day, index) => {
             const dayExams = byDay.get(day.dayKey) ?? [];
-            const label = `${formatDate(day.date.toISOString())}${dayExams.length ? ` · ${toPersianDigits(dayExams.length)} آزمون` : ""}`;
+            // The cell is a Tehran day (the grid is built on `tehranDayKey`), so its label has to be read on
+            // the same clock. Formatting the raw midnight-UTC instant in the viewer's own timezone printed
+            // the *previous* day to anyone sitting west of Iran — a screen reader announcing a day that does
+            // not match the number in the cell.
+            const label = `${formatDate(day.date.toISOString(), TEHRAN)}${dayExams.length ? ` · ${toPersianDigits(dayExams.length)} آزمون` : ""}`;
             return (
               <button
                 key={day.dayKey}
@@ -137,7 +141,8 @@ export function ExamCalendar({ exams, role, onSelect }: { exams: Exam[]; role: "
           return <li key={day.dayKey} className="flex flex-wrap items-center gap-2 text-[11px]">
             <span className="font-black text-primary">{toPersianDigits(day.persianDay)}</span>
             {items.map((exam) => <button key={exam.id} type="button" onClick={() => (onSelect ? onSelect(exam) : openExam(exam, role))} className="rounded-lg px-1.5 py-0.5 font-bold text-muted-foreground underline-offset-2 hover:bg-muted hover:text-foreground hover:underline">{exam.title}</button>)}
-            <span className="text-muted-foreground">{formatDateTime(items[0].startAt)}</span>
+            {/* The day this row belongs to is a school day, so the time beside it is the school's time. */}
+            <span className="text-muted-foreground">{formatDateTime(items[0].startAt, items[0].schedule?.timezone || TEHRAN)}</span>
           </li>;
         })}
       </ul>}

@@ -7,6 +7,7 @@ import { toUser } from "@/lib/api/mappers";
 import { clearApiCache } from "@/lib/api/cache";
 import { tokenStorage } from "@/lib/api/token-storage";
 import { clearSessionMirror, syncSessionMirror } from "@/lib/api/session-mirror";
+import { dropAllJournals } from "@/lib/exam/answer-journal";
 import { rolePanel } from "@/lib/auth/roles";
 import type { ApiRegisterPayload } from "@/lib/api/dtos";
 import type { User } from "@/lib/types/domain";
@@ -45,6 +46,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       tokenStorage.clear();
       clearApiCache();
       void clearSessionMirror();
+      // A session that could not be confirmed is still the end of this student's turn on this machine.
+      void dropAllJournals();
       set(anonymous);
     }
   },
@@ -72,6 +75,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     } finally {
       tokenStorage.clear();
       clearApiCache();
+      // Unsent answers are still somebody's exam: signing out on a shared school computer takes them too.
+      void dropAllJournals();
       await clearSessionMirror();
       set(anonymous);
     }
@@ -81,6 +86,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   // without awaiting it: a stale mirror only means the gate falls back to its hint on the next request.
   clearSession: () => {
     tokenStorage.clear();
+    // The journal outlives the tab, so it is cleared here as well as on an explicit sign-out.
+    void dropAllJournals();
     // The cache holds this user's lists; a logout that leaves them behind can be read by whoever
     // signs in next in the same tab.
     clearApiCache();

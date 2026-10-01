@@ -1,12 +1,22 @@
 "use client";
 
 import { create } from "zustand";
+import type { JournalRecord } from "@/lib/exam/answer-journal";
 import type { AnswerValue, Exam, ExamAnswer, ExamAttempt } from "@/lib/types/domain";
 
 interface AttemptState {
   attempt: ExamAttempt | null;
   initialize: (exam: Exam) => void;
   hydrateRemote: (attempt: ExamAttempt) => void;
+  /**
+   * Re-apply the edits this browser never managed to send, after a reload or a crash.
+   *
+   * The server's copy is the baseline — `hydrateRemote` has already installed it — and the journal names
+   * only the questions still queued, so nothing the server already holds can be overwritten by a stale
+   * record. The queue is re-armed (revision bumped, status back to "saving" unless the tab is offline) so
+   * the autosave effect picks the work up on its own instead of waiting for the student to type again.
+   */
+  restoreJournal: (record: JournalRecord) => void;
   start: () => void;
   setAnswer: (questionId: string, value: AnswerValue) => void;
   toggleFlag: (questionId: string) => void;
@@ -53,6 +63,41 @@ export const useExamAttemptStore = create<AttemptState>((set, get) => ({
   // A reload or a session claim is a fresh start for the conflict flag; the pending queue is preserved
   // by the caller because those edits are still the student's own unsent work.
   hydrateRemote: (attempt) => set({ attempt: { ...attempt, sessionConflict: null, pendingAnswerQuestionIds: attempt.pendingAnswerQuestionIds ?? [], pendingFlagQuestionIds: attempt.pendingFlagQuestionIds ?? [] } }),
+  restoreJournal: (record) => set((state) => {
+    const attempt = state.attempt;
+    if (!attempt || attempt.id !== record.attemptId) return state;
+    if (attempt.status !== "in_progress" && attempt.status !== "expired") return state;
+    // A question the record names but cannot resolve is skipped: it belongs to another paper, or the exam
+    // was edited after the answer was written. Restoring an id the exam no longer has would only produce a
+    // write the server refuses.
+    const answerIds = record.pendingAnswerQuestionIds.filter((questionId) => record.answers[questionId]);
+    const flagIds = record.pendingFlagQuestionIds.filter((questionId) => record.answers[questionId]);
+    if (!answerIds.length && !flagIds.length) return state;
+    const answering = new Set(answerIds);
+    const flagging = new Set(flagIds);
+    const answers = { ...attempt.answers };
+    for (const questionId of new Set([...answerIds, ...flagIds])) {
+      const stored = record.answers[questionId]!;
+      const existing = answers[questionId];
+      answers[questionId] = {
+        questionId,
+        // The value is only taken back when that question's *answer* was unsent; a flag-only edit leaves the
+        // answered value exactly as the server has it.
+        value: answering.has(questionId) ? stored.value : existing?.value ?? null,
+        flagged: flagging.has(questionId) ? stored.flagged : existing?.flagged ?? false,
+        updatedAt: stored.updatedAt,
+      };
+    }
+    return { attempt: {
+      ...attempt,
+      answers,
+      pendingAnswerQuestionIds: [...new Set([...(attempt.pendingAnswerQuestionIds ?? []), ...answerIds])],
+      pendingFlagQuestionIds: [...new Set([...(attempt.pendingFlagQuestionIds ?? []), ...flagIds])],
+      // A local counter, not a server number: it only has to move so the autosave effect arms again.
+      answerRevision: Math.max(attempt.answerRevision, record.answerRevision) + 1,
+      saveStatus: attempt.connectionStatus === "offline" ? "saved_locally" : "saving",
+    } };
+  }),
   start: () => set((state) => !state.attempt || state.attempt.status !== "not_started" ? state : { attempt: { ...state.attempt, status: "in_progress", startedAt: new Date().toISOString(), lastTickAt: new Date().toISOString() } }),
   setAnswer: (questionId, value) => set((state) => {
     if (!state.attempt || !["in_progress", "expired"].includes(state.attempt.status)) return state;

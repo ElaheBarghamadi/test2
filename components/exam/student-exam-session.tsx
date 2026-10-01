@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { attemptsApi } from "@/lib/api/attempts";
 import { apiErrorMessage } from "@/lib/api/client";
 import { toStudentAttempt, toStudentDashboardExam } from "@/lib/api/mappers";
+import { readJournal } from "@/lib/exam/answer-journal";
 import { ExamReviewWorkspace } from "@/components/exam/exam-review-workspace";
 import { ExamStartWorkspace } from "@/components/exam/exam-start-workspace";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ type Session = { exam: Exam; attempt: ExamAttempt };
 export function StudentExamSession({ examId, mode }: { examId: string; mode: Mode }) {
   const router = useRouter();
   const hydrateRemote = useExamAttemptStore((state) => state.hydrateRemote);
+  const restoreJournal = useExamAttemptStore((state) => state.restoreJournal);
   const [preview, setPreview] = useState<Exam | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -36,11 +38,17 @@ export function StudentExamSession({ examId, mode }: { examId: string; mode: Mod
         // Reading with this tab's identity is what lets a refresh re-establish ownership quietly: the
         // server only refuses *writes* from an unknown session, never a reload.
         const next = toStudentAttempt(await attemptsApi.detail(item.attempt.id, { examSession }));
-        hydrateRemote(next.attempt); setSession(next);
+        hydrateRemote(next.attempt);
+        // Anything this browser never managed to send outranks the server's copy for exactly those rows.
+        // The order matters: the server's attempt is installed first and the journal only names what is
+        // still unsent, so an edit the server already has can never be rolled back by a stale record.
+        const journal = await readJournal(next.attempt.id);
+        if (journal) restoreJournal(journal);
+        setSession(next);
       } else { setSession(null); }
     } catch (requestError) { setError(apiErrorMessage(requestError, "بارگذاری اطلاعات آزمون انجام نشد.")); }
     finally { setLoading(false); }
-  }, [examId, examSession, hydrateRemote]);
+  }, [examId, examSession, hydrateRemote, restoreJournal]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {

@@ -6,7 +6,7 @@ import hashlib
 from decimal import Decimal, ROUND_HALF_UP
 from math import ceil
 from random import SystemRandom
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -17,6 +17,9 @@ from apps.organizations.models import SchoolMembership
 from apps.users.models import StudentProfile, User
 
 from .models import AttemptEvent, ExamAttempt, StudentAnswer
+
+if TYPE_CHECKING:  # Import cycles are avoided at runtime by the deferred imports in the functions below.
+    from apps.results.models import ExamResult
 
 from .grading import (
     VERDICT_CORRECT,

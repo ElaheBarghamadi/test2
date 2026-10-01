@@ -12,8 +12,6 @@ from rest_framework import serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from django.http import HttpResponse
-
 from apps.attempts.grading import (
     AnswerMark,
     answer_has_value,

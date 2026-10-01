@@ -48,7 +48,12 @@ export function AuthForm({ mode }: { mode: Mode }) {
   const nameError = submitted && mode === "register" && !name.trim();
 
   useEffect(() => {
-    if (authStatus === "authenticated" && currentUser) router.replace(dashboardForRole(currentUser.role));
+    if (authStatus !== "authenticated" || !currentUser) return;
+    // `?next=` is the reason this screen was opened at all, so it is honoured whether the sign-in just
+    // happened here or was already in place when the tab loaded. Sending an already-signed-in visitor to
+    // their dashboard instead used to swallow a deep link (the page gate puts the intended path there).
+    const target = safeNext(new URLSearchParams(window.location.search).get("next")) || dashboardForRole(currentUser.role);
+    router.replace(target);
   }, [authStatus, currentUser, router]);
 
   async function handleSubmit(event: FormEvent) {

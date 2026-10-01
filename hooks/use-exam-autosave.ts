@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { ApiError } from "@/lib/api/client";
+import { dropJournal, journalRecordFor, writeJournal } from "@/lib/exam/answer-journal";
 import { examAttemptService } from "@/lib/services/exam-attempt-service";
 import type { Exam, ExamAttempt } from "@/lib/types/domain";
 
@@ -9,6 +10,11 @@ import type { Exam, ExamAttempt } from "@/lib/types/domain";
 const AUTOSAVE_DELAY_MS = 350;
 /** A refused write is retried on a timer too, so a brief network drop cannot strand an answer. */
 const RETRY_DELAY_MS = 5_000;
+/**
+ * The on-disk copy is taken slightly sooner than the network write, so a tab closed mid-burst still leaves
+ * the student's last words on disk. It is a local write, so it costs nothing to be eager.
+ */
+const JOURNAL_DELAY_MS = 200;
 
 /**
  * Debounced, targeted persistence with a retry ladder.
@@ -40,6 +46,45 @@ export function useExamAutosave(
   const onConflict = options?.onConflict;
   const retry = options?.retry;
   const onQuestionsLocked = options?.onQuestionsLocked;
+  const attemptId = attempt?.id;
+  // The two queued lists, joined, are the effect's real trigger: they change exactly when the set of unsent
+  // questions does, while `answers` changes on every keystroke and would re-arm the timer for each one.
+  const pendingAnswerQuestionIds = attempt?.pendingAnswerQuestionIds?.join(",") ?? "";
+  const pendingFlagQuestionIds = attempt?.pendingFlagQuestionIds?.join(",") ?? "";
+
+  /**
+   * Mirror the unsent queue onto disk.
+   *
+   * This is what turns "the answers are safe" from a claim about a JavaScript object into a fact that
+   * survives a reload, a crash or a closed window. It deliberately runs *before* the network write and
+   * independently of it: the moment an edit exists, it is worth keeping, whether or not this device can
+   * reach the server right now.
+   *
+   * When the queue drains the record is deleted, so a later reload cannot restore work the server already
+   * has — the whole risk of keeping a local copy is restoring something stale, and that is what this rule
+   * removes.
+   */
+  useEffect(() => {
+    if (!attemptId || attemptId.startsWith("local-")) return;
+    const record = journalRecordFor(attempt);
+    if (!record) {
+      void dropJournal(attemptId);
+      return;
+    }
+    const timer = window.setTimeout(() => void writeJournal(record), JOURNAL_DELAY_MS);
+    // Closing a tab does not wait for a timer, so the same snapshot is also written on the way out.
+    const writeNow = () => void writeJournal(record);
+    window.addEventListener("pagehide", writeNow);
+    document.addEventListener("visibilitychange", writeNow);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("pagehide", writeNow);
+      document.removeEventListener("visibilitychange", writeNow);
+    };
+    // The dependency list is the whole rule: the record is built from the newest `attempt` at the moment the
+    // effect runs, and `answerRevision` moves on every edit, so each run already holds the current values.
+    // Depending on `attempt` itself would only add runs that produce the same record.
+  }, [attemptId, attempt?.status, attempt?.connectionStatus, attempt?.answerRevision, attempt?.saveStatus, attempt?.serverRevision, pendingAnswerQuestionIds, pendingFlagQuestionIds]);
 
   useEffect(() => {
     if (!attempt || attempt.status !== "in_progress") return;
