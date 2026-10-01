@@ -82,6 +82,34 @@ Validate a production build (do not run it concurrently with `npm run dev`):
 npm run build
 ```
 
+### Quality gates
+
+The same gates CI runs, runnable locally. A change is done when they agree:
+
+```bash
+npm run verify         # tsc --noEmit && vitest run          (frontend types + tests)
+npm run build          # production build
+npm run audit:deps     # npm audit --audit-level=high        (no known vulnerabilities, whole tree)
+
+cd backend
+python manage.py check                      # system checks
+python manage.py check_lock                 # requirements.lock still matches pyproject.toml
+python manage.py makemigrations --check --dry-run   # no model ahead of its migration
+python manage.py test                       # the Django suite
+python -m pip_audit -r requirements.lock    # no known vulnerabilities in the pinned set
+```
+
+Two dependency rules carry security weight here and are enforced, not remembered:
+
+- **`requirements.lock` is the security boundary.** `djangorestframework==3.17.2` is the release that makes
+  `DATA_UPLOAD_MAX_MEMORY_SIZE` apply to DRF's `request.data` (before it, the configured ceiling was bypassed on
+  every API endpoint), and `PyJWT==2.15.1` fixes the JWK-set parsing advisories. `pip-audit` reads the lockfile
+  directly, so the fix is always a pin bump.
+- **The lockfile and `pyproject.toml` have to agree.** A range raised in the manifest with the old pin left
+  behind installs the version the project just declared unacceptable, so `python manage.py check_lock` fails on
+  exactly that. The backend is intentionally absent from `.github/dependabot.yml` for the same reason: a
+  Dependabot PR cannot update both files for pip, and a green PR that changes nothing is worse than no PR.
+
 ### اجرای پروژه روی Windows بدون نصب npm در سیستم
 
 برای اجرای فرانت‌اند نیازی به نصب سراسری Node.js یا npm و دسترسی Administrator نیست. اسکریپت پروژه، نسخهٔ portable و تأییدشدهٔ Node.js را داخل `.tools/` دانلود می‌کند و npm را فقط از همان پوشه اجرا می‌کند. `.tools/` و `node_modules/` عمداً در Git ثبت نمی‌شوند.

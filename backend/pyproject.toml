@@ -9,12 +9,14 @@ description = "Django backend foundation for Examora"
 requires-python = ">=3.12"
 dependencies = [
   "Django>=5.1,<5.3",
-  "djangorestframework>=3.15,<3.17",
+  "djangorestframework>=3.17.2,<3.18",
   "djangorestframework-simplejwt>=5.3,<5.6",
   "django-cors-headers>=4.5,<4.8",
   "dj-database-url>=2.2,<3.1",
   "psycopg[binary]>=3.2,<3.4",
-  "python-dotenv>=1.0,<1.2",
+  "python-dotenv>=1.2.2,<1.3",
+  # Transitive through simplejwt, pinned here on purpose: 2.15 fixes the JWK-set parsing advisories.
+  "PyJWT>=2.15.1,<3",
 ]
 
 [tool.setuptools]

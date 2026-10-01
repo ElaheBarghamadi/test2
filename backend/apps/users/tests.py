@@ -217,3 +217,60 @@ class AuthRateLimitTests(TestCase):
 
         self.assertLessEqual(settings.PASSWORD_RESET_TIMEOUT, 60 * 60 * 6)
         self.assertFalse(settings.CORS_ALLOW_CREDENTIALS, "bearer tokens need no ambient credentials")
+
+
+class RequestSizeCeilingTests(TestCase):
+    """
+    The upload ceilings have to hold on the API, not only in settings.
+
+    `DATA_UPLOAD_MAX_MEMORY_SIZE` was configured, but DRF parsed `request.data` without consulting it, so a
+    JSON body of any size reached the serializer's validation. djangorestframework 3.17.2 is the release that
+    makes those numbers apply to `request.data` - a fixed version rather than a new feature - which is why
+    these tests live next to the pins that carry them. Without a test, the day a dependency resolves back to
+    an older DRF the ceiling goes quiet again.
+    """
+
+    def test_an_oversized_json_body_is_refused_before_it_is_parsed(self) -> None:
+        from django.conf import settings
+
+        ceiling = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+        client = APIClient()
+        response = client.post(
+            "/api/v1/auth/login/",
+            {"email": "student@example.com", "password": "x" * (ceiling + 1024)},
+            format="json",
+        )
+        # Django raises `RequestDataTooBig` (a `SuspiciousOperation`), which answers 400 before any parser
+        # or serializer sees the body. Verified against 3.17.2; the point of the pin is that it stays so.
+        self.assertEqual(response.status_code, 400, "a body over the ceiling must not be parsed")
+
+    def test_the_endpoint_still_works_after_a_refused_body(self) -> None:
+        """A refused request must not poison the connection or the server's state."""
+        from django.conf import settings
+
+        client = APIClient()
+        client.post("/api/v1/auth/login/", {"email": "a@example.com", "password": "x" * (settings.DATA_UPLOAD_MAX_MEMORY_SIZE + 1024)}, format="json")
+        normal = client.post("/api/v1/auth/login/", {"email": "nobody@example.com", "password": "whatever-1234"}, format="json")
+        self.assertEqual(normal.status_code, 401)
+
+    def test_a_body_under_the_ceiling_is_still_parsed(self) -> None:
+        """The ceiling has to sit above the largest legitimate payload, not in the middle of it.
+
+        A 300KB body is well past anything the forms produce and still an order of magnitude under the
+        ceiling; reaching the 401 for bad credentials proves it was parsed rather than refused.
+        """
+        client = APIClient()
+        response = client.post(
+            "/api/v1/auth/login/",
+            {"email": "nobody@example.com", "password": "wrong-password-1234", "unused_padding": "x" * 300_000},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_the_ceilings_are_the_documented_values(self) -> None:
+        from django.conf import settings
+
+        self.assertLessEqual(settings.DATA_UPLOAD_MAX_MEMORY_SIZE, 5 * 1024 * 1024)
+        self.assertLessEqual(settings.FILE_UPLOAD_MAX_MEMORY_SIZE, settings.DATA_UPLOAD_MAX_MEMORY_SIZE)
+        self.assertLessEqual(settings.DATA_UPLOAD_MAX_NUMBER_FIELDS, 1000)
+        self.assertEqual(settings.FILE_UPLOAD_PERMISSIONS, 0o640)

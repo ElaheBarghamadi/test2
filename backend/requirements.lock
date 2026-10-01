@@ -1,13 +1,19 @@
 # Resolved runtime dependency set for the Django backend foundation.
+# Pins are the fix versions for published advisories, not just the newest release:
+#   djangorestframework 3.17.2 - `request.data` bypassed DATA_UPLOAD_MAX_MEMORY_SIZE before this
+#   PyJWT 2.15.1 - the JWK/JWKS parsing and decode-options advisories fixed across 2.14-2.15
+#   python-dotenv 1.2.4 - set_key/unset_key followed symlinks
 # Regenerate intentionally after updating backend/pyproject.toml dependencies.
 asgiref==3.12.1
 Django==5.2.17
 dj-database-url==3.0.1
 django-cors-headers==4.7.0
-djangorestframework==3.16.1
+djangorestframework==3.17.2
 djangorestframework-simplejwt==5.5.1
-psycopg==3.3.5
-psycopg-binary==3.3.5
-PyJWT==2.13.0
-python-dotenv==1.1.1
+psycopg==3.3.6
+psycopg-binary==3.3.6
+PyJWT==2.15.1
+python-dotenv==1.2.4
 sqlparse==0.6.0
+typing-extensions==4.16.0 ; python_version < "3.13"
+tzdata==2026.4 ; sys_platform == "win32"

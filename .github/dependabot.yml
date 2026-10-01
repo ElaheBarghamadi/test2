@@ -1,0 +1,31 @@
+# Dependency movement, weekly, in reviewable pieces.
+#
+# The frontend is covered by npm, where Dependabot can update `package.json` and `package-lock.json` together -
+# the lockfile is what CI installs, so a PR that edits only the manifest would be a lie.
+#
+# The backend is deliberately *not* here. Its `requirements.lock` is a hand-maintained, fully pinned closure and
+# Dependabot cannot update both files for pip; a PR that raised a range in `pyproject.toml` while leaving the
+# lockfile alone would look green and change nothing. Backend movement is driven by the two gates that read the
+# lockfile directly: `pip-audit` (is a pinned version known-bad?) and `python manage.py check_lock` (is the pin
+# still inside the declared range?). That is how the seventeen advisories in DRF, PyJWT and python-dotenv were
+# found in the first place.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      # One PR a week for routine movement; security advisories still arrive on their own.
+      frontend-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3

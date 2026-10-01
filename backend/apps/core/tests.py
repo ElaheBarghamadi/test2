@@ -78,3 +78,62 @@ class ConditionalApiGetTests(TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertNotIn("ETag", missing.headers)
         self.assertEqual(response.status_code, 200)
+
+class LockfilePinTests(TestCase):
+    """`requirements.lock` is where this project's security fixes actually live, so it gets a guard.
+
+    djangorestframework 3.17.2 is the release that makes `DATA_UPLOAD_MAX_MEMORY_SIZE` apply to `request.data`,
+    and PyJWT 2.15.1 is the one that fixes the JWK-set parsing advisories. Both are pins in this file rather
+    than in `pyproject.toml`, which is why the two files are checked against each other instead of trusted.
+    """
+
+    def test_the_repository_lock_satisfies_the_declared_ranges(self) -> None:
+        from apps.core.lock_sync import check
+
+        self.assertEqual(check(), [], "requirements.lock drifted from pyproject.toml")
+
+    def test_a_floor_raised_past_the_pin_is_reported(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from apps.core.lock_sync import check
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "pyproject.toml").write_text(
+                '[project]\ndependencies = ["djangorestframework>=3.99,<4.0"]\n', encoding="utf-8"
+            )
+            (directory / "requirements.lock").write_text("djangorestframework==3.17.2\n", encoding="utf-8")
+            problems = check(directory)
+        self.assertEqual(problems, ["djangorestframework==3.17.2 violates the declared >=3.99"])
+
+    def test_a_declared_dependency_missing_from_the_lock_is_reported(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from apps.core.lock_sync import check
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "pyproject.toml").write_text('[project]\ndependencies = ["PyJWT>=2.15.1,<3"]\n', encoding="utf-8")
+            (directory / "requirements.lock").write_text("django==5.2.17\n", encoding="utf-8")
+            problems = check(directory)
+        self.assertEqual(problems, ["pyjwt is declared in pyproject.toml but not pinned in requirements.lock"])
+
+    def test_markers_do_not_hide_a_pin(self) -> None:
+        """`typing-extensions` and `tzdata` are pinned for one platform or one Python version; they still count."""
+        from apps.core.lock_sync import BACKEND_DIR, check, parse_lock
+
+        self.assertEqual(check(), [])
+        pinned = parse_lock(BACKEND_DIR / "requirements.lock")
+        self.assertIn("typing-extensions", pinned)
+        self.assertIn("tzdata", pinned)
+
+    def test_the_command_succeeds_on_the_real_files(self) -> None:
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("check_lock", stdout=out)
+        self.assertIn("matches", out.getvalue())
