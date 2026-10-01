@@ -280,6 +280,14 @@ describe("toStudentDashboardExam", () => {
     expect(toStudentDashboardExam(availableDto({ allow_previous_questions: undefined, question_layout: undefined }))).toMatchObject({ settings: { allowBackNavigation: true, questionLayout: "paged" } });
   });
 
+  it("carries both shuffle rules from the server instead of assuming they are off", () => {
+    // These two used to be hard-coded `false` on the way in, so a shuffled paper was described to the
+    // student as identical to everyone else's - the exact opposite of the teacher's setting.
+    const exam = toStudentDashboardExam(availableDto({ randomize_questions: true, randomize_options: true }));
+    expect(exam.settings).toMatchObject({ randomizeQuestions: true, randomizeOptions: true });
+    expect(toStudentDashboardExam(availableDto()).settings).toMatchObject({ randomizeQuestions: false, randomizeOptions: false });
+  });
+
   it("maps a published result into a score and a pass verdict", () => {
     const exam = toStudentDashboardExam(availableDto({
       availability: "completed",
@@ -326,6 +334,21 @@ describe("toStudentAttempt", () => {
       ...overrides,
     };
   }
+
+  it("keeps the server's option order and reports shuffling as on", () => {
+    // The server decides the order per attempt; the client must not re-sort by `order`, and the runner has
+    // to be able to say why the paper looks different.
+    const dto = attemptDto();
+    dto.exam.navigation = { ...dto.exam.navigation, randomize_options: true };
+    dto.questions[0].options = [{ id: OTHER_ID, text: "ب", order: 2 }, { id: SERVER_ID, text: "الف", order: 1 }];
+    const { exam } = toStudentAttempt(dto);
+    expect(exam.settings.randomizeOptions).toBe(true);
+    // `multiple_choice` is the wire name for the single-choice renderer; the labels must come back in the
+    // order the server sent, not the order the options were authored in.
+    const first = exam.questions[0];
+    if (first.type !== "single_choice" && first.type !== "multiple_choice") throw new Error("expected a choice question");
+    expect(first.options.map((option) => option.label)).toEqual(["ب", "الف"]);
+  });
 
   it("restores every answer shape into the domain value the renderers expect", () => {
     const { attempt } = toStudentAttempt(attemptDto());

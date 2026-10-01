@@ -17,7 +17,7 @@ Detailed request/response documentation is in [`api-v1.md`](api-v1.md).
 | Variable | Purpose |
 | --- | --- |
 | `DJANGO_SECRET_KEY` | Required when `DJANGO_DEBUG=false`; always use a unique secret outside local smoke tests. |
-| `DJANGO_DEBUG` | Defaults to `true` only for local development. |
+| `DJANGO_DEBUG` | Defaults to `false`, the safe branch. Local development sets `DJANGO_DEBUG=true` in `backend/.env`; leaving it unset outside development now yields the hardened settings instead of debug pages. |
 | `DATABASE_URL` | PostgreSQL connection URL for intended shared/runtime environments. |
 | `DJANGO_ALLOWED_HOSTS` | Comma-separated HTTP host allowlist. |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated frontend origin allowlist; wildcard origins are disabled. |
@@ -26,7 +26,8 @@ Detailed request/response documentation is in [`api-v1.md`](api-v1.md).
 | `DJANGO_THROTTLE_LOGIN` / `_REGISTER` / `_PASSWORD_RESET` / `_EXAM_WRITE` | Per-scope rate limits; an empty value disables that scope. |
 | `DJANGO_PASSWORD_RESET_TIMEOUT_SECONDS` | Reset-link lifetime (three hours by default; Django's own default is three days). |
 | `DJANGO_CORS_ALLOW_CREDENTIALS` | Off by default; bearer tokens need no ambient credentials. |
-| `DJANGO_SECURE_SSL_REDIRECT` / `DJANGO_SECURE_HSTS_SECONDS` / `DJANGO_ALLOWED_HOSTS` | Transport hardening, applied only when `DJANGO_DEBUG=false`. |
+| `DJANGO_SECURE_SSL_REDIRECT` / `DJANGO_SECURE_HSTS_SECONDS` / `DJANGO_ALLOWED_HOSTS` | Transport hardening, applied when `DJANGO_DEBUG=false`. |
+| `DJANGO_DATA_UPLOAD_MAX_BYTES` / `DJANGO_DATA_UPLOAD_MAX_FIELDS` / `DJANGO_FILE_UPLOAD_MAX_BYTES` | Request-body ceilings (2.5 MB, 400 fields); lower them per deployment, never raise them without a reason. |
 | `DEFAULT_FROM_EMAIL` / `DJANGO_EMAIL_BACKEND` | Reset-email sender and Django delivery backend; configure SMTP variables in production. |
 
 When `DATABASE_URL` is deliberately absent, a local ignored SQLite database supports smoke tests. Shared, staging, and production deployments must provide PostgreSQL. Timestamps are timezone-aware (`USE_TZ=True`, `TIME_ZONE=Asia/Tehran`).

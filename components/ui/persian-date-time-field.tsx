@@ -119,16 +119,16 @@ export function PersianDateTimeField({ label, value, onChange, timezone, min, ma
       </FieldShell>
 
       {open && (
-        <div role="dialog" aria-label={`${label} — تقویم فارسی`} className="absolute z-40 mt-2 w-[min(94vw,340px)] rounded-2xl border bg-card p-3 shadow-lift">
+        <div role="dialog" aria-label={`${label} — تقویم فارسی`} className="absolute inset-x-0 z-40 mt-2 w-auto rounded-2xl border bg-card p-3 shadow-lift sm:inset-x-auto sm:right-0 sm:w-[340px]">
           <div className="flex items-center justify-between gap-2">
-            <button type="button" onClick={() => setAnchor(shiftPersianMonth(anchor, -1))} aria-label="ماه قبل" className="grid h-8 w-8 place-items-center rounded-lg border hover:bg-muted"><ChevronRight className="h-4 w-4"/></button>
+            <button type="button" onClick={() => setAnchor(shiftPersianMonth(anchor, -1))} aria-label="ماه قبل" className="grid h-9 w-9 place-items-center rounded-lg border hover:bg-muted"><ChevronRight className="h-4 w-4"/></button>
             <p className="text-xs font-black">{PERSIAN_MONTHS[anchor.month - 1]} {toPersianDigits(anchor.year)}</p>
-            <button type="button" onClick={() => setAnchor(shiftPersianMonth(anchor, 1))} aria-label="ماه بعد" className="grid h-8 w-8 place-items-center rounded-lg border hover:bg-muted"><ChevronLeft className="h-4 w-4"/></button>
+            <button type="button" onClick={() => setAnchor(shiftPersianMonth(anchor, 1))} aria-label="ماه بعد" className="grid h-9 w-9 place-items-center rounded-lg border hover:bg-muted"><ChevronLeft className="h-4 w-4"/></button>
           </div>
           <div className="mt-2 grid grid-cols-7 gap-1 text-center text-[10px] font-bold text-muted-foreground">
             {WEEKDAY_HEADERS.map((label2) => <span key={label2}>{label2}</span>)}
           </div>
-          <div className="mt-1 grid grid-cols-7 gap-1">
+          <div className="mt-1 grid grid-cols-7 gap-0.5">
             {grid.flat().map((cell) => {
               const key = civilKey(cell.gregorian);
               const blocked = (dayBounds.minKey && key < dayBounds.minKey) || (dayBounds.maxKey && key > dayBounds.maxKey);
@@ -142,7 +142,7 @@ export function PersianDateTimeField({ label, value, onChange, timezone, min, ma
                   aria-pressed={isSelected}
                   aria-label={`${formatPersianDate(cell.gregorian)}${cell.isToday ? " · امروز" : ""}`}
                   className={cn(
-                    "grid h-8 place-items-center rounded-lg text-[11px] font-bold transition-colors",
+                    "grid h-9 min-w-0 place-items-center rounded-lg text-[11px] font-bold transition-colors",
                     !cell.inMonth && "text-muted-foreground/55",
                     isSelected ? "bg-primary text-white" : "hover:bg-muted",
                     cell.isToday && !isSelected && "ring-1 ring-primary/45",
@@ -188,7 +188,7 @@ export function PersianDateTimeField({ label, value, onChange, timezone, min, ma
           </div>
           <div className="mt-2 flex flex-wrap gap-1">
             {TIME_PRESETS.map((preset) => (
-              <button key={preset} type="button" onClick={() => commit({ hour: Number(preset.slice(0, 2)), minute: Number(preset.slice(3, 5)) })} className={cn("rounded-lg border px-2 py-1 text-[10px] font-black transition-colors hover:bg-muted", hour === Number(preset.slice(0, 2)) && minute === Number(preset.slice(3, 5)) && "border-primary bg-primary/10 text-primary")}>
+              <button key={preset} type="button" onClick={() => commit({ hour: Number(preset.slice(0, 2)), minute: Number(preset.slice(3, 5)) })} className={cn("min-h-9 rounded-lg border px-2.5 py-1 text-[10px] font-black transition-colors hover:bg-muted", hour === Number(preset.slice(0, 2)) && minute === Number(preset.slice(3, 5)) && "border-primary bg-primary/10 text-primary")}>
                 {toPersianDigits(preset)}
               </button>
             ))}

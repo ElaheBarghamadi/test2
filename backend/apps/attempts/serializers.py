@@ -59,6 +59,8 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
     result_visibility = serializers.SerializerMethodField()
     allow_unanswered = serializers.SerializerMethodField()
     allow_previous_questions = serializers.SerializerMethodField()
+    randomize_questions = serializers.SerializerMethodField()
+    randomize_options = serializers.SerializerMethodField()
     question_layout = serializers.SerializerMethodField()
     teacher_name = serializers.SerializerMethodField()
     question_count = serializers.IntegerField(read_only=True)
@@ -84,6 +86,8 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
             "result_visibility",
             "allow_unanswered",
             "allow_previous_questions",
+            "randomize_questions",
+            "randomize_options",
             "question_layout",
             "teacher_name",
             "attempt",
@@ -116,6 +120,14 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
         # The start screen states the navigation rule before an attempt exists, so it has to come from the
         # server: hardcoding it told students they could go back on exams where the teacher had said no.
         return exam.settings.allow_previous_questions
+
+    def get_randomize_questions(self, exam: Exam) -> bool:
+        # Both shuffle rules are stated on the start screen. They used to default to `false` on the client,
+        # which told students their paper matched everyone else's while the server was shuffling it.
+        return exam.settings.randomize_questions
+
+    def get_randomize_options(self, exam: Exam) -> bool:
+        return exam.settings.randomize_options
 
     def get_question_layout(self, exam: Exam) -> str:
         # Layout is presentation, and the dashboard needs it before the attempt exists so the runner
@@ -168,7 +180,9 @@ class StudentNavigationSettingsSerializer(serializers.ModelSerializer):
         # Result visibility, max attempts, and correct-answer visibility are management-only settings.
         # `allow_unanswered` is different: the student has to know before pressing submit that the
         # teacher requires a complete answer sheet, and knowing it leaks nothing.
-        fields = ("allow_previous_questions", "randomize_questions", "allow_unanswered", "question_layout")
+        # `randomize_options` is a rule, not an answer: it tells the student why their paper looks
+        # different from the person next to them, and leaks nothing about the key.
+        fields = ("allow_previous_questions", "randomize_questions", "randomize_options", "allow_unanswered", "question_layout")
         read_only_fields = fields
 
 

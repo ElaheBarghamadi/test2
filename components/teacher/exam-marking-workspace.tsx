@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, ClipboardList, FileText, Gauge, Save, Sparkles, Wand2 } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FileText, Gauge, Save, Sparkles, Users, Wand2 } from "lucide-react";
 import type { ApiGradingBoardDto, ApiGradingBoardQuestionDto, ApiGradingQuestionPageDto, ApiTeacherAttemptDetailDto, ApiTeacherResultRowDto } from "@/lib/api/dtos";
 import { apiErrorMessage } from "@/lib/api/client";
 import { resultsApi } from "@/lib/api/results";
@@ -53,6 +53,12 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
   const [questionId, setQuestionId] = useState(initialQuestionId);
   const [sheet, setSheet] = useState<ApiTeacherAttemptDetailDto | null>(null);
   const [page, setPage] = useState<ApiGradingQuestionPageDto | null>(null);
+  /**
+   * The rail (students, or questions) is a permanent column on a desktop and an opened drawer on a phone.
+   * Stacked above the desk it used to push the sheet a full screen down, so picking a student meant
+   * scrolling past the list you had just used to pick them.
+   */
+  const [railOpen, setRailOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -126,8 +132,12 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
   function switchMode(next: MarkingMode) {
     if (next === mode) return;
     setMode(next);
+    setRailOpen(false);
     remember({ mode: next });
   }
+
+  function selectStudent(id: string) { setAttemptId(id); setRailOpen(false); remember({ mode, attempt: id }); }
+  function selectQuestion(id: string) { setQuestionId(id); setRailOpen(false); remember({ mode, question: id }); }
 
 
   /**
@@ -158,6 +168,15 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
   }
 
   const openQuestions = useMemo(() => (board ? board.questions.filter((item) => item.pending_count > 0).length : 0), [board]);
+  /** What the drawer button says on a phone: the thing the teacher is looking at right now. */
+  const railLabel = useMemo(() => {
+    if (mode === "sheet") {
+      const active = rows.find((row) => row.id === attemptId);
+      return active ? `برگهٔ ${active.student_name}` : "انتخاب برگه";
+    }
+    const active = board?.questions.find((item) => item.id === questionId);
+    return active ? `سؤال ${toPersianNumber(active.order)} از ${toPersianNumber(board?.questions.length ?? 0)}` : "انتخاب سؤال";
+  }, [attemptId, board, mode, questionId, rows]);
   const pendingStudents = useMemo(() => rows.filter((row) => row.pending_manual_grading_count > 0).length, [rows]);
 
   return (
@@ -188,18 +207,27 @@ export function ExamMarkingWorkspace({ examId, initialMode = "sheet", initialAtt
       {loading && !board && <MarkingSkeleton/>}
 
       {board && !loading && (
-        <div className="grid gap-5 xl:grid-cols-[300px_1fr]">
-          <aside className="space-y-3">
-            {mode === "sheet" ? (
-              <StudentRail rows={rows} activeId={attemptId} onSelect={(id) => { setAttemptId(id); remember({ mode, attempt: id }); }}/>
-            ) : (
-              <QuestionRail questions={board.questions} activeId={questionId} onSelect={(id) => { setQuestionId(id); remember({ mode, question: id }); }}/>
-            )}
-          </aside>
-          <div className="min-w-0">
-            {mode === "sheet"
-              ? <SheetPanel sheet={sheet} onSaved={() => { void load(); if (attemptId) void resultsApi.teacherAttempt(attemptId).then(setSheet); }} rows={rows} onSelectNext={(id) => { setAttemptId(id); remember({ mode, attempt: id }); }}/>
-              : <QuestionPanel examId={examId} page={page} onSaved={(next) => { setPage(next.page); setBoard(next.board); }} onSelectQuestion={(id) => { setQuestionId(id); remember({ mode, question: id }); }}/>}
+        <div className="space-y-3">
+          <Button variant="outline" size="sm" className="w-full justify-between xl:hidden" aria-expanded={railOpen} aria-controls="marking-rail" onClick={() => setRailOpen(!railOpen)}>
+            <span className="flex min-w-0 items-center gap-2">
+              {mode === "sheet" ? <Users className="h-4 w-4 shrink-0"/> : <ClipboardList className="h-4 w-4 shrink-0"/>}
+              <span className="truncate text-xs font-black">{railLabel}</span>
+            </span>
+            <ChevronDown className={cn("h-4 w-4 shrink-0 transition-transform", railOpen && "rotate-180")}/>
+          </Button>
+          <div className="grid gap-5 xl:grid-cols-[300px_1fr]">
+            <aside id="marking-rail" className={cn("space-y-3", railOpen ? "block" : "hidden xl:block")}>
+              {mode === "sheet" ? (
+                <StudentRail rows={rows} activeId={attemptId} onSelect={selectStudent}/>
+              ) : (
+                <QuestionRail questions={board.questions} activeId={questionId} onSelect={selectQuestion}/>
+              )}
+            </aside>
+            <div className="min-w-0">
+              {mode === "sheet"
+                ? <SheetPanel sheet={sheet} onSaved={() => { void load(); if (attemptId) void resultsApi.teacherAttempt(attemptId).then(setSheet); }} rows={rows} onSelectNext={selectStudent}/>
+                : <QuestionPanel examId={examId} page={page} onSaved={(next) => { setPage(next.page); setBoard(next.board); }} onSelectQuestion={selectQuestion}/>}
+            </div>
           </div>
         </div>
       )}
@@ -293,14 +321,25 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
   const [busy, setBusy] = useState<string | null>(null);
   /** What the server had on record when the sheet opened, so "changed" means changed. */
   const [seeded, setSeeded] = useState<Record<string, string>>({});
-  useEffect(() => {
-    if (!sheet) return;
-    const seed = Object.fromEntries(sheet.answers.map(seedMark));
-    setMarks(seed);
-    setSeeded(seed);
-    setFeedback(Object.fromEntries(sheet.answers.map((answer) => [answer.question_id, answer.feedback || ""])));
-    setOverall(sheet.result?.feedback || "");
-  }, [sheet]);
+  /**
+   * Seed during render, not after it.
+   *
+   * The desk used to fill its boxes from an effect, which meant the first paint showed every mark empty and
+   * the header flashing a save button for changes nobody made. Seeding in the same pass that receives the
+   * sheet is the documented "adjust state when props change" pattern: React re-renders this panel before it
+   * commits, so the numbers the server sent are already in the boxes on the first frame.
+   */
+  const [seededSheet, setSeededSheet] = useState<ApiTeacherAttemptDetailDto | null>(null);
+  if (sheet !== seededSheet) {
+    setSeededSheet(sheet);
+    if (sheet) {
+      const seed = Object.fromEntries(sheet.answers.map(seedMark));
+      setMarks(seed);
+      setSeeded(seed);
+      setFeedback(Object.fromEntries(sheet.answers.map((answer) => [answer.question_id, answer.feedback || ""])));
+      setOverall(sheet.result?.feedback || "");
+    }
+  }
 
   const manual = useMemo(() => sheet?.answers.filter((answer) => answer.manual_grading_required) ?? [], [sheet]);
   /** Rows whose number differs from what the server holds — the only rows a save has to write. */
@@ -579,11 +618,16 @@ function QuestionPanel({ examId, page, onSaved, onSelectQuestion }: { examId: st
   const [drafts, setDrafts] = useState<Record<string, { mark: string; feedback: string }>>({});
   const [saving, setSaving] = useState(false);
   const firstInput = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    if (!page) return;
-    setDrafts(Object.fromEntries(page.rows.map((row) => [row.attempt_id, { mark: row.manual_score === null || row.manual_score === undefined ? "" : String(row.manual_score), feedback: row.feedback || "" }])));
-    firstInput.current?.focus();
-  }, [page]);
+  /** Same render-time seeding as the sheet desk: the cohort screen never opens with boxes it is about to fill. */
+  const [seededPage, setSeededPage] = useState<ApiGradingQuestionPageDto | null>(null);
+  if (page !== seededPage) {
+    setSeededPage(page);
+    if (page) {
+      setDrafts(Object.fromEntries(page.rows.map((row) => [row.attempt_id, { mark: row.manual_score === null || row.manual_score === undefined ? "" : String(row.manual_score), feedback: row.feedback || "" }])));
+    }
+  }
+  // Focus can only move once the row exists in the document, so it stays an effect.
+  useEffect(() => { firstInput.current?.focus(); }, [page]);
 
   const questions = page?.progress.questions ?? [];
   const index = page ? page.progress.index : 0;

@@ -49,14 +49,16 @@ export function NotificationBell({ className }: { className?: string }) {
 
   useEffect(() => {
     if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
       if (panelRef.current && !panelRef.current.contains(event.target as Node)) close();
     };
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
     document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("touchstart", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("touchstart", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [close, open]);
@@ -75,7 +77,11 @@ export function NotificationBell({ className }: { className?: string }) {
         <Bell className="h-4 w-4"/>
         {unreadCount > 0 && <span className="absolute -left-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-primary px-1 text-[10px] font-black text-primary-foreground" aria-hidden>{toPersianNumber(unreadCount > 99 ? "۹۹+" : unreadCount)}</span>}
       </button>
-      {open && <div className="absolute left-0 top-12 z-50 w-[min(92vw,22rem)] overflow-hidden rounded-2xl border bg-card shadow-lift">
+      {open && <div
+        role="dialog"
+        aria-label="اعلان‌ها"
+        className="fixed inset-x-3 top-16 z-50 overflow-hidden rounded-2xl border bg-card shadow-lift sm:absolute sm:inset-x-auto sm:left-0 sm:top-12 sm:w-[22rem]"
+      >
         <div className="flex items-center justify-between gap-2 border-b p-3">
           <p className="text-sm font-black">اعلان‌ها</p>
           <div className="flex items-center gap-1">
@@ -83,7 +89,8 @@ export function NotificationBell({ className }: { className?: string }) {
             <Button size="icon-sm" variant="ghost" onClick={close} aria-label="بستن اعلان‌ها"><X className="h-4 w-4"/></Button>
           </div>
         </div>
-        <div className="max-h-[60vh] overflow-y-auto">
+        {/* Long notification lists scroll inside the panel instead of running off the bottom of a phone. */}
+        <div className="max-h-[min(70vh,28rem)] overflow-y-auto overscroll-contain">
           {!items.length ? <p className="p-5 text-center text-xs leading-6 text-muted-foreground">{loading ? "در حال دریافت…" : "هنوز اعلانی برای شما ثبت نشده است."}</p> : items.map((item) => <NotificationRow key={item.id} item={item} onRead={() => void markRead(item.id)} onClose={close}/>)}
         </div>
       </div>}

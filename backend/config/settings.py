@@ -24,13 +24,20 @@ def env_list(name: str, default: str = "") -> list[str]:
     return [value.strip() for value in os.getenv(name, default).split(",") if value.strip()]
 
 
-DEBUG = env_bool("DJANGO_DEBUG", True)
+# Fail closed. Local development states `DJANGO_DEBUG=true` in `backend/.env` (the dev script creates it
+# from the example), so the safe value is the one nobody has to remember: a deployment that forgets the
+# variable gets the hardened branch plus an explicit complaint about the missing secret, not a live
+# site with debug pages and insecure cookies.
+DEBUG = env_bool("DJANGO_DEBUG", False)
 # The test runner disables throttling by default (the throttle cache is not flushed between test
 # methods); `THROTTLE_DURING_TESTS` lets a test ask for the real behaviour.
 TESTING = "test" in sys.argv[1:2] or "pytest" in sys.argv[1:2]
 _secret_key = os.getenv("DJANGO_SECRET_KEY")
 if not _secret_key and not DEBUG:
-    raise ImproperlyConfigured("DJANGO_SECRET_KEY must be configured when DJANGO_DEBUG is false.")
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY must be configured when DJANGO_DEBUG is false. For local development, copy "
+        "backend/.env.example to backend/.env (it sets DJANGO_DEBUG=true and a development secret)."
+    )
 SECRET_KEY = _secret_key or "unsafe-development-key-change-before-deployment"
 # .e2b.app enables the isolated development preview host; production must set explicit hosts via env.
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,.e2b.app")
@@ -157,6 +164,15 @@ EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
 # Session cookies are not used for API authentication, but safe defaults retain admin protection.
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS")
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# Request-body ceilings, stated rather than inherited. The API is JSON-only, so the first value is the cap
+# on one parsed request body (the framework default is 2.5 MB - kept here so the limit is a decision);
+# the second bounds query-string and form key counts, which nothing in this API comes close to.
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DJANGO_DATA_UPLOAD_MAX_BYTES", str(int(2.5 * 1024 * 1024))))
+DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.getenv("DJANGO_DATA_UPLOAD_MAX_FIELDS", "400"))
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DJANGO_FILE_UPLOAD_MAX_BYTES", str(int(2.5 * 1024 * 1024))))
+# If an upload surface is ever added, its files must not be world-readable on the host.
+FILE_UPLOAD_PERMISSIONS = 0o640
 
 # API auth is a bearer header, so cookies never need to cross the wire with the session; disabling
 # credentialed CORS removes a whole class of ambient-credential abuse for no functional cost.

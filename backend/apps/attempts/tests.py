@@ -945,6 +945,35 @@ class AttemptRandomizationAndAnswerSheetTests(StudentExamApiTests):
             "the snapshot the student saw is the snapshot that was stored",
         )
 
+    def test_the_rule_is_told_to_the_student_in_both_directions(self) -> None:
+        """Two place the student reads it: the start screen before an attempt exists, and the attempt itself.
+
+        The browser used to guess "not shuffled" because neither payload carried the switch, which told a
+        student their paper matched the class while the server was shuffling it.
+        """
+        exam = self.make_exam(randomize=True)
+        exam.settings.randomize_options = True
+        exam.settings.save(update_fields=("randomize_options", "updated_at"))
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+
+        available = self.client.get("/api/v1/student/exams/").data
+        rows = available["results"] if isinstance(available, dict) else available
+        row = next(item for item in rows if item["id"] == str(exam.id))
+        self.assertTrue(row["randomize_questions"])
+        self.assertTrue(row["randomize_options"])
+
+        attempt = self.start(exam).data
+        self.assertTrue(attempt["exam"]["navigation"]["randomize_options"])
+
+        exam.settings.randomize_options = False
+        exam.settings.randomize_questions = False
+        exam.settings.save(update_fields=("randomize_options", "randomize_questions", "updated_at"))
+        refreshed = self.client.get("/api/v1/student/exams/").data
+        rows = refreshed["results"] if isinstance(refreshed, dict) else refreshed
+        row = next(item for item in rows if item["id"] == str(exam.id))
+        self.assertFalse(row["randomize_options"])
+        self.assertFalse(row["randomize_questions"])
+
     def test_option_order_is_absent_when_randomization_is_off(self) -> None:
         exam = self.make_exam()
         question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)

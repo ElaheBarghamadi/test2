@@ -194,6 +194,12 @@ The student space is driven by server state end to end: the dashboard groups exa
   deadline from `POST /api/v1/student/attempts/{id}/heartbeat/` every minute and on tab focus.
 - An attempt's deadline is **snapshotted** when it starts. Editing `duration_minutes` mid-exam must not
   change a running student's window; only `extend` does, explicitly.
+- Unsent answers are also kept **on the device**, not only in memory: `lib/exam/answer-journal.ts` mirrors the
+  pending queue into IndexedDB (200ms debounce, plus a write on `pagehide`), and `StudentExamSession` restores
+  it after a reload with `restoreJournal`. The record exists only while something is genuinely unsent and is
+  deleted the moment the server accepts the queue, so a stale record can never resurrect a saved answer; a
+  submitted sheet never restores local edits at all. Signing out or losing the token clears every record,
+  because a shared school computer must not keep one student's work for the next one.
 - Answers are guarded, not merged: `X-Exam-Revision` (refuses an out-of-date write and returns the current
   revision so the client can re-base) and `X-Exam-Session` (one window writes at a time; a second one reads
   and can take over deliberately). Both headers are optional, so an older client is never locked out.
@@ -205,6 +211,10 @@ The student space is driven by server state end to end: the dashboard groups exa
 
 ## Tests
 
+`.github/workflows/ci.yml` runs all of it on every push and pull request: `npm ci`, `tsc --noEmit`, `npm test`
+and `npm run build` for the frontend, plus `manage.py check`, `makemigrations --check --dry-run` and the Django
+suite for the backend. Nothing else needs to be run by hand before a merge.
+
 ```bash
 npm test          # Vitest + React Testing Library (jsdom) for the frontend
 ```
@@ -215,8 +225,10 @@ cd backend
 ./.venv/bin/python manage.py test        # needs DJANGO_SECRET_KEY in the environment
 ```
 
-Set `DJANGO_SECRET_KEY`, and outside local development also `DJANGO_DEBUG=false`,
-`DJANGO_ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, a real `EMAIL_*` configuration, and optionally the
-`DJANGO_THROTTLE_*` rate overrides (see `backend/docs/api-v1.md`). `manage.py close_overdue_exams` ends
+Set `DJANGO_SECRET_KEY`, and outside local development also `DJANGO_ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`,
+a real `EMAIL_*` configuration, and optionally the `DJANGO_THROTTLE_*` rate overrides (see
+`backend/docs/api-v1.md`). `DJANGO_DEBUG` defaults to `false`, so a deployment that forgets it gets the
+hardened branch (SSL redirect, HSTS, secure cookies, `X-Frame-Options: DENY`) rather than debug pages;
+`backend/.env` is what turns debug on for local work. `manage.py close_overdue_exams` ends
 exams whose window has passed and is safe to run from cron, though the teacher list already reconciles
 its own scope lazily.

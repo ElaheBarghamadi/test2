@@ -50,6 +50,16 @@
   * { @apply border-border; }
   html { scroll-behavior: smooth; }
   body { @apply min-h-screen bg-background text-foreground antialiased; font-family: Vazirmatn, IRANSansX, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  /*
+   * A phone must never be able to scroll the page sideways. One decoration with a negative offset or a
+   * table one pixel too wide is enough to cause it, and the symptom (the whole layout sliding under the
+   * finger) reads as "the site is broken" rather than "this element is wide". `clip` is deliberate:
+   * `overflow: hidden` here would create a scroll container and kill every `position: sticky` on the page,
+   * including the exam header and the marking desk's save bar.
+   */
+  html, body { overflow-x: clip; }
+  /* Long unbroken strings (a pasted URL in a question, an email) wrap instead of pushing the layout. */
+  body { overflow-wrap: anywhere; }
   button, input, textarea, select { font: inherit; }
   ::selection { @apply bg-primary/20 text-foreground; }
   :focus-visible { @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background; }

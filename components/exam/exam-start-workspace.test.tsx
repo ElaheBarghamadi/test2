@@ -57,6 +57,38 @@ describe("ExamStartWorkspace gating", () => {
     expect(screen.getAllByText(/اکنون در حالت برگزاری نیست/).length).toBeGreaterThan(0);
   });
 
+  it("goes back on a paged exam instead of claiming every skipped question locks", () => {
+    useExamAttemptStore.setState({ attempt: null });
+    render(<ExamStartWorkspace exam={previewExam({ settings: { ...previewExam().settings, allowBackNavigation: true, questionLayout: "paged" } })} remote/>);
+    // The old copy promised a lock that only exists when the teacher has turned navigation off.
+    expect(screen.getByText(/می‌توانید به سؤال‌های قبل برگردید/)).toBeTruthy();
+    expect(screen.queryByText(/سؤالِ ردشده قفل می‌شود/)).toBeNull();
+  });
+
+  it("states the no-return rule only when the teacher set it", () => {
+    useExamAttemptStore.setState({ attempt: null });
+    render(<ExamStartWorkspace exam={previewExam({ settings: { ...previewExam().settings, allowBackNavigation: false, questionLayout: "paged" } })} remote/>);
+    expect(screen.getByText(/بازگشت به سؤال‌های قبل ممکن نیست و سؤالِ ردشده قفل می‌شود/)).toBeTruthy();
+    expect(screen.getByText(/حتی با رفرش صفحه بازنمی‌گردد/)).toBeTruthy();
+  });
+
+  it("never mentions a lock on a one-page exam, where nothing can be locked", () => {
+    useExamAttemptStore.setState({ attempt: null });
+    render(<ExamStartWorkspace exam={previewExam({ settings: { ...previewExam().settings, allowBackNavigation: false, questionLayout: "single_page" } })} remote/>);
+    expect(screen.getByText(/همهٔ سؤال‌ها در یک صفحه/)).toBeTruthy();
+    expect(screen.queryByText(/قفل/)).toBeNull();
+  });
+
+  it("announces shuffled options only when the server says they are shuffled", () => {
+    useExamAttemptStore.setState({ attempt: null });
+    const { unmount } = render(<ExamStartWorkspace exam={previewExam()} remote/>);
+    expect(screen.queryByText(/جابه‌جا می‌شود/)).toBeNull();
+    unmount();
+    render(<ExamStartWorkspace exam={previewExam({ settings: { ...previewExam().settings, randomizeQuestions: true, randomizeOptions: true } })} remote/>);
+    expect(screen.getByText(/ترتیب سؤال‌ها برای هر دانش‌آموز به‌صورت تصادفی است/)).toBeTruthy();
+    expect(screen.getByText(/گزینه‌های سؤال‌های چندگزینه‌ای هم برای هر دانش‌آموز جابه‌جا می‌شود/)).toBeTruthy();
+  });
+
   it("does not offer an empty exam as startable", () => {
     useExamAttemptStore.setState({ attempt: null });
     render(<ExamStartWorkspace exam={previewExam({ questionCount: 0 })} remote/>);

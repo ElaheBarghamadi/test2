@@ -226,12 +226,14 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
         */}
         <div className="px-2 py-2 sm:hidden">
           <div className="flex items-center gap-2 rounded-2xl border bg-card px-2.5 py-2 shadow-lift">
-            <Link href="/student/dashboard" aria-label="خروج از آزمون" className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"><LogOut className="h-4 w-4"/></Link>
+            <Link href="/student/dashboard" aria-label="خروج از آزمون" className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"><LogOut className="h-4 w-4"/></Link>
             <ExamProgress compact current={currentIndex + 1} total={exam.questions.length} answered={answered} showPosition={!singlePage}/>
             <AutosaveIndicator status={attempt.saveStatus} className="hidden min-[430px]:inline-flex"/>
             <ExamTimer seconds={attempt.remainingSeconds} className="border-0 bg-muted px-2 py-1 shadow-none [&>div>p:first-child]:hidden"/>
-            <Button variant="ghost" size="icon-sm" onClick={() => toast({ title: "میانبرهای صفحه‌کلید", description: singlePage ? "در حالت یک‌صفحه‌ای با کلیدهای ۱ تا ۹ می‌توانید به سؤال‌ها پرش کنید." : "با کلیدهای چپ و راست بین سؤال‌ها جابه‌جا شوید، با Space پاسخ را علامت بزنید، و با Enter ادامه دهید." })} aria-label="میانبرهای صفحه‌کلید"><CircleHelp className="h-4 w-4"/></Button>
-            <Button variant="secondary" size="sm" onClick={() => setNavigatorOpen(true)} aria-label="فهرست سؤال‌ها"><ListChecks className="h-4 w-4"/><span className="hidden min-[430px]:inline">سؤال‌ها</span></Button>
+            {/* Above 430px only: a hardware keyboard is rare on the phones this bar exists for, and the space it
+              frees is what keeps the progress line and the jump list readable at 360px. */}
+            <Button variant="ghost" size="icon-sm" className="hidden min-[430px]:inline-flex" onClick={() => toast({ title: "میانبرهای صفحه‌کلید", description: singlePage ? "در حالت یک‌صفحه‌ای با کلیدهای ۱ تا ۹ می‌توانید به سؤال‌ها پرش کنید." : "با کلیدهای چپ و راست بین سؤال‌ها جابه‌جا شوید، با Space پاسخ را علامت بزنید، و با Enter ادامه دهید." })} aria-label="میانبرهای صفحه‌کلید"><CircleHelp className="h-4 w-4"/></Button>
+            <Button variant="secondary" size="sm" className="h-9 shrink-0 px-2.5" onClick={() => setNavigatorOpen(true)} aria-label="فهرست سؤال‌ها"><ListChecks className="h-4 w-4"/><span className="hidden min-[430px]:inline">سؤال‌ها</span></Button>
           </div>
         </div>
         <div className="hidden h-[76px] max-w-[1480px] flex-nowrap items-center justify-between gap-3 px-6 sm:mx-auto sm:flex">
@@ -297,7 +299,7 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
           ) : (
             <QuestionCard question={question} position={currentIndex + 1} answer={attempt.answers[question.id]} flagged={attempt.answers[question.id]?.flagged ?? false} onAnswer={updateAnswer} onToggleFlag={() => toggleFlag(question.id)} disabled={isLocked} locked={isQuestionLocked(question.id)} onLeaveLock={isLast ? () => router.push(`/student/exam/${exam.id}/review`) : () => move("next")}/>
           )}
-          <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border bg-card p-3 shadow-soft sm:p-4">
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-card p-3 shadow-soft sm:flex-nowrap sm:p-4">
             {singlePage ? (
               <span className="text-[11px] font-bold text-muted-foreground">{toPersianNumber(exam.questions.length)} سؤال در یک صفحه</span>
             ) : (
@@ -313,7 +315,7 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
         <QuestionNavigator exam={exam} attempt={attempt} currentIndex={currentIndex} onNavigate={goTo} lockedBefore={noReturn ? frontier : 0} showPosition={!singlePage}/>
       </main>
 
-      {navigatorOpen && <div className="fixed inset-0 z-50 bg-foreground/20 backdrop-blur-[2px] xl:hidden" onMouseDown={() => setNavigatorOpen(false)}><div className="h-full" onMouseDown={(event) => event.stopPropagation()}><QuestionNavigator exam={exam} attempt={attempt} currentIndex={currentIndex} onNavigate={goTo} mobile close={() => setNavigatorOpen(false)} lockedBefore={noReturn ? frontier : 0} showPosition={!singlePage}/></div></div>}
+      {navigatorOpen && <div className="fixed inset-0 z-50 bg-foreground/20 backdrop-blur-[2px] xl:hidden" onMouseDown={() => setNavigatorOpen(false)} onTouchStart={() => setNavigatorOpen(false)}><div className="h-full" onMouseDown={(event) => event.stopPropagation()} onTouchStart={(event) => event.stopPropagation()}><QuestionNavigator exam={exam} attempt={attempt} currentIndex={currentIndex} onNavigate={goTo} mobile close={() => setNavigatorOpen(false)} lockedBefore={noReturn ? frontier : 0} showPosition={!singlePage}/></div></div>}
     </div>
   );
 }

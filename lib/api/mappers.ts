@@ -255,7 +255,7 @@ export function toStudentDashboardExam(dto: ApiAvailableExamDto): Exam {
       durationMinutes: dto.duration_minutes, totalMarks: number(dto.total_marks),
       allowBackNavigation: dto.allow_previous_questions !== false,
       questionLayout: dto.question_layout === "single_page" ? "single_page" : "paged",
-      randomizeQuestions: false, randomizeOptions: false, allowUnanswered: dto.allow_unanswered !== false,
+      randomizeQuestions: dto.randomize_questions === true, randomizeOptions: dto.randomize_options === true, allowUnanswered: dto.allow_unanswered !== false,
       showResultImmediately: dto.result_visibility === "immediate", resultVisibility: dto.result_visibility,
       showCorrectAnswers: false, resultDetail: null, attemptLimit: dto.max_attempts,
       passingPercentage: number(result?.passing_percentage ?? dto.passing_percentage),
@@ -315,7 +315,7 @@ export function toStudentAttempt(dto: ApiAttemptDto): { exam: Exam; attempt: Exa
   const exam: Exam = {
     id: dto.exam.id, title: dto.exam.title, description: dto.exam.description, subject: dto.exam.subject, grade: dto.exam.grade, className: dto.exam.class_name,
     instructions: dto.exam.instructions || undefined, status: "active", startAt, endAt, schedule: { startAt, endAt, timezone: "Asia/Tehran" }, questionCount: questions.length,
-    participantCount: 0, settings: { durationMinutes: dto.exam.duration_minutes, totalMarks: number(dto.exam.total_marks, totalMarks), allowBackNavigation: dto.exam.navigation.allow_previous_questions, questionLayout: dto.exam.navigation.question_layout === "single_page" ? "single_page" : "paged", randomizeQuestions: dto.exam.navigation.randomize_questions, randomizeOptions: false, allowUnanswered: dto.exam.navigation.allow_unanswered !== false, showResultImmediately: dto.exam.result_visibility === "immediate", resultVisibility: dto.exam.result_visibility, showCorrectAnswers: false, attemptLimit: dto.attempt_limit, passingPercentage: number(dto.exam.passing_percentage) },
+    participantCount: 0, settings: { durationMinutes: dto.exam.duration_minutes, totalMarks: number(dto.exam.total_marks, totalMarks), allowBackNavigation: dto.exam.navigation.allow_previous_questions, questionLayout: dto.exam.navigation.question_layout === "single_page" ? "single_page" : "paged", randomizeQuestions: dto.exam.navigation.randomize_questions, randomizeOptions: dto.exam.navigation.randomize_options === true, allowUnanswered: dto.exam.navigation.allow_unanswered !== false, showResultImmediately: dto.exam.result_visibility === "immediate", resultVisibility: dto.exam.result_visibility, showCorrectAnswers: false, attemptLimit: dto.attempt_limit, passingPercentage: number(dto.exam.passing_percentage) },
     questions, teacherName: "", accent: accentFor(dto.exam.id), createdAt: dto.started_at, updatedAt: dto.server_time,
     attemptId: dto.id, attemptNumber: dto.attempt_number,
   };

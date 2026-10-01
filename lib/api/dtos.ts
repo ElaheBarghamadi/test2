@@ -164,6 +164,8 @@ export interface ApiStudentAttemptExamDto {
   navigation: {
     allow_previous_questions: boolean;
     randomize_questions: boolean;
+    /** Absent on a payload from before the rule was exposed; absent means "not shuffled". */
+    randomize_options?: boolean;
     allow_unanswered: boolean;
     question_layout?: "paged" | "single_page";
   };
@@ -185,8 +187,10 @@ export interface ApiAvailableExamDto {
   passing_percentage: number | string; result_visibility: "immediate" | "pending" | "hidden";
   teacher_name: string;
   allow_unanswered: boolean;
-  /** Both are server-side rules the start screen has to state truthfully before an attempt exists. */
+  /** Server-side rules the start screen has to state truthfully before an attempt exists. */
   allow_previous_questions?: boolean;
+  randomize_questions?: boolean;
+  randomize_options?: boolean;
   question_layout?: "paged" | "single_page";
   availability: "available" | "upcoming" | "completed" | "in_progress";
   attempt: {
