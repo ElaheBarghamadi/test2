@@ -50,6 +50,45 @@ describe("Topbar on a phone", () => {
     expect(document.body.style.overflow).toBe("");
   });
 
+  it("closes the drawer when the page behind it is tapped", async () => {
+    // The regression this pins: the panel used to sit inside a full-width wrapper that swallowed every tap on
+    // the page behind it, so the only ways out of the drawer were Escape (a phone has no Escape) and the small
+    // X button. The overlay and the panel are siblings now, and the overlay is a real target.
+    render(<Topbar role="student" user={student}/>);
+    fireEvent.click(screen.getByRole("button", { name: "باز کردن منو" }));
+
+    const drawer = await screen.findByRole("dialog", { name: "منوی اصلی" });
+    const backdrop = screen.getByTestId("nav-drawer-backdrop");
+    expect(backdrop.contains(drawer)).toBe(false);
+    expect(backdrop.getAttribute("aria-hidden")).toBe("true");
+
+    fireEvent.click(backdrop);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "منوی اصلی" })).toBeNull());
+  });
+
+  it("moves focus into the drawer and gives it back to the hamburger on close", async () => {
+    render(<Topbar role="student" user={student}/>);
+    const trigger = screen.getByRole("button", { name: "باز کردن منو" });
+    fireEvent.click(trigger);
+
+    const drawer = await screen.findByRole("dialog", { name: "منوی اصلی" });
+    await waitFor(() => expect(drawer.contains(document.activeElement)).toBe(true));
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "منوی اصلی" })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("slides rather than snaps, and asks for less travel when the system prefers less motion", async () => {
+    render(<Topbar role="student" user={student}/>);
+    fireEvent.click(screen.getByRole("button", { name: "باز کردن منو" }));
+
+    const drawer = await screen.findByRole("dialog", { name: "منوی اصلی" });
+    // It is a real panel, not a full-bleed div: the width is the drawer's own, so the page behind stays tappable.
+    expect(drawer.className).toContain("w-[min(84vw,320px)]");
+    expect(drawer.getAttribute("tabindex")).toBe("-1");
+  });
+
   it("closes the account menu on Escape and on an outside tap, not only on the avatar", async () => {
     render(<Topbar role="student" user={student}/>);
 
@@ -80,7 +119,9 @@ describe("Topbar on a phone", () => {
   it("gives the account menu a labelled hamburger, an aria-expanded state and a sign-out path", async () => {
     render(<Topbar role="student" user={student}/>);
     const trigger = screen.getByRole("button", { name: "باز کردن منو" });
-    expect(trigger.getAttribute("aria-expanded")).toBeNull();
+    // A hamburger that owns a drawer has to say whether the drawer is open.
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.getAttribute("aria-haspopup")).toBe("dialog");
 
     fireEvent.click(screen.getByRole("button", { name: "منوی حساب کاربری" }));
     expect(screen.getByRole("menuitem", { name: "پروفایل و امنیت" })).toBeTruthy();

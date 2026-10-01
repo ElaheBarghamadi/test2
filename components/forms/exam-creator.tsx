@@ -2,7 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, ChevronLeft, Clock3, FileText, ListChecks, Save, Settings2, Sparkles } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { Exam, ExamDraft, ExamSettings, ResultVisibility } from "@/lib/types/domain";
@@ -16,6 +16,9 @@ import { useToastStore } from "@/lib/state/toast-store";
 import { cn, toPersianNumber } from "@/lib/utils";
 import { duplicateQuestionIndexes } from "@/lib/utils/question-identity";
 import { PersianDateTimeField } from "@/components/ui/persian-date-time-field";
+import { ExamBuilderSkeleton } from "@/components/shared/skeleton";
+import { useOnlineStatus } from "@/hooks/use-online-status";
+import { LoaderCircle, RefreshCw, WifiOff } from "lucide-react";
 import { formatPersianWallClock, wallClockToIso } from "@/lib/utils/persian-civil";
 
 const steps = [
@@ -32,10 +35,22 @@ const asDraft = (exam: Exam): ExamDraft => ({ id: exam.id, title: exam.title, su
 export function ExamCreator({ examId }: { examId?: string }) {
   const router = useRouter();
   const toast = useToastStore((state) => state.push);
-  const { exams, loading, detailLoadingId, initialized, error, clearError, saveExam, loadExam } = useTeacherExams();
+  const { exams, loading, detailLoadingId, initialized, error, clearError, saveExam, loadExam, saving: storeSaving } = useTeacherExams();
+
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<ExamDraft>(emptyDraft);
   const [saving, setSaving] = useState<"draft" | "publish" | null>(null);
+  // The store is the authority on whether a write is in flight; the local state drives the labels.
+  const busy = saving !== null || Boolean(storeSaving);
+  const online = useOnlineStatus();
+  /**
+   * The last line of defence against a double write.
+   *
+   * `saving` is React state, so two taps inside the same frame (or a tap and Ctrl+S, which a keyboard and a
+   * finger can produce together on a slow phone) both read the old value and both call `persist`. The ref is
+   * set synchronously, before the request is made, so the second call returns immediately.
+   */
+  const savingRef = useRef(false);
   /**
    * Whether the screen holds work the server does not have.
    *
@@ -44,6 +59,8 @@ export function ExamCreator({ examId }: { examId?: string }) {
    * an indicator that lies about unsaved work is worse than no indicator.
    */
   const [dirty, setDirty] = useState(false);
+  /** Which write failed, so the retry button repeats *that* one rather than guessing. */
+  const [lastMode, setLastMode] = useState<"draft" | "publish">("draft");
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const existing = examId ? exams.find((exam) => exam.id === examId) : undefined;
   useEffect(() => { if (examId) void loadExam(examId); }, [examId, loadExam]);
@@ -74,6 +91,10 @@ export function ExamCreator({ examId }: { examId?: string }) {
       return;
     }
     if (mode === "publish" && validation.length) { setStep(validation[0].step); toast({ title: "آزمون هنوز آمادهٔ انتشار نیست", description: validation[0].message, variant: "error" }); return; }
+    if (savingRef.current) return;
+    setLastMode(mode);
+    if (!online) { toast({ title: "اتصال اینترنت برقرار نیست", description: "تغییرات در همین صفحه محفوظ است؛ پس از وصل‌شدن دوباره، ذخیره را بزنید.", variant: "error" }); return; }
+    savingRef.current = true;
     setSaving(mode);
     try {
       const saved = await saveExam({ ...draft, settings: { ...draft.settings, totalMarks } }, mode === "publish" ? "scheduled" : "draft");
@@ -92,7 +113,7 @@ export function ExamCreator({ examId }: { examId?: string }) {
       // A saved draft moves to its own edit route, so a refresh continues the same exam instead of starting
       // a second one from an empty form.
       else if (!examId) router.replace(`/teacher/exams/${saved.id}/edit`);
-    } catch { /* Store exposes a recoverable error state below. */ } finally { setSaving(null); }
+    } catch { /* Store exposes a recoverable error state below. */ } finally { savingRef.current = false; setSaving(null); }
   }
   // Two things an editor of a 40-question paper should never have to do by hand.
   useEffect(() => {
@@ -111,41 +132,75 @@ export function ExamCreator({ examId }: { examId?: string }) {
     const onKey = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        if (!saving) void persist("draft");
+        if (!savingRef.current) void persist("draft");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dirty, saving]);
+  }, [dirty, online]);
 
-  if (examId && !existing && (loading || !initialized || detailLoadingId === examId)) return <BuilderSkeleton/>;
-  if (examId && initialized && !existing) return <Card className="p-8 text-center"><h2 className="font-black">آزمون موردنظر پیدا نشد</h2><p className="mt-2 text-sm text-muted-foreground">ممکن است آزمون بایگانی یا حذف شده باشد.</p><Button className="mt-5" onClick={() => router.push("/teacher/exams")}>بازگشت به آزمون‌ها</Button></Card>;
-  return <div className="grid gap-6 xl:grid-cols-[250px_minmax(0,1fr)]"><BuilderStepper step={step} issues={validation} onStep={goTo}/><Card className="min-h-[600px]"><CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="section-label">{examId ? "ویرایش آزمون" : "آزمون جدید"} · گام {toPersianNumber(step + 1)} از {toPersianNumber(steps.length)}</p><CardTitle className="mt-1 text-xl">{steps[step].title}</CardTitle><CardDescription className="mt-1">{steps[step].description}</CardDescription></div><div className="flex flex-wrap items-center justify-end gap-2">
-                <span className={cn("text-[11px] font-bold", dirty ? "text-warning" : "text-muted-foreground")}>
+  if (examId && !existing && (loading || !initialized || detailLoadingId === examId)) return <ExamBuilderSkeleton/>;
+  if (examId && initialized && !existing) {
+    /**
+     * "Not found" and "could not be fetched" are different sentences, and only one of them is true at a time.
+     *
+     * On a slow connection the fetch times out and the store reports an error while `existing` is still
+     * undefined; telling the teacher their exam was archived or deleted would be a lie about their own work.
+     * The retry button is the only useful offer in that case.
+     */
+    return <Card className="p-8 text-center">
+      <h2 className="font-black">{error ? "بارگذاری آزمون انجام نشد" : "آزمون موردنظر پیدا نشد"}</h2>
+      <p className="mt-2 text-sm leading-6 text-muted-foreground">{error ?? "ممکن است آزمون بایگانی یا حذف شده باشد."}</p>
+      <div className="mt-5 flex flex-wrap justify-center gap-2">
+        {error && <Button onClick={() => { clearError(); void loadExam(examId); }}><RefreshCw className="h-4 w-4"/>تلاش دوباره</Button>}
+        <Button variant="outline" onClick={() => router.push("/teacher/exams")}>بازگشت به آزمون‌ها</Button>
+      </div>
+    </Card>;
+  }
+  return <div className="space-y-4">
+    {/*
+      Offline is stated before it is felt. The save buttons stay enabled-looking only when they can work, and a
+      teacher on a dropping connection is told why a tap did nothing instead of watching a spinner time out.
+    */}
+    {!online && <div role="status" className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning/[.08] p-3.5 text-xs leading-6 text-warning">
+      <WifiOff className="mt-0.5 h-4 w-4 shrink-0"/>
+      <span><b className="font-black">اتصال اینترنت برقرار نیست.</b> هر چیزی که در این صفحه نوشته‌اید همین‌جا می‌ماند؛ پس از وصل‌شدن دوباره، دکمهٔ ذخیره را بزنید.</span>
+    </div>}
+    <div className="grid gap-4 sm:gap-6 xl:grid-cols-[250px_minmax(0,1fr)]"><BuilderStepper step={step} issues={validation} onStep={goTo}/><Card className="min-w-0 xl:min-h-[600px]" aria-busy={busy}><CardHeader className="border-b"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><p className="section-label">{examId ? "ویرایش آزمون" : "آزمون جدید"} · گام {toPersianNumber(step + 1)} از {toPersianNumber(steps.length)}</p><CardTitle className="mt-1 text-xl">{steps[step].title}</CardTitle><CardDescription className="mt-1">{steps[step].description}</CardDescription></div><div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:justify-end">
+                <span className={cn("truncate text-[11px] font-bold", dirty ? "text-warning" : "text-muted-foreground")}>
                   {saving === "draft" ? "در حال ذخیره…" : dirty ? "تغییر ذخیره‌نشده دارید" : savedAt ? `ذخیره شد · ${savedAt.toLocaleTimeString("fa-IR", { hour: "2-digit", minute: "2-digit" })}` : "همه‌چیز ذخیره است"}
                 </span>
-                <Button variant={dirty ? "default" : "outline"} size="sm" onClick={() => void persist("draft")} disabled={saving !== null}>
-                  <Save className="h-3.5 w-3.5"/>
+                <Button variant={dirty ? "default" : "outline"} size="sm" className="flex-1 sm:flex-none" onClick={() => void persist("draft")} disabled={busy || !online}>
+                  {saving === "draft" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin"/> : <Save className="h-3.5 w-3.5"/>}
                   {examId ? "ذخیرهٔ تغییرات" : "ذخیره پیش‌نویس"}
                   <kbd className="mr-1 hidden rounded border bg-background/60 px-1 text-[9px] font-bold sm:inline">Ctrl S</kbd>
                 </Button>
               </div></div></CardHeader><CardContent className="p-5 sm:p-6"><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} transition={{ duration: .18 }}>{step === 0 && <BasicInformation draft={draft} update={update} errors={validateStep(0)}/>} {step === 1 && <ExamSettingsForm settings={draft.settings} totalMarks={totalMarks} onChange={updateSettings}/>} {step === 2 && <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-muted/35 p-3">
                 <p className="min-w-0 flex-1 text-[11px] leading-5 text-muted-foreground">{examId ? "سؤال‌های آزمون‌های قبلی در بانک‌اند؛ کپی‌شان کنید یا همین‌جا یکی تازه بسازید. با بازگشت، این صفحه از سرور تازه می‌شود." : "برای افزودن از بانک، اول پیش‌نویس را ذخیره کنید تا آزمون شناسه بگیرد."}</p>
-                {examId ? <Button asChild variant="outline" size="sm"><Link href={`/teacher/questions?exam=${examId}`}><ListChecks className="h-3.5 w-3.5"/>افزودن از بانک</Link></Button> : <Button variant="outline" size="sm" onClick={() => void persist("draft")} disabled={saving !== null}><Save className="h-3.5 w-3.5"/>{saving === "draft" ? "در حال ذخیره…" : "ذخیرهٔ پیش‌نویس برای افزودن از بانک"}</Button>}
+                {examId ? <Button asChild variant="outline" size="sm"><Link href={`/teacher/questions?exam=${examId}`}><ListChecks className="h-3.5 w-3.5"/>افزودن از بانک</Link></Button> : <Button variant="outline" size="sm" onClick={() => void persist("draft")} disabled={busy || !online}><Save className="h-3.5 w-3.5"/>{saving === "draft" ? "در حال ذخیره…" : "ذخیرهٔ پیش‌نویس برای افزودن از بانک"}</Button>}
               </div>
               <TeacherQuestionBuilder questions={draft.questions} onChange={(questions) => update("questions", questions)}/>
-            </div>} {step === 3 && <ScheduleForm schedule={draft.schedule} onChange={updateSchedule} errors={validateStep(3)}/>} {step === 4 && <ReviewPublish draft={draft} totalMarks={totalMarks} validation={validation}/>}</motion.div></AnimatePresence>{error && <div role="alert" className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs leading-6 text-rose-800 dark:text-rose-300"><AlertTriangle className="h-4 w-4 shrink-0 text-danger"/><span className="flex-1">{error}</span><Button variant="outline" size="sm" onClick={clearError}>بستن</Button></div>}<div className="mt-8 flex flex-wrap items-center justify-between gap-3 border-t pt-5"><Button variant="outline" onClick={() => setStep((current) => Math.max(current - 1, 0))} disabled={step === 0 || saving !== null}><ArrowRight className="h-4 w-4"/>قبلی</Button>{step < steps.length - 1 ? <Button onClick={() => goTo(step + 1)} disabled={saving !== null}>ادامه <ArrowLeft className="h-4 w-4"/></Button> : <div className="mr-auto flex flex-wrap gap-2"><Button variant="outline" onClick={() => void persist("draft")} disabled={saving !== null}>{saving === "draft" ? "در حال ذخیره…" : "ذخیره به‌عنوان پیش‌نویس"}</Button><Button onClick={() => void persist("publish")} disabled={saving !== null}>{saving === "publish" ? "در حال انتشار…" : "انتشار آزمون"}<Sparkles className="h-4 w-4"/></Button></div>}</div></CardContent></Card></div>;
+            </div>} {step === 3 && <ScheduleForm schedule={draft.schedule} onChange={updateSchedule} errors={validateStep(3)}/>} {step === 4 && <ReviewPublish draft={draft} totalMarks={totalMarks} validation={validation}/>}</motion.div></AnimatePresence>{error && <div role="alert" className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs leading-6 text-rose-800 dark:text-rose-300"><AlertTriangle className="h-4 w-4 shrink-0 text-danger"/><span className="flex-1">{error}</span>{dirty && <Button variant="outline" size="sm" disabled={busy || !online} onClick={() => void persist(lastMode)}><RefreshCw className="h-3.5 w-3.5"/>تلاش دوباره</Button>}<Button variant="ghost" size="sm" onClick={clearError}>بستن</Button></div>}<div className="sticky bottom-0 -mx-5 mt-8 flex flex-wrap items-center gap-2 border-t bg-card/95 px-5 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:static sm:mx-0 sm:gap-3 sm:bg-transparent sm:px-0 sm:py-0 sm:pt-5 sm:backdrop-blur-none">
+      <Button variant="outline" className="flex-1 sm:flex-none" onClick={() => setStep((current) => Math.max(current - 1, 0))} disabled={step === 0 || busy}><ArrowRight className="h-4 w-4"/>قبلی</Button>
+      {step < steps.length - 1
+        ? <Button className="flex-1 sm:flex-none sm:mr-auto" onClick={() => goTo(step + 1)} disabled={busy}>ادامه <ArrowLeft className="h-4 w-4"/></Button>
+        : <div className="flex w-full flex-wrap gap-2 sm:mr-auto sm:w-auto">
+            <Button variant="outline" className="flex-1 sm:flex-none" onClick={() => void persist("draft")} disabled={busy || !online}>{saving === "draft" ? <><LoaderCircle className="h-4 w-4 animate-spin"/>در حال ذخیره…</> : "ذخیره به‌عنوان پیش‌نویس"}</Button>
+            <Button className="flex-1 sm:flex-none" onClick={() => void persist("publish")} disabled={busy || !online}>{saving === "publish" ? <><LoaderCircle className="h-4 w-4 animate-spin"/>در حال انتشار…</> : <>انتشار آزمون<Sparkles className="h-4 w-4"/></>}</Button>
+          </div>}
+    </div></CardContent></Card></div></div>;
 }
 function BuilderStepper({ step, issues, onStep }: { step: number; issues: ValidationIssue[]; onStep: (step: number) => void }) {
   // Every step is reachable in one click: jumping to the questions section to fix one stem should not
   // require walking the wizard backwards and forwards, and the only gate that matters is publish.
   const completed = steps.filter((_, index) => !issues.some((issue) => issue.step === index)).length;
-  return <aside className="rounded-2xl border bg-card p-3 shadow-soft">
+  return <aside className="rounded-2xl border bg-card p-3 shadow-soft xl:sticky xl:top-24 xl:self-start">
     <div className="mb-2 flex items-center justify-between gap-2 px-1"><p className="section-label">مراحل ساخت</p><span className="text-[10px] font-bold text-muted-foreground">{toPersianNumber(completed)} از {toPersianNumber(steps.length)} کامل</span></div>
     <div className="h-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.round((completed / steps.length) * 100)}%` }}/></div>
-    <div className="mt-3 flex gap-1 overflow-x-auto xl:block xl:space-y-1">
+    {/* A phone gets one scrolling row of steps that snaps, instead of five rows of text pushing the form down. */}
+    <div className="-mx-1 mt-3 flex snap-x snap-mandatory gap-1 overflow-x-auto px-1 pb-1 xl:mx-0 xl:block xl:snap-none xl:space-y-1 xl:pb-0">
       {steps.map((item, index) => {
         const Icon = item.icon;
         const stepIssues = issues.filter((issue) => issue.step === index);
@@ -153,7 +208,7 @@ function BuilderStepper({ step, issues, onStep }: { step: number; issues: Valida
         const active = index === step;
         const complete = stepIssues.length === 0;
         return (
-          <button type="button" key={item.title} onClick={() => onStep(index)} aria-current={active ? "step" : undefined} aria-label={`${item.title}${complete ? " — کامل" : ` — ${toPersianNumber(stepIssues.length)} مورد باقی مانده`}`} className={cn("flex shrink-0 items-center gap-3 rounded-xl px-3 py-2.5 text-right text-xs font-bold transition-colors xl:w-full", active ? "bg-primary/10 text-primary" : "hover:bg-muted", complete && !active && "text-foreground", !complete && "text-warning")}>
+          <button type="button" key={item.title} onClick={() => onStep(index)} aria-current={active ? "step" : undefined} aria-label={`${item.title}${complete ? " — کامل" : ` — ${toPersianNumber(stepIssues.length)} مورد باقی مانده`}`} className={cn("flex shrink-0 snap-start items-center gap-3 rounded-xl px-3 py-2.5 text-right text-xs font-bold transition-colors xl:w-full", active ? "bg-primary/10 text-primary" : "hover:bg-muted", complete && !active && "text-foreground", !complete && "text-warning")}>
             <span className={cn("grid h-6 w-6 shrink-0 place-items-center rounded-lg", active ? "bg-primary text-primary-foreground" : complete ? "bg-emerald-500/12 text-success" : "bg-amber-500/15 text-amber-700 dark:text-amber-400")}>{complete ? <Check className="h-3.5 w-3.5"/> : <span className="text-[10px] font-black">{toPersianNumber(stepIssues.length)}</span>}</span>
             <span className="min-w-0">
               <span className="block truncate">{item.title}</span>
@@ -164,7 +219,7 @@ function BuilderStepper({ step, issues, onStep }: { step: number; issues: Valida
         );
       })}
     </div>
-    <p className="mt-3 px-1 text-[10px] leading-5 text-muted-foreground">هر گام را مستقیم باز کنید؛ تا انتشار آزمون، چیزی به دانش‌آموزان نشان داده نمی‌شود.</p>
+    <p className="mt-3 hidden px-1 text-[10px] leading-5 text-muted-foreground sm:block">هر گام را مستقیم باز کنید؛ تا انتشار آزمون، چیزی به دانش‌آموزان نشان داده نمی‌شود.</p>
   </aside>;
 }
 function BasicInformation({ draft, update, errors }: { draft: ExamDraft; update: <K extends keyof ExamDraft>(key: K, value: ExamDraft[K]) => void; errors: ValidationIssue[] }) { const has = (field: string) => errors.some((item) => item.field === field); return <div className="grid gap-5"><div className="grid gap-5 sm:grid-cols-2"><Field label="عنوان آزمون" required error={has("title") ? "برای آزمون یک عنوان وارد کنید." : undefined}><Input value={draft.title} onChange={(event) => update("title", event.target.value)} placeholder="مثلاً آزمون فصل اول زیست‌شناسی" maxLength={90} aria-invalid={has("title")}/><Counter value={draft.title.length} max={90}/></Field><Field label="درس" required><select value={draft.subject} onChange={(event) => update("subject", event.target.value)} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option>زیست‌شناسی</option><option>ریاضی</option><option>شیمی</option><option>فیزیک</option><option>ادبیات فارسی</option></select></Field><Field label="پایه" required><select value={draft.grade} onChange={(event) => update("grade", event.target.value)} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option>پایه دهم</option><option>پایه یازدهم</option><option>پایه دوازدهم</option></select></Field><Field label="کلاس" required><select value={draft.className} onChange={(event) => update("className", event.target.value)} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option>تجربی ۲</option><option>تجربی ۱</option><option>ریاضی ۱</option><option>انسانی ۱</option></select></Field></div><Field label="توضیح کوتاه" required error={has("description") ? "یک توضیح کوتاه برای دانش‌آموز وارد کنید." : undefined}><Textarea value={draft.description} onChange={(event) => update("description", event.target.value)} placeholder="هدف و محدودهٔ آزمون را در یک یا دو جمله توضیح دهید..." maxLength={280} className="min-h-28" aria-invalid={has("description")}/><Counter value={draft.description.length} max={280}/></Field><Field label="راهنمای دانش‌آموز (اختیاری)"><Textarea value={draft.instructions} onChange={(event) => update("instructions", event.target.value)} placeholder="مثلاً پیش از ارسال، پاسخ‌های خود را مرور کنید." maxLength={500} className="min-h-24"/><Counter value={draft.instructions.length} max={500}/></Field></div>; }
@@ -280,7 +335,7 @@ function persianWindowLabel(startAt: string, endAt: string) {
 }
 function Field({ label, required, error, children }: { label: string; required?: boolean; error?: string; children: React.ReactNode }) { return <label className="block text-sm font-bold"><span>{label}{required && <span className="mr-1 text-destructive">*</span>}</span><div className="mt-2">{children}</div>{error && <span className="mt-1.5 block text-xs font-bold text-destructive">{error}</span>}</label>; }
 function Counter({ value, max }: { value: number; max: number }) { return <span className="mt-1 block text-left text-[10px] font-bold text-muted-foreground">{toPersianNumber(value)} / {toPersianNumber(max)}</span>; }
-function SettingSwitch({ label, description, checked, onChange, disabled }: { label: string; description: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) { return <div className={cn("flex items-center justify-between gap-4 rounded-2xl border p-4", disabled && "opacity-55")}><div><p className="text-sm font-extrabold">{label}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div><button type="button" role="switch" aria-checked={checked} disabled={disabled} aria-label={label} onClick={() => onChange(!checked)} className={cn("relative h-6 w-11 shrink-0 rounded-full transition-colors", checked ? "bg-primary" : "bg-muted")}><span className={cn("absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform", checked ? "right-6" : "right-1")}/></button></div>; }
+function SettingSwitch({ label, description, checked, onChange, disabled }: { label: string; description: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) { return <div className={cn("flex items-start justify-between gap-4 rounded-2xl border p-4", disabled && "opacity-55")}><div className="min-w-0"><p className="text-sm font-extrabold">{label}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div><button type="button" role="switch" aria-checked={checked} disabled={disabled} aria-label={label} onClick={() => onChange(!checked)} className={cn("relative h-6 w-11 shrink-0 rounded-full transition-colors", checked ? "bg-primary" : "bg-muted")}><span className={cn("absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform", checked ? "right-6" : "right-1")}/></button></div>; }
 function LayoutChoice({ value, onChange }: { value: ExamSettings["questionLayout"]; onChange: (value: ExamSettings["questionLayout"]) => void }) {
   const options: Array<{ value: ExamSettings["questionLayout"]; title: string; hint: string; icon: typeof FileText }> = [
     { value: "paged", title: "صفحه‌به‌صفحه", hint: "هر سؤال در یک صفحهٔ جداگانه نمایش داده می‌شود.", icon: FileText },
@@ -289,4 +344,3 @@ function LayoutChoice({ value, onChange }: { value: ExamSettings["questionLayout
   return <fieldset className="lg:col-span-2"><legend className="text-xs font-bold text-muted-foreground">چیدمان سؤال‌ها در صفحهٔ آزمون</legend><div className="mt-2 grid gap-2 sm:grid-cols-2">{options.map((option) => { const Icon = option.icon; const active = value === option.value; return <button type="button" key={option.value} aria-pressed={active} onClick={() => onChange(option.value)} className={cn("flex items-start gap-3 rounded-2xl border p-4 text-right transition-all", active ? "border-primary bg-primary/[.06] shadow-soft" : "hover:border-primary/40")}><span className={cn("mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-xl", active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}><Icon className="h-4 w-4"/></span><span className="min-w-0"><span className="block text-sm font-extrabold">{option.title}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{option.hint}</span></span></button>; })}</div></fieldset>;
 }
 
-function BuilderSkeleton() { return <div className="grid gap-6 xl:grid-cols-[250px_1fr]"><div className="h-64 animate-soft-pulse rounded-2xl bg-muted"/><div className="h-[620px] animate-soft-pulse rounded-2xl bg-muted"/></div>; }

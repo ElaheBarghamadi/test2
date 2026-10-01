@@ -94,7 +94,18 @@ interface ApiRequestOptions extends Omit<RequestInit, "body" | "headers"> {
   cacheMs?: number;
   /** Extra resource roots a successful write must invalidate, for the saves whose effect is felt elsewhere. */
   invalidate?: string[];
+  /**
+   * How long to wait for the server before giving up, in milliseconds.
+   *
+   * `fetch` has no timeout of its own: on a slow or half-open connection the request stays pending and the
+   * screen stays on "در حال ذخیره…" with every button disabled, which reads as a frozen app rather than a
+   * slow one. Twenty seconds is far past a healthy save and far short of a user's patience.
+   */
+  timeoutMs?: number;
 }
+
+/** Every request is cancelled after this long unless a caller asks for something else. */
+const DEFAULT_TIMEOUT_MS = 20_000;
 
 let refreshInFlight: Promise<boolean> | null = null;
 let onAuthenticationFailure: (() => void) | null = null;
@@ -137,16 +148,36 @@ async function send<T>(
   // transferred at all. It rides on the request only when a stored body exists to compare against.
   if (cached?.etag) headers.set("If-None-Match", cached.etag);
 
+  // One controller carries both the caller's cancellation (a screen that unmounted, a superseded search) and
+  // our own timeout, so either one stops the request and the two cannot be confused for each other.
+  const controller = new AbortController();
+  const callerSignal = options.signal;
+  const relayCallerAbort = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort();
+    else callerSignal.addEventListener("abort", relayCallerAbort, { once: true });
+  }
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let timedOut = false;
+  const timer = timeoutMs > 0
+    ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs)
+    : null;
+
   let response: Response;
   try {
     response = await fetch(`${getApiBaseUrl()}${path}`, {
       ...options,
+      signal: controller.signal,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
   } catch (error) {
+    if (timedOut) throw new Error("پاسخی از سرور نرسید؛ اتصال کند یا ناپایدار است. دوباره تلاش کنید.");
     if (error instanceof DOMException && error.name === "AbortError") throw error;
     throw new Error("اتصال به سرور برقرار نشد. شبکه و نشانی API را بررسی کنید.");
+  } finally {
+    if (timer) clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", relayCallerAbort);
   }
 
   if (response.status === 304 && cached) {

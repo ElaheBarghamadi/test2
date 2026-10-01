@@ -84,11 +84,32 @@
   .soft-grid { background-image: linear-gradient(hsl(var(--border) / .45) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--border) / .45) 1px, transparent 1px); background-size: 34px 34px; }
   .page-enter { animation: page-enter .35s ease-out both; }
   .section-label { @apply text-xs font-bold tracking-[.08em] text-primary; }
+  /*
+   * Loading placeholder.
+   *
+   * One class, so a skeleton that is drawn in five screens still reads as one system: a muted block with a
+   * slow highlight sweeping across it. It is deliberately *not* a spinner - the shape of what is coming tells
+   * the teacher more than a spinning circle does, and the sweep is what says "still working" rather than
+   * "finished, but empty".
+   */
+  .skeleton {
+    background-color: hsl(var(--muted));
+    background-image: linear-gradient(90deg, hsl(var(--muted)) 20%, hsl(var(--muted-foreground) / .14) 40%, hsl(var(--muted)) 60%);
+    background-size: 300% 100%;
+    animation: skeleton-sweep 1.5s ease-in-out infinite;
+  }
 }
 
 @keyframes page-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; } }
+/* Right-to-left: the highlight travels from the start of the line to its end, like the Persian reading order. */
+@keyframes skeleton-sweep { from { background-position: 0% 0; } to { background-position: -300% 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
+  /* A frozen sweep leaves the gradient parked mid-way and looks like a rendering bug; a flat block reads as "loading". */
+  .skeleton { animation: none !important; background-image: none; background-color: hsl(var(--muted)); }
+}
 
 /*
  * Phone typography floor.

@@ -7,7 +7,11 @@ import type { Exam, ExamDraft } from "@/lib/types/domain";
 
 interface TeacherExamState {
   exams: Exam[];
+  /** The list is being fetched. A save deliberately does *not* set this: it made every screen that shows the
+   *  list (and the builder that guards on it) look like it was loading while an unrelated save was in flight. */
   loading: boolean;
+  /** A save is in flight, whichever button started it. */
+  saving: boolean;
   detailLoadingId: string | null;
   initialized: boolean;
   error: string | null;
@@ -25,8 +29,18 @@ interface TeacherExamState {
 
 const mergeExam = (exams: Exam[], saved: Exam) => exams.some((exam) => exam.id === saved.id) ? exams.map((exam) => exam.id === saved.id ? saved : exam) : [saved, ...exams];
 
+/**
+ * One save at a time, and every caller of that save gets the same answer.
+ *
+ * Two buttons that both call `saveExam` (the publish button and Ctrl+S, a double tap on a slow phone) used to
+ * send two writes: the first creates the exam, the second creates a *second* copy of it with the same
+ * client-side question ids, and the teacher ends up with two half-populated papers. The guard lives here
+ * rather than in each button so no screen has to remember it.
+ */
+let saveInFlight: Promise<Exam> | null = null;
+
 export const useTeacherExamStore = create<TeacherExamState>((set, get) => ({
-  exams: [], loading: false, detailLoadingId: null, initialized: false, error: null,
+  exams: [], loading: false, saving: false, detailLoadingId: null, initialized: false, error: null,
   hydrate: async () => {
     if (get().initialized || get().loading) return;
     set({ loading: true, error: null });
@@ -46,18 +60,25 @@ export const useTeacherExamStore = create<TeacherExamState>((set, get) => ({
     }
   },
   saveExam: async (draft, status) => {
-    set({ loading: true, error: null });
-    try {
-      const saved = draft.id
-        ? await teacherExamService.updateExam(draft.id, draft, status === "scheduled")
-        : await teacherExamService.createExam(draft, status === "scheduled");
-      set((state) => ({ exams: mergeExam(state.exams, saved), loading: false }));
-      return saved;
-    } catch (error) {
-      const message = apiErrorMessage(error, status === "scheduled" ? "انتشار آزمون انجام نشد. دوباره تلاش کنید." : "ذخیرهٔ پیش‌نویس انجام نشد. دوباره تلاش کنید.");
-      set({ loading: false, error: message });
-      throw new Error(message);
-    }
+    if (saveInFlight) return saveInFlight;
+    const run = (async () => {
+      set({ saving: true, error: null });
+      try {
+        const saved = draft.id
+          ? await teacherExamService.updateExam(draft.id, draft, status === "scheduled")
+          : await teacherExamService.createExam(draft, status === "scheduled");
+        set((state) => ({ exams: mergeExam(state.exams, saved), saving: false }));
+        return saved;
+      } catch (error) {
+        const message = apiErrorMessage(error, status === "scheduled" ? "انتشار آزمون انجام نشد. دوباره تلاش کنید." : "ذخیرهٔ پیش‌نویس انجام نشد. دوباره تلاش کنید.");
+        set({ saving: false, error: message });
+        throw new Error(message);
+      } finally {
+        saveInFlight = null;
+      }
+    })();
+    saveInFlight = run;
+    return run;
   },
   duplicateExam: async (id) => {
     set({ loading: true, error: null });
