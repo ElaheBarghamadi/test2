@@ -192,9 +192,10 @@ export function Topbar({ role, user }: { role: Role; user: User }) {
   const openDrawer = useCallback(() => setDrawerOpen(true), []);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   return <>
-    <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b bg-background/85 px-3 backdrop-blur-md sm:px-6 lg:px-8">
+    <header className="dashboard-topbar sticky top-0 z-20 flex h-16 items-center justify-between border-b border-border/70 px-3 sm:px-6 lg:px-8">
       <div className="flex items-center gap-2 lg:hidden">
         <Button ref={triggerRef} variant="ghost" size="icon" onClick={openDrawer} aria-label="باز کردن منو" aria-expanded={drawerOpen} aria-haspopup="dialog"><Menu className="h-5 w-5"/></Button>
+        <span className="rounded-full border border-border/70 bg-card/75 px-2.5 py-1 text-[10px] font-extrabold text-muted-foreground">{roleLabel[role]}</span>
       </div>
       <div className="hidden flex-1 lg:block"/>
       <div className="mr-auto flex items-center gap-1 sm:gap-1.5">
