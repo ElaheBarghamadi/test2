@@ -2,6 +2,7 @@ import type React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Exam, Question } from "@/lib/types/domain";
+import { formatPersianWallClock } from "@/lib/utils/persian-civil";
 
 /**
  * The builder's own two promises: every step is one click away, and saving twice changes the same rows
@@ -122,6 +123,37 @@ describe("reaching the bank from the builder", () => {
     expect(await screen.findByText(/اول پیش‌نویس را ذخیره کنید/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس برای افزودن از بانک/ }));
     await waitFor(() => expect(state.saveExam).toHaveBeenCalled());
+  });
+});
+
+describe("reviewing an exam as a student", () => {
+  it("previews the actual question UI and lets the teacher move through the paper", () => {
+    const second = choice("question-second", "کدام گزینه دوم است؟");
+    state.exams = [exam({ questions: [choice("question-first"), second], questionCount: 2, settings: { ...exam().settings, totalMarks: 4 } })];
+    render(<ExamCreator examId="exam-1"/>);
+
+    fireEvent.click(screen.getByRole("button", { name: /بازبینی/ }));
+    expect(screen.getByText("پیش‌نمایش دانش‌آموز")).toBeTruthy();
+    expect(screen.getByText("کدام واحد نیرو است؟")).toBeTruthy();
+    const next = screen.getByRole("button", { name: "سؤال بعد در پیش‌نمایش" });
+    expect((next as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(next);
+    expect(screen.getByText("کدام گزینه دوم است؟")).toBeTruthy();
+    expect(screen.getByText(/بدون نمایش کلید پاسخ/)).toBeTruthy();
+  });
+});
+
+describe("reviewing a schedule across midnight", () => {
+  it("shows the ending day as well as the ending clock time", () => {
+    state.exams = [exam({ schedule: { startAt: "2026-10-03T23:30", endAt: "2026-10-04T00:30", timezone: "Asia/Tehran" } })];
+    render(<ExamCreator examId="exam-1"/>);
+    fireEvent.click(screen.getByRole("button", { name: /بازبینی/ }));
+
+    const start = formatPersianWallClock("2026-10-03T23:30");
+    const end = formatPersianWallClock("2026-10-04T00:30");
+    const [startDate, startTime] = start.split(" · ");
+    const [endDate, endTime] = end.split(" · ");
+    expect(screen.getByText(`${startDate}، ${startTime} تا ${endDate}، ${endTime}`)).toBeTruthy();
   });
 });
 

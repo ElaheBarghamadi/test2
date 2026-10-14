@@ -41,6 +41,20 @@ function openSettings() {
   fireEvent.click(screen.getByRole("button", { name: /ادامه/ }));
 }
 
+describe("draft status and bounded settings", () => {
+  it("does not call a brand-new exam saved before the first save", () => {
+    render(<ExamCreator/>);
+    expect(screen.getByText("آزمون هنوز ذخیره نشده")).toBeTruthy();
+  });
+
+  it("keeps duration within the form's five-to-three-hundred-minute range", () => {
+    openSettings();
+    const duration = screen.getByLabelText(/مدت آزمون/);
+    fireEvent.change(duration, { target: { value: "450" } });
+    expect((duration as HTMLInputElement).value).toBe("300");
+  });
+});
+
 describe("delivery layout", () => {
   it("offers the two layouts with paged selected by default", () => {
     openSettings();
@@ -64,6 +78,73 @@ describe("delivery layout", () => {
     // And the switch comes back: the stored value is left alone, only its row is hidden.
     fireEvent.click(screen.getByRole("button", { name: /صفحه‌به‌صفحه/ }));
     expect(screen.getByText("اجازهٔ بازگشت به سؤال‌ها")).toBeTruthy();
+  });
+});
+
+describe("starter templates and flexible class details", () => {
+  it("applies a practice template without overwriting the teacher's title or class", () => {
+    render(<ExamCreator/>);
+    fireEvent.change(screen.getByRole("textbox", { name: /عنوان آزمون/ }), { target: { value: "تمرین فصل دوم" } });
+    fireEvent.change(screen.getByRole("combobox", { name: /کلاس/ }), { target: { value: "۹-الف" } });
+
+    const template = screen.getByRole("button", { name: /تمرین کوتاه/ });
+    fireEvent.click(template);
+    expect(template.getAttribute("aria-pressed")).toBe("true");
+    expect((screen.getByRole("textbox", { name: /عنوان آزمون/ }) as HTMLInputElement).value).toBe("تمرین فصل دوم");
+    expect((screen.getByRole("combobox", { name: /کلاس/ }) as HTMLInputElement).value).toBe("۹-الف");
+
+    fireEvent.click(screen.getByRole("button", { name: /ادامه/ }));
+    expect((screen.getByLabelText(/مدت آزمون/) as HTMLInputElement).value).toBe("20");
+    expect((screen.getByRole("combobox", { name: /نمایش نتیجه/ }) as HTMLSelectElement).value).toBe("immediate");
+    expect((screen.getByRole("combobox", { name: /تعداد تلاش مجاز/ }) as HTMLSelectElement).value).toBe("2");
+  });
+
+  it("clears the chosen template marker when a setting is customized", () => {
+    render(<ExamCreator/>);
+    fireEvent.click(screen.getByRole("button", { name: /تمرین کوتاه/ }));
+    fireEvent.click(screen.getByRole("button", { name: /ادامه/ }));
+    fireEvent.change(screen.getByLabelText(/مدت آزمون/), { target: { value: "30" } });
+    fireEvent.click(screen.getByRole("button", { name: /اطلاعات پایه/ }));
+
+    expect(screen.getByRole("button", { name: /تمرین کوتاه/ }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("accepts subjects, grades and class names outside the suggestion list", () => {
+    render(<ExamCreator/>);
+    const subject = screen.getByRole("combobox", { name: /درس/ }) as HTMLInputElement;
+    const grade = screen.getByRole("combobox", { name: /پایه/ }) as HTMLInputElement;
+    const className = screen.getByRole("combobox", { name: /کلاس/ }) as HTMLInputElement;
+    fireEvent.change(subject, { target: { value: "علوم رایانه" } });
+    fireEvent.change(grade, { target: { value: "پایه نهم ویژه" } });
+    fireEvent.change(className, { target: { value: "گروه المپیاد" } });
+
+    expect(subject.value).toBe("علوم رایانه");
+    expect(grade.value).toBe("پایه نهم ویژه");
+    expect(className.value).toBe("گروه المپیاد");
+    expect(subject.getAttribute("list")).toBe("exam-subject-suggestions");
+  });
+});
+
+describe("quick scheduling", () => {
+  it("fills tomorrow morning in the school's Persian calendar", () => {
+    openSettings();
+    fireEvent.click(screen.getByRole("button", { name: /زمان‌بندی/ }));
+    fireEvent.click(screen.getByRole("button", { name: /فردا، ۸:۳۰/ }));
+
+    expect(screen.getByText(/۰۸:۳۰/)).toBeTruthy();
+    expect(screen.getByText(/۰۹:۳۰/)).toBeTruthy();
+    expect(screen.getByText(/بازهٔ برگزاری ۱ ساعت است/)).toBeTruthy();
+  });
+
+  it("includes leftover minutes in the schedule summary", () => {
+    openSettings();
+    fireEvent.click(screen.getByRole("button", { name: /زمان‌بندی/ }));
+    fireEvent.click(screen.getByRole("button", { name: /فردا، ۸:۳۰/ }));
+    fireEvent.click(screen.getByRole("button", { name: /تاریخ و ساعت پایان/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "ساعت" }), { target: { value: "10" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "دقیقه" }), { target: { value: "00" } });
+
+    expect(screen.getByText(/بازهٔ برگزاری ۱ ساعت و ۳۰ دقیقه است/)).toBeTruthy();
   });
 });
 

@@ -1,12 +1,13 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, ChevronLeft, Clock3, FileText, ListChecks, Save, Settings2, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, ChevronLeft, Clock3, Eye, FileText, ListChecks, Save, Settings2, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { Exam, ExamDraft, ExamSettings, ResultVisibility } from "@/lib/types/domain";
 import { TeacherQuestionBuilder, questionIssues } from "@/components/teacher/question-builder";
+import { QuestionRenderer } from "@/components/exam/question-renderer";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -20,6 +21,7 @@ import { ExamBuilderSkeleton } from "@/components/shared/skeleton";
 import { useOnlineStatus } from "@/hooks/use-online-status";
 import { LoaderCircle, RefreshCw, WifiOff } from "lucide-react";
 import { formatPersianWallClock, wallClockToIso } from "@/lib/utils/persian-civil";
+import { createDefaultExamSchedule, createExamSchedulePreset, DEFAULT_EXAM_TIMEZONE } from "@/lib/exam/scheduling";
 
 const steps = [
   { title: "اطلاعات پایه", description: "مشخصات اصلی آزمون را تنظیم کنید.", icon: FileText },
@@ -28,8 +30,29 @@ const steps = [
   { title: "زمان‌بندی", description: "بازهٔ دسترسی دانش‌آموزان را انتخاب کنید.", icon: CalendarDays },
   { title: "بازبینی", description: "جزئیات را نهایی و منتشر کنید.", icon: Check },
 ];
-const defaultSettings: ExamSettings = { durationMinutes: 45, totalMarks: 0, allowBackNavigation: true, questionLayout: "paged", randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, attemptLimit: 1, passingPercentage: 50 };
-const emptyDraft = (): ExamDraft => ({ title: "", subject: "زیست‌شناسی", grade: "پایه دوازدهم", className: "تجربی ۲", description: "", instructions: "", settings: defaultSettings, schedule: { startAt: "2026-09-14T08:30", endAt: "2026-09-14T09:30", timezone: "Asia/Tehran" }, questions: [] });
+const defaultSettings: ExamSettings = { durationMinutes: 45, totalMarks: 0, allowBackNavigation: true, questionLayout: "paged", randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, showResultImmediately: false, resultVisibility: "pending", showCorrectAnswers: false, resultDetail: "score_only", attemptLimit: 1, passingPercentage: 50 };
+type ExamTemplateId = "practice" | "classroom" | "comprehensive";
+const examTemplates: Array<{ id: ExamTemplateId; title: string; summary: string; settings: Partial<ExamSettings> }> = [
+  {
+    id: "practice",
+    title: "تمرین کوتاه",
+    summary: "۲۰ دقیقه · دو تلاش · پاسخ‌نامهٔ فوری",
+    settings: { durationMinutes: 20, questionLayout: "single_page", allowBackNavigation: true, randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, resultVisibility: "immediate", showResultImmediately: true, showCorrectAnswers: true, resultDetail: "full_key", attemptLimit: 2, passingPercentage: 0 },
+  },
+  {
+    id: "classroom",
+    title: "آزمون کلاسی",
+    summary: "۴۵ دقیقه · یک تلاش · نتیجه پس از بررسی",
+    settings: { durationMinutes: 45, questionLayout: "paged", allowBackNavigation: true, randomizeQuestions: false, randomizeOptions: false, allowUnanswered: true, resultVisibility: "pending", showResultImmediately: false, showCorrectAnswers: false, resultDetail: "score_only", attemptLimit: 1, passingPercentage: 50 },
+  },
+  {
+    id: "comprehensive",
+    title: "ارزشیابی جامع",
+    summary: "۹۰ دقیقه · ترتیب تصادفی · انتشار دستی",
+    settings: { durationMinutes: 90, questionLayout: "paged", allowBackNavigation: true, randomizeQuestions: true, randomizeOptions: true, allowUnanswered: true, resultVisibility: "hidden", showResultImmediately: false, showCorrectAnswers: false, resultDetail: "score_only", attemptLimit: 1, passingPercentage: 50 },
+  },
+];
+const emptyDraft = (): ExamDraft => ({ title: "", subject: "زیست‌شناسی", grade: "پایه دوازدهم", className: "تجربی ۲", description: "", instructions: "", settings: { ...defaultSettings }, schedule: { startAt: "", endAt: "", timezone: DEFAULT_EXAM_TIMEZONE }, questions: [] });
 const asDraft = (exam: Exam): ExamDraft => ({ id: exam.id, title: exam.title, subject: exam.subject, grade: exam.grade, className: exam.className, description: exam.description, instructions: exam.instructions ?? "", settings: { ...exam.settings }, schedule: { ...exam.schedule }, questions: exam.questions.map((question) => question.type === "single_choice" || question.type === "multiple_choice" ? { ...question, options: question.options.map((option) => ({ ...option })) } : { ...question }) });
 
 export function ExamCreator({ examId }: { examId?: string }) {
@@ -39,6 +62,7 @@ export function ExamCreator({ examId }: { examId?: string }) {
 
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<ExamDraft>(emptyDraft);
+  const [activeTemplate, setActiveTemplate] = useState<ExamTemplateId | null>(null);
   const [saving, setSaving] = useState<"draft" | "publish" | null>(null);
   // The store is the authority on whether a write is in flight; the local state drives the labels.
   const busy = saving !== null || Boolean(storeSaving);
@@ -65,6 +89,12 @@ export function ExamCreator({ examId }: { examId?: string }) {
   const existing = examId ? exams.find((exam) => exam.id === examId) : undefined;
   useEffect(() => { if (examId) void loadExam(examId); }, [examId, loadExam]);
   useEffect(() => { if (existing) setDraft(asDraft(existing)); }, [existing?.id]);
+  useEffect(() => {
+    // Compute this after hydration: a server-rendered clock and the browser clock may differ by a timezone
+    // or a quarter-hour boundary. New papers should never open pre-filled with an already-expired schedule.
+    if (examId) return;
+    setDraft((current) => current.schedule.startAt ? current : { ...current, schedule: createDefaultExamSchedule() });
+  }, [examId]);
   const totalMarks = useMemo(() => draft.questions.reduce((sum, question) => sum + question.points, 0), [draft.questions]);
   const validation = useMemo(() => validateDraft(draft), [draft]);
   const update = <K extends keyof ExamDraft>(key: K, value: ExamDraft[K]) => {
@@ -72,7 +102,15 @@ export function ExamCreator({ examId }: { examId?: string }) {
     setDirty(true);
   };
   const updateSettings = (patch: Partial<ExamSettings>) => {
+    setActiveTemplate(null);
     setDraft((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
+    setDirty(true);
+  };
+  const applyTemplate = (templateId: ExamTemplateId) => {
+    const template = examTemplates.find((item) => item.id === templateId);
+    if (!template) return;
+    setDraft((current) => ({ ...current, settings: { ...current.settings, ...template.settings } }));
+    setActiveTemplate(templateId);
     setDirty(true);
   };
   const updateSchedule = (patch: Partial<ExamDraft["schedule"]>) => {
@@ -169,14 +207,14 @@ export function ExamCreator({ examId }: { examId?: string }) {
     </div>}
     <div className="grid gap-4 sm:gap-6 xl:grid-cols-[250px_minmax(0,1fr)]"><BuilderStepper step={step} issues={validation} onStep={goTo}/><Card className="min-w-0 xl:min-h-[600px]" aria-busy={busy}><CardHeader className="border-b"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><p className="section-label">{examId ? "ویرایش آزمون" : "آزمون جدید"} · گام {toPersianNumber(step + 1)} از {toPersianNumber(steps.length)}</p><CardTitle className="mt-1 text-xl">{steps[step].title}</CardTitle><CardDescription className="mt-1">{steps[step].description}</CardDescription></div><div className="flex w-full flex-wrap items-center justify-between gap-2 sm:w-auto sm:justify-end">
                 <span className={cn("truncate text-[11px] font-bold", dirty ? "text-warning" : "text-muted-foreground")}>
-                  {saving === "draft" ? "در حال ذخیره…" : dirty ? "تغییر ذخیره‌نشده دارید" : savedAt ? `ذخیره شد · ${savedAt.toLocaleTimeString("fa-IR", { hour: "2-digit", minute: "2-digit" })}` : "همه‌چیز ذخیره است"}
+                  {saving === "draft" ? "در حال ذخیره…" : dirty ? "تغییر ذخیره‌نشده دارید" : savedAt ? `ذخیره شد · ${savedAt.toLocaleTimeString("fa-IR", { hour: "2-digit", minute: "2-digit" })}` : (draft.id || examId) ? "همه‌چیز ذخیره است" : "آزمون هنوز ذخیره نشده"}
                 </span>
                 <Button variant={dirty ? "default" : "outline"} size="sm" className="flex-1 sm:flex-none" onClick={() => void persist("draft")} disabled={busy || !online}>
                   {saving === "draft" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin"/> : <Save className="h-3.5 w-3.5"/>}
                   {examId ? "ذخیرهٔ تغییرات" : "ذخیره پیش‌نویس"}
                   <kbd className="mr-1 hidden rounded border bg-background/60 px-1 text-[9px] font-bold sm:inline">Ctrl S</kbd>
                 </Button>
-              </div></div></CardHeader><CardContent className="p-5 sm:p-6"><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} transition={{ duration: .18 }}>{step === 0 && <BasicInformation draft={draft} update={update} errors={validateStep(0)}/>} {step === 1 && <ExamSettingsForm settings={draft.settings} totalMarks={totalMarks} onChange={updateSettings}/>} {step === 2 && <div className="space-y-3">
+              </div></div></CardHeader><CardContent className="p-5 sm:p-6"><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} transition={{ duration: .18 }}>{step === 0 && <div className="space-y-5">{!examId && <ExamTemplatePicker selected={activeTemplate} onSelect={applyTemplate}/>}<BasicInformation draft={draft} update={update} errors={validateStep(0)}/></div>} {step === 1 && <ExamSettingsForm settings={draft.settings} totalMarks={totalMarks} errors={validateStep(1)} onChange={updateSettings}/>} {step === 2 && <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-muted/35 p-3">
                 <p className="min-w-0 flex-1 text-[11px] leading-5 text-muted-foreground">{examId ? "سؤال‌های آزمون‌های قبلی در بانک‌اند؛ کپی‌شان کنید یا همین‌جا یکی تازه بسازید. با بازگشت، این صفحه از سرور تازه می‌شود." : "برای افزودن از بانک، اول پیش‌نویس را ذخیره کنید تا آزمون شناسه بگیرد."}</p>
                 {examId ? <Button asChild variant="outline" size="sm"><Link href={`/teacher/questions?exam=${examId}`}><ListChecks className="h-3.5 w-3.5"/>افزودن از بانک</Link></Button> : <Button variant="outline" size="sm" onClick={() => void persist("draft")} disabled={busy || !online}><Save className="h-3.5 w-3.5"/>{saving === "draft" ? "در حال ذخیره…" : "ذخیرهٔ پیش‌نویس برای افزودن از بانک"}</Button>}
@@ -222,14 +260,109 @@ function BuilderStepper({ step, issues, onStep }: { step: number; issues: Valida
     <p className="mt-3 hidden px-1 text-[10px] leading-5 text-muted-foreground sm:block">هر گام را مستقیم باز کنید؛ تا انتشار آزمون، چیزی به دانش‌آموزان نشان داده نمی‌شود.</p>
   </aside>;
 }
-function BasicInformation({ draft, update, errors }: { draft: ExamDraft; update: <K extends keyof ExamDraft>(key: K, value: ExamDraft[K]) => void; errors: ValidationIssue[] }) { const has = (field: string) => errors.some((item) => item.field === field); return <div className="grid gap-5"><div className="grid gap-5 sm:grid-cols-2"><Field label="عنوان آزمون" required error={has("title") ? "برای آزمون یک عنوان وارد کنید." : undefined}><Input value={draft.title} onChange={(event) => update("title", event.target.value)} placeholder="مثلاً آزمون فصل اول زیست‌شناسی" maxLength={90} aria-invalid={has("title")}/><Counter value={draft.title.length} max={90}/></Field><Field label="درس" required><select value={draft.subject} onChange={(event) => update("subject", event.target.value)} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option>زیست‌شناسی</option><option>ریاضی</option><option>شیمی</option><option>فیزیک</option><option>ادبیات فارسی</option></select></Field><Field label="پایه" required><select value={draft.grade} onChange={(event) => update("grade", event.target.value)} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option>پایه دهم</option><option>پایه یازدهم</option><option>پایه دوازدهم</option></select></Field><Field label="کلاس" required><select value={draft.className} onChange={(event) => update("className", event.target.value)} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option>تجربی ۲</option><option>تجربی ۱</option><option>ریاضی ۱</option><option>انسانی ۱</option></select></Field></div><Field label="توضیح کوتاه" required error={has("description") ? "یک توضیح کوتاه برای دانش‌آموز وارد کنید." : undefined}><Textarea value={draft.description} onChange={(event) => update("description", event.target.value)} placeholder="هدف و محدودهٔ آزمون را در یک یا دو جمله توضیح دهید..." maxLength={280} className="min-h-28" aria-invalid={has("description")}/><Counter value={draft.description.length} max={280}/></Field><Field label="راهنمای دانش‌آموز (اختیاری)"><Textarea value={draft.instructions} onChange={(event) => update("instructions", event.target.value)} placeholder="مثلاً پیش از ارسال، پاسخ‌های خود را مرور کنید." maxLength={500} className="min-h-24"/><Counter value={draft.instructions.length} max={500}/></Field></div>; }
-function ExamSettingsForm({ settings, totalMarks, onChange }: { settings: ExamSettings; totalMarks: number; onChange: (patch: Partial<ExamSettings>) => void }) { return <div className="space-y-6"><div className="grid gap-4 sm:grid-cols-3"><Field label="مدت آزمون (دقیقه)" required><div className="relative"><Clock3 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"/><Input type="number" min="5" max="300" value={settings.durationMinutes} onChange={(event) => onChange({ durationMinutes: Math.max(5, Number(event.target.value)) })} className="pr-9"/></div></Field><Field label="نمره کل"><div className="flex h-11 items-center rounded-xl border bg-muted/55 px-3 text-sm font-black text-primary">{toPersianNumber(totalMarks)} نمره</div><p className="mt-1 text-[10px] text-muted-foreground">بر اساس نمرهٔ سؤال‌ها محاسبه می‌شود.</p></Field><Field label="حدنصاب قبولی"><div className="relative"><Input type="number" min="0" max="100" value={settings.passingPercentage} onChange={(event) => onChange({ passingPercentage: Math.min(100, Math.max(0, Number(event.target.value))) })}/><span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-muted-foreground">٪</span></div></Field></div><section><h3 className="text-sm font-black">قوانین پاسخ‌گویی</h3><div className="mt-3 grid gap-3 lg:grid-cols-2"><LayoutChoice value={settings.questionLayout} onChange={(questionLayout) => onChange({ questionLayout })}/>{settings.questionLayout === "paged" ? <SettingSwitch label="اجازهٔ بازگشت به سؤال‌ها" description="دانش‌آموز بتواند پاسخ سؤال‌های قبل را مرور کند." checked={settings.allowBackNavigation} onChange={(checked) => onChange({ allowBackNavigation: checked })}/> : <p className="rounded-2xl border border-dashed p-4 text-xs leading-6 text-muted-foreground">در چیدمان یک‌صفحه‌ای همهٔ سؤال‌ها یک‌جا نمایش داده می‌شوند، پس «بازگشت به سؤال قبلی» معنایی ندارد؛ برای استفاده از این محدودیت، چیدمان را روی صفحه‌به‌صفحه بگذارید.</p>}<SettingSwitch label="ترتیب تصادفی سؤال‌ها" description="سؤال‌ها برای هر دانش‌آموز با ترتیب متفاوت نمایش داده شوند." checked={settings.randomizeQuestions} onChange={(checked) => onChange({ randomizeQuestions: checked })}/>
+function ExamTemplatePicker({ selected, onSelect }: { selected: ExamTemplateId | null; onSelect: (id: ExamTemplateId) => void }) {
+  return (
+    <section className="rounded-2xl border border-primary/15 bg-gradient-to-bl from-primary/[.055] via-card to-teal-500/[.035] p-4" aria-label="قالب‌های آماده آزمون">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="text-sm font-black">شروع سریع با قالب</p>
+          <p className="mt-1 text-[11px] leading-5 text-muted-foreground">قالب فقط تنظیمات را تغییر می‌دهد؛ مشخصات کلاس و سؤال‌ها دست‌نخورده می‌مانند.</p>
+        </div>
+        <span className="rounded-full bg-card/80 px-2.5 py-1 text-[10px] font-bold text-muted-foreground">اختیاری</span>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        {examTemplates.map((template) => {
+          const Icon = template.id === "practice" ? Sparkles : template.id === "classroom" ? FileText : ListChecks;
+          const active = selected === template.id;
+          return (
+            <button
+              key={template.id}
+              type="button"
+              aria-pressed={active}
+              onClick={() => onSelect(template.id)}
+              className={cn(
+                "flex min-h-[92px] items-start gap-3 rounded-xl border p-3 text-right transition-all",
+                active ? "border-primary bg-primary/[.07] shadow-soft" : "bg-card/85 hover:border-primary/35 hover:bg-card",
+              )}
+            >
+              <span className={cn("grid h-9 w-9 shrink-0 place-items-center rounded-xl", active ? "bg-primary text-primary-foreground" : "bg-muted text-primary")}>
+                <Icon className="h-4 w-4" aria-hidden="true"/>
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-xs font-black">{template.title}</span>
+                <span className="mt-1.5 block text-[10px] leading-5 text-muted-foreground">{template.summary}</span>
+              </span>
+              {active && <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true"/>}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function BasicInformation({ draft, update, errors }: { draft: ExamDraft; update: <K extends keyof ExamDraft>(key: K, value: ExamDraft[K]) => void; errors: ValidationIssue[] }) {
+  const has = (field: string) => errors.some((item) => item.field === field);
+  return (
+    <div className="grid gap-5">
+      <div className="grid gap-5 sm:grid-cols-2">
+        <Field label="عنوان آزمون" required error={has("title") ? "برای آزمون یک عنوان وارد کنید." : undefined}>
+          <Input value={draft.title} onChange={(event) => update("title", event.target.value)} placeholder="مثلاً آزمون فصل اول زیست‌شناسی" maxLength={90} aria-invalid={has("title")}/>
+          <Counter value={draft.title.length} max={90}/>
+        </Field>
+        <Field label="درس" required error={has("subject") ? "نام درس را وارد کنید." : undefined}>
+          <Input list="exam-subject-suggestions" value={draft.subject} onChange={(event) => update("subject", event.target.value)} placeholder="نام درس را بنویسید" maxLength={80} aria-invalid={has("subject")}/>
+          <datalist id="exam-subject-suggestions">
+            {["زیست‌شناسی", "ریاضی", "شیمی", "فیزیک", "ادبیات فارسی", "زبان انگلیسی", "علوم زمین", "تاریخ", "جغرافیا", "علوم"].map((item) => <option key={item} value={item}/>)}
+          </datalist>
+        </Field>
+        <Field label="پایه" required error={has("grade") ? "پایهٔ تحصیلی را وارد کنید." : undefined}>
+          <Input list="exam-grade-suggestions" value={draft.grade} onChange={(event) => update("grade", event.target.value)} placeholder="مثلاً پایه دوازدهم" maxLength={40} aria-invalid={has("grade")}/>
+          <datalist id="exam-grade-suggestions">
+            {["پایه هفتم", "پایه هشتم", "پایه نهم", "پایه دهم", "پایه یازدهم", "پایه دوازدهم"].map((item) => <option key={item} value={item}/>)}
+          </datalist>
+        </Field>
+        <Field label="کلاس" required error={has("className") ? "نام کلاس را وارد کنید." : undefined}>
+          <Input list="exam-class-suggestions" value={draft.className} onChange={(event) => update("className", event.target.value)} placeholder="مثلاً تجربی ۲ یا ۹-الف" maxLength={60} aria-invalid={has("className")}/>
+          <datalist id="exam-class-suggestions">
+            {["تجربی ۱", "تجربی ۲", "ریاضی ۱", "انسانی ۱", "کلاس الف", "کلاس ب"].map((item) => <option key={item} value={item}/>)}
+          </datalist>
+        </Field>
+      </div>
+      <Field label="توضیح کوتاه" required error={has("description") ? "یک توضیح کوتاه برای دانش‌آموز وارد کنید." : undefined}>
+        <Textarea value={draft.description} onChange={(event) => update("description", event.target.value)} placeholder="هدف و محدودهٔ آزمون را در یک یا دو جمله توضیح دهید..." maxLength={280} className="min-h-28" aria-invalid={has("description")}/>
+        <Counter value={draft.description.length} max={280}/>
+      </Field>
+      <Field label="راهنمای دانش‌آموز (اختیاری)">
+        <Textarea value={draft.instructions} onChange={(event) => update("instructions", event.target.value)} placeholder="مثلاً پیش از ارسال، پاسخ‌های خود را مرور کنید." maxLength={500} className="min-h-24"/>
+        <Counter value={draft.instructions.length} max={500}/>
+      </Field>
+    </div>
+  );
+}
+function ExamSettingsForm({ settings, totalMarks, errors, onChange }: { settings: ExamSettings; totalMarks: number; errors: ValidationIssue[]; onChange: (patch: Partial<ExamSettings>) => void }) { const durationIssue = errors.find((item) => item.field === "duration")?.message; return <div className="space-y-6"><div className="grid gap-4 sm:grid-cols-3"><Field label="مدت آزمون (دقیقه)" required error={durationIssue}><div className="relative"><Clock3 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"/><Input type="number" min="5" max="300" value={settings.durationMinutes} onChange={(event) => onChange({ durationMinutes: Math.min(300, Math.max(5, Number(event.target.value))) })} className="pr-9" aria-invalid={Boolean(durationIssue)}/></div></Field><Field label="نمره کل"><div className="flex h-11 items-center rounded-xl border bg-muted/55 px-3 text-sm font-black text-primary">{toPersianNumber(totalMarks)} نمره</div><p className="mt-1 text-[10px] text-muted-foreground">بر اساس نمرهٔ سؤال‌ها محاسبه می‌شود.</p></Field><Field label="حدنصاب قبولی"><div className="relative"><Input type="number" min="0" max="100" value={settings.passingPercentage} onChange={(event) => onChange({ passingPercentage: Math.min(100, Math.max(0, Number(event.target.value))) })}/><span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-muted-foreground">٪</span></div></Field></div><section><h3 className="text-sm font-black">قوانین پاسخ‌گویی</h3><div className="mt-3 grid gap-3 lg:grid-cols-2"><LayoutChoice value={settings.questionLayout} onChange={(questionLayout) => onChange({ questionLayout })}/>{settings.questionLayout === "paged" ? <SettingSwitch label="اجازهٔ بازگشت به سؤال‌ها" description="دانش‌آموز بتواند پاسخ سؤال‌های قبل را مرور کند." checked={settings.allowBackNavigation} onChange={(checked) => onChange({ allowBackNavigation: checked })}/> : <p className="rounded-2xl border border-dashed p-4 text-xs leading-6 text-muted-foreground">در چیدمان یک‌صفحه‌ای همهٔ سؤال‌ها یک‌جا نمایش داده می‌شوند، پس «بازگشت به سؤال قبلی» معنایی ندارد؛ برای استفاده از این محدودیت، چیدمان را روی صفحه‌به‌صفحه بگذارید.</p>}<SettingSwitch label="ترتیب تصادفی سؤال‌ها" description="سؤال‌ها برای هر دانش‌آموز با ترتیب متفاوت نمایش داده شوند." checked={settings.randomizeQuestions} onChange={(checked) => onChange({ randomizeQuestions: checked })}/>
           <SettingSwitch label="ترتیب تصادفی گزینه‌ها" description="گزینه‌ها برای هر دانش‌آموز جابه‌جا شوند؛ نمره‌دهی به شناسهٔ گزینه نگاه می‌کند، نه جای آن." checked={settings.randomizeOptions} onChange={(checked) => onChange({ randomizeOptions: checked })}/>
           <SettingSwitch label="اجازهٔ ارسال با سؤال بدون پاسخ" description="اگر خاموش باشد، دانش‌آموز تا کامل‌نکردن همهٔ سؤال‌ها نمی‌تواند ارسال کند." checked={settings.allowUnanswered} onChange={(checked) => onChange({ allowUnanswered: checked })}/>
           {settings.questionLayout === "paged" && !settings.allowBackNavigation && !settings.allowUnanswered && <p className="mt-3 flex items-start gap-2 rounded-2xl border border-amber-500/25 bg-amber-500/[.07] p-3 text-[11px] leading-5 text-amber-900 dark:text-amber-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0"/>با این دو تنظیم، دانش‌آموزی که سؤالی را بی‌پاسخ رد کند دیگر نمی‌تواند به آن برگردد و در همان حال اجازهٔ ارسال هم ندارد. پیشنهاد: یکی از این دو را باز بگذارید.</p>}</div></section><section><h3 className="text-sm font-black">نتیجه و بازخورد</h3><div className="mt-3 grid gap-4 sm:grid-cols-2"><Field label="نمایش نتیجه"><select value={settings.resultVisibility} onChange={(event) => { const value = event.target.value as ResultVisibility; onChange({ resultVisibility: value, showResultImmediately: value === "immediate" }); }} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option value="immediate">بلافاصله پس از ارسال</option><option value="pending">پس از بررسی آموزگار</option><option value="hidden">تا زمان انتشار دستی</option></select></Field><Field label="تعداد تلاش مجاز"><select value={settings.attemptLimit} onChange={(event) => onChange({ attemptLimit: Number(event.target.value) })} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option value={1}>یک بار</option><option value={2}>دو بار</option><option value={3}>سه بار</option></select></Field></div><ResultDetailChoice settings={settings} onChange={onChange}/><IntegrityChoice settings={settings} onChange={onChange}/><div className="mt-3 rounded-2xl border bg-muted/40 p-4 text-xs leading-6 text-muted-foreground">تا نمرهٔ همهٔ سؤال‌ها نهایی نشود، دانش‌آموز همین نمره را می‌بیند و بقیهٔ انتخاب‌های شما پس از تصحیح باز می‌شود.</div></section></div>; }
 function ScheduleForm({ schedule, onChange, errors }: { schedule: ExamDraft["schedule"]; onChange: (patch: Partial<ExamDraft["schedule"]>) => void; errors: ValidationIssue[] }) {
   const invalid = errors.some((item) => item.field === "schedule");
   return <div className="grid gap-5">
+    <div className="rounded-2xl border border-primary/15 bg-primary/[.035] p-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-xs font-black">زمان‌بندی سریع</p>
+          <p className="mt-1 text-[11px] leading-5 text-muted-foreground">یک زمان پیشنهادی بزنید؛ بعداً هر دو تاریخ را می‌توانید تغییر دهید.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={() => onChange(createExamSchedulePreset("in-one-hour", new Date(), schedule.timezone))}>
+            <Clock3 className="h-3.5 w-3.5"/>یک ساعت دیگر
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => onChange(createExamSchedulePreset("tomorrow-morning", new Date(), schedule.timezone))}>
+            <CalendarDays className="h-3.5 w-3.5"/>فردا، ۸:۳۰
+          </Button>
+        </div>
+      </div>
+    </div>
     <div className="grid gap-5 sm:grid-cols-2">
       <PersianDateTimeField label="تاریخ و ساعت شروع" required timezone={schedule.timezone} value={schedule.startAt} onChange={(startAt) => onChange({ startAt })}/>
       <PersianDateTimeField label="تاریخ و ساعت پایان" required timezone={schedule.timezone} min={schedule.startAt} error={invalid ? "زمان پایان باید بعد از زمان شروع باشد." : undefined} value={schedule.endAt} onChange={(endAt) => onChange({ endAt })}/>
@@ -238,7 +371,84 @@ function ScheduleForm({ schedule, onChange, errors }: { schedule: ExamDraft["sch
       <b className="font-black text-foreground">{windowSummary(schedule.startAt, schedule.endAt, schedule.timezone)}</b>
       <span className="mt-0.5 block">دانش‌آموزان تنها در همین بازه می‌توانند آزمون را شروع کنند، و ساعت‌ها به وقت {timezoneName(schedule.timezone)} خوانده می‌شوند.</span>
     </div>}<Field label="منطقه زمانی"><select value={schedule.timezone} onChange={(event) => onChange({ timezone: event.target.value })} className="h-11 w-full rounded-xl border bg-background px-3 text-sm"><option value="Asia/Tehran">تهران (GMT +03:30)</option><option value="Asia/Dubai">دبی (GMT +04:00)</option><option value="Europe/Istanbul">استانبول (GMT +03:00)</option></select></Field><div className="rounded-2xl bg-primary/[.05] p-4 text-xs leading-6 text-muted-foreground"><CalendarDays className="ml-2 inline h-4 w-4 text-primary align-text-bottom"/>دانش‌آموزان فقط در این بازه می‌توانند آزمون را شروع کنند. زمان پاسخ‌گویی هر دانش‌آموز از لحظهٔ شروع او محاسبه می‌شود.</div></div>; }
-function ReviewPublish({ draft, totalMarks, validation }: { draft: ExamDraft; totalMarks: number; validation: ValidationIssue[] }) { const complete = validation.length === 0; return <div><div className={cn("flex items-start gap-3 rounded-2xl border p-4 text-sm leading-6", complete ? "border-success/20 bg-success/[.06] text-success" : "border-warning/25 bg-warning/[.08] text-warning")}><span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg", complete ? "bg-emerald-500/15 text-success" : "bg-amber-500/15 text-warning")}>{complete ? <Check className="h-4 w-4"/> : <AlertTriangle className="h-4 w-4"/>}</span><div><b>{complete ? "آزمون آمادهٔ انتشار است" : "چند مورد نیاز به تکمیل دارد"}</b><p className="mt-1 text-xs">{complete ? "تنظیمات، سؤال‌ها و زمان‌بندی با هم سازگار هستند." : validation.map((item) => item.message).join(" · ")}</p></div></div><div className="mt-5 grid gap-3 sm:grid-cols-2">{[{label:"عنوان",value:draft.title || "بدون عنوان"},{label:"کلاس",value:`${draft.grade} · ${draft.className}`},{label:"سؤال‌ها",value:`${toPersianNumber(draft.questions.length)} سؤال`},{label:"نمره کل",value:`${toPersianNumber(totalMarks)} نمره`},{label:"مدت",value:`${toPersianNumber(draft.settings.durationMinutes)} دقیقه`},{label:"بازهٔ برگزاری",value:persianWindowLabel(draft.schedule.startAt, draft.schedule.endAt)}].map((item) => <div className="rounded-xl bg-muted/60 p-3" key={item.label}><p className="text-[11px] font-bold text-muted-foreground">{item.label}</p><p className="mt-1 text-sm font-extrabold">{item.value}</p></div>)}</div><div className="mt-5 rounded-2xl border p-4"><h3 className="text-sm font-black">قواعد آزمون</h3><div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2"><span>• {draft.settings.questionLayout === "single_page" ? "چیدمان: همهٔ سؤال‌ها در یک صفحه" : "چیدمان: صفحه‌به‌صفحه"}</span><span>• {(draft.settings.questionLayout === "single_page" ? "بازگشت به سؤال‌ها: بی‌اثر در چیدمان یک‌صفحه‌ای" : draft.settings.allowBackNavigation ? "بازگشت به سؤال‌ها مجاز است" : "بازگشت به سؤال‌ها مجاز نیست")}</span><span>• {draft.settings.randomizeQuestions ? "ترتیب سؤال‌ها تصادفی است" : "ترتیب سؤال‌ها ثابت است"}</span><span>• نتیجه: {resultLabel[draft.settings.resultVisibility]}</span><span>• {draft.settings.attemptLimit} تلاش مجاز</span></div></div></div>; }
+function ReviewPublish({ draft, totalMarks, validation }: { draft: ExamDraft; totalMarks: number; validation: ValidationIssue[] }) {
+  const complete = validation.length === 0;
+  const [previewIndex, setPreviewIndex] = useState(0);
+  const currentIndex = Math.min(previewIndex, Math.max(0, draft.questions.length - 1));
+  const previewQuestion = draft.questions[currentIndex];
+
+  return <div>
+    <div className={cn("flex items-start gap-3 rounded-2xl border p-4 text-sm leading-6", complete ? "border-success/20 bg-success/[.06] text-success" : "border-warning/25 bg-warning/[.08] text-warning")}>
+      <span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg", complete ? "bg-emerald-500/15 text-success" : "bg-amber-500/15 text-warning")}>{complete ? <Check className="h-4 w-4"/> : <AlertTriangle className="h-4 w-4"/>}</span>
+      <div>
+        <b>{complete ? "آزمون آمادهٔ انتشار است" : "چند مورد نیاز به تکمیل دارد"}</b>
+        <p className="mt-1 text-xs">{complete ? "تنظیمات، سؤال‌ها و زمان‌بندی با هم سازگار هستند." : validation.map((item) => item.message).join(" · ")}</p>
+      </div>
+    </div>
+
+    <div className="mt-5 grid gap-3 sm:grid-cols-2">
+      {[
+        { label: "عنوان", value: draft.title || "بدون عنوان" },
+        { label: "کلاس", value: `${draft.grade} · ${draft.className}` },
+        { label: "سؤال‌ها", value: `${toPersianNumber(draft.questions.length)} سؤال` },
+        { label: "نمره کل", value: `${toPersianNumber(totalMarks)} نمره` },
+        { label: "مدت", value: `${toPersianNumber(draft.settings.durationMinutes)} دقیقه` },
+        { label: "بازهٔ برگزاری", value: persianWindowLabel(draft.schedule.startAt, draft.schedule.endAt) },
+      ].map((item) => (
+        <div className="rounded-xl bg-muted/60 p-3" key={item.label}>
+          <p className="text-[11px] font-bold text-muted-foreground">{item.label}</p>
+          <p className="mt-1 text-sm font-extrabold">{item.value}</p>
+        </div>
+      ))}
+    </div>
+
+    <div className="mt-5 rounded-2xl border p-4">
+      <h3 className="text-sm font-black">قواعد آزمون</h3>
+      <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+        <span>• {draft.settings.questionLayout === "single_page" ? "چیدمان: همهٔ سؤال‌ها در یک صفحه" : "چیدمان: صفحه‌به‌صفحه"}</span>
+        <span>• {draft.settings.questionLayout === "single_page" ? "بازگشت به سؤال‌ها: بی‌اثر در چیدمان یک‌صفحه‌ای" : draft.settings.allowBackNavigation ? "بازگشت به سؤال‌ها مجاز است" : "بازگشت به سؤال‌ها مجاز نیست"}</span>
+        <span>• {draft.settings.randomizeQuestions ? "ترتیب سؤال‌ها تصادفی است" : "ترتیب سؤال‌ها ثابت است"}</span>
+        <span>• نتیجه: {resultLabel[draft.settings.resultVisibility]}</span>
+        <span>• {toPersianNumber(draft.settings.attemptLimit)} تلاش مجاز</span>
+      </div>
+    </div>
+
+    <section className="mt-5 overflow-hidden rounded-2xl border bg-surface" aria-label="پیش‌نمایش دانش‌آموز">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-card/75 p-4">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><Eye className="h-4 w-4"/></span>
+          <div className="min-w-0">
+            <h3 className="text-sm font-black">پیش‌نمایش دانش‌آموز</h3>
+            <p className="mt-1 text-[11px] leading-5 text-muted-foreground">نمای واقعی سؤال، بدون نمایش کلید پاسخ.</p>
+          </div>
+        </div>
+        {draft.questions.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            <span className="whitespace-nowrap text-[11px] font-bold text-muted-foreground">{toPersianNumber(currentIndex + 1)} از {toPersianNumber(draft.questions.length)}</span>
+            <Button type="button" variant="outline" size="icon-sm" onClick={() => setPreviewIndex((index) => Math.max(0, index - 1))} disabled={currentIndex === 0} aria-label="سؤال قبل در پیش‌نمایش"><ArrowRight className="h-4 w-4"/></Button>
+            <Button type="button" variant="outline" size="icon-sm" onClick={() => setPreviewIndex((index) => Math.min(draft.questions.length - 1, index + 1))} disabled={currentIndex >= draft.questions.length - 1} aria-label="سؤال بعد در پیش‌نمایش"><ArrowLeft className="h-4 w-4"/></Button>
+          </div>
+        )}
+      </div>
+      {previewQuestion ? (
+        <div className="p-3 sm:p-5" aria-live="polite">
+          <div className="rounded-2xl border bg-card p-4 sm:p-6">
+            <div className="flex items-center justify-between gap-3">
+              <span className="rounded-lg bg-primary/10 px-2.5 py-1 text-xs font-black text-primary">سؤال {toPersianNumber(currentIndex + 1)}</span>
+              <span className="text-xs font-bold text-muted-foreground">{toPersianNumber(previewQuestion.points)} نمره</span>
+            </div>
+            <h4 className="mt-4 text-sm font-black leading-7 sm:text-base">{previewQuestion.stem || "متن سؤال هنوز نوشته نشده است."}</h4>
+            {previewQuestion.helpText && <p className="mt-2 rounded-xl bg-muted/60 p-3 text-xs leading-6 text-muted-foreground">{previewQuestion.helpText}</p>}
+            <div className="mt-4"><QuestionRenderer question={previewQuestion} value={null} onChange={() => undefined} disabled/></div>
+          </div>
+        </div>
+      ) : (
+        <p className="p-6 text-center text-sm leading-6 text-muted-foreground">برای پیش‌نمایش، از گام «سؤال‌ها» دست‌کم یک سؤال اضافه کنید.</p>
+      )}
+    </section>
+  </div>;
+}
+
 /**
  * Anti-cheating, as a switch the teacher owns.
  *
@@ -306,9 +516,32 @@ import { RESULT_DETAIL_OPTIONS, resolveResultDetail } from "@/lib/exam/result-de
 
 const resultLabel: Record<ResultVisibility, string> = { immediate: "نمایش فوری", pending: "پس از بررسی", hidden: "انتشار دستی" };
 interface ValidationIssue { step: number; field: string; message: string; }
-function validateDraft(draft: ExamDraft): ValidationIssue[] { const issues: ValidationIssue[] = []; if (!draft.title.trim()) issues.push({ step: 0, field: "title", message: "عنوان آزمون را وارد کنید." }); if (!draft.description.trim()) issues.push({ step: 0, field: "description", message: "یک توضیح کوتاه برای آزمون وارد کنید." }); if (draft.settings.durationMinutes < 5) issues.push({ step: 1, field: "duration", message: "مدت آزمون باید حداقل ۵ دقیقه باشد." }); if (!draft.questions.length) issues.push({ step: 2, field: "questions", message: "حداقل یک سؤال به آزمون اضافه کنید." }); duplicateQuestionIndexes(draft.questions).forEach((original, index) => issues.push({ step: 2, field: `duplicate-${draft.questions[index].id}`, message: `سؤال ${toPersianNumber(index + 1)} با سؤال ${toPersianNumber(original + 1)} عیناً یکی است؛ یکی را حذف کنید تا نمرهٔ همین بخش دو بار شمرده نشود.` })); draft.questions.forEach((question, index) => { const [firstIssue] = questionIssues(question); if (firstIssue) issues.push({ step: 2, field: `question-${question.id}`, message: `سؤال ${toPersianNumber(index + 1)}: ${firstIssue}` }); }); const start = wallClockToIso(draft.schedule.startAt, draft.schedule.timezone);
+
+function validateDraft(draft: ExamDraft): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!draft.title.trim()) issues.push({ step: 0, field: "title", message: "عنوان آزمون را وارد کنید." });
+  if (!draft.subject.trim()) issues.push({ step: 0, field: "subject", message: "نام درس را وارد کنید." });
+  if (!draft.grade.trim()) issues.push({ step: 0, field: "grade", message: "پایهٔ تحصیلی را وارد کنید." });
+  if (!draft.className.trim()) issues.push({ step: 0, field: "className", message: "نام کلاس را وارد کنید." });
+  if (!draft.description.trim()) issues.push({ step: 0, field: "description", message: "یک توضیح کوتاه برای آزمون وارد کنید." });
+  if (draft.settings.durationMinutes < 5 || draft.settings.durationMinutes > 300) issues.push({ step: 1, field: "duration", message: "مدت آزمون باید بین ۵ تا ۳۰۰ دقیقه باشد." });
+  if (!draft.questions.length) issues.push({ step: 2, field: "questions", message: "حداقل یک سؤال به آزمون اضافه کنید." });
+
+  duplicateQuestionIndexes(draft.questions).forEach((original, index) => issues.push({
+    step: 2,
+    field: `duplicate-${draft.questions[index].id}`,
+    message: `سؤال ${toPersianNumber(index + 1)} با سؤال ${toPersianNumber(original + 1)} عیناً یکی است؛ یکی را حذف کنید تا نمرهٔ همین بخش دو بار شمرده نشود.`,
+  }));
+  draft.questions.forEach((question, index) => {
+    const [firstIssue] = questionIssues(question);
+    if (firstIssue) issues.push({ step: 2, field: `question-${question.id}`, message: `سؤال ${toPersianNumber(index + 1)}: ${firstIssue}` });
+  });
+
+  const start = wallClockToIso(draft.schedule.startAt, draft.schedule.timezone);
   const end = wallClockToIso(draft.schedule.endAt, draft.schedule.timezone);
-  if (!start || !end || new Date(end) <= new Date(start)) issues.push({ step: 3, field: "schedule", message: "زمان پایان باید بعد از زمان شروع باشد." });
+  if (!start || !end || new Date(end) <= new Date(start)) {
+    issues.push({ step: 3, field: "schedule", message: "زمان پایان باید بعد از زمان شروع باشد." });
+  }
   return issues;
 }
 
@@ -321,7 +554,8 @@ function windowSummary(startAt: string, endAt: string, timeZone: string) {
   if (!Number.isFinite(minutes) || minutes <= 0) return "زمان پایان باید بعد از زمان شروع باشد.";
   const days = Math.floor(minutes / 1440);
   const hours = Math.floor((minutes % 1440) / 60);
-  const parts = [days ? `${toPersianNumber(days)} روز` : "", hours ? `${toPersianNumber(hours)} ساعت` : ""].filter(Boolean);
+  const remainingMinutes = minutes % 60;
+  const parts = [days ? `${toPersianNumber(days)} روز` : "", hours ? `${toPersianNumber(hours)} ساعت` : "", remainingMinutes ? `${toPersianNumber(remainingMinutes)} دقیقه` : ""].filter(Boolean);
   return `بازهٔ برگزاری ${parts.join(" و ") || `${toPersianNumber(minutes)} دقیقه`} است.`;
 }
 
@@ -329,9 +563,10 @@ const TIMEZONE_NAMES: Record<string, string> = { "Asia/Tehran": "تهران", "A
 function timezoneName(timeZone: string) { return TIMEZONE_NAMES[timeZone] ?? timeZone; }
 function persianWindowLabel(startAt: string, endAt: string) {
   if (!startAt || !endAt) return "تعیین‌نشده";
-  const end = formatPersianWallClock(endAt);
-  // The end of a window is only written as a clock time; the day is already given by the start.
-  return `${formatPersianWallClock(startAt)} تا ${end.includes(" · ") ? end.split(" · ")[1] : end}`;
+  const [startDate, startTime] = formatPersianWallClock(startAt).split(" · ");
+  const [endDate, endTime] = formatPersianWallClock(endAt).split(" · ");
+  const end = startDate === endDate ? endTime : `${endDate}، ${endTime}`;
+  return `${startDate}، ${startTime} تا ${end}`;
 }
 function Field({ label, required, error, children }: { label: string; required?: boolean; error?: string; children: React.ReactNode }) { return <label className="block text-sm font-bold"><span>{label}{required && <span className="mr-1 text-destructive">*</span>}</span><div className="mt-2">{children}</div>{error && <span className="mt-1.5 block text-xs font-bold text-destructive">{error}</span>}</label>; }
 function Counter({ value, max }: { value: number; max: number }) { return <span className="mt-1 block text-left text-[10px] font-bold text-muted-foreground">{toPersianNumber(value)} / {toPersianNumber(max)}</span>; }
