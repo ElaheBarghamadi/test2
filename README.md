@@ -403,6 +403,71 @@ There is deliberately **no** student overview endpoint. Everything above is comp
 the student is already allowed to see, which means the panel cannot leak a figure the teacher has not
 published.
 
+## Administration (`/admin/*`)
+
+One console, two roles. A platform administrator (`admin`) sees the network; a school administrator
+(`school_admin`) sees the single school their `SchoolMembership` points at. The narrowing happens on the
+server — `apps/organizations/scope.py` — so the frontend needs no branch to stay honest, and a principal
+asking for `/admin/users/` receives their own school's roster whatever the query string says.
+
+**Scope is not authority.** This was a live privilege escalation, found by seeding the principal account
+and then trying things against the running API:
+
+```
+PATCH /admin/users/<the platform admin>/ {"password": "…"}   -> 200
+PATCH /admin/users/<the platform admin>/ {"role":"student"}  -> 200
+PATCH /admin/users/<the platform admin>/ {"is_active":false} -> 200
+POST  /admin/users/<the platform admin>/revoke-sessions/     -> 200
+```
+
+`scope_users` reaches everyone whose membership points at the caller's school, and a platform administrator
+who holds one is in that set like anybody else — which is exactly what the demo data does. The queryset said
+"reachable" and `AdminUserDetailView` read it as "governable". The first of those is a straight account
+takeover. The guard that existed only refused *granting* an administrative role, so *removing* one sailed
+through, and the self-guard covered only the caller's own row. `AdminUserSessionsView` had the same shape,
+and its test passed for the wrong reason: the fixture's platform admin had no membership, so
+`get_object_or_404` returned 404 before any authority was considered.
+
+Authority over an administrative account now comes from the platform and never from a membership row —
+`scope.may_administer_account()`, used by both endpoints. Self-service stays allowed, because changing your
+own name or password is not an escalation and the role, school and deactivation rules around it are enforced
+separately. The tests assert the stored row and the password itself, not just the status code.
+
+`AdminLiveAttemptsApiTests` subclasses `AdminConsoleApiTests` to reuse its fixtures, so every test added to
+the base class runs twice. That is why the suite grew by six when three tests were written.
+
+### Charts without a chart library
+
+`components/admin/stats-charts.tsx` draws the console's pictures as SVG paths and divs. The site runs with no
+internet access and every dependency is vendored, so "add a chart library" means adding one to the offline
+bundle for four pictures — and hand-drawn charts inherit the theme's own HSL tokens instead of shipping a
+second palette that has to be told about dark mode.
+
+Three details are worth keeping if you touch them:
+
+- **Right to left.** Oldest day at the start edge, newest at the end. The page is RTL and the bar charts
+  beside the trend already lay their days out that way; a trend running against every other timeline on the
+  screen reads as going backwards.
+- **`vectorEffect="non-scaling-stroke"`.** The SVG is stretched to its container with
+  `preserveAspectRatio="none"`, which would otherwise stretch the 2px stroke into an ellipse. For the same
+  reason the hover columns are HTML laid over the drawing rather than pointer targets computed inside it.
+- **Dates are parsed as UTC noon.** The server buckets by `TruncDate` in the site's own timezone and sends a
+  bare `YYYY-MM-DD`; letting the browser read that as local midnight shifts every label back a day for anyone
+  east of Greenwich.
+
+`TrendChart` overlays all five activity series on one axis and lets each be switched off — «رویدادهای نشست»
+runs an order of magnitude above «آزمون‌های ساخته‌شده» and would otherwise flatten the rest into the axis.
+`ShareBars` renders the server's own enum values and shows an unrecognised key under its raw name rather than
+dropping it: a new status appearing as gibberish is a prompt to name it, while a silently missing bar reads
+as a zero.
+
+### The modules panel
+
+`components/admin/site-modules.tsx` puts every section of the site on the dashboard with its live count, its
+destination, and — for a school administrator — what that role may not do there. It reads the same
+`/admin/stats/` call the statistics page makes, so a figure on the dashboard cannot disagree with the figure
+behind it. A refused read renders one sentence, not nine zeros.
+
 ## Pre-login surfaces (landing, sign-in, sign-up, recovery)
 
 Everything a visitor sees before they have an account: `/`, `/login`, `/register`, `/forgot-password`,

@@ -11,6 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToastStore } from "@/lib/state/toast-store";
+import { ShareBars, TrendChart, dayLabel } from "@/components/admin/stats-charts";
 import { cn, formatDateTime, toPersianNumber } from "@/lib/utils";
 
 /**
@@ -52,10 +53,7 @@ function formatBytes(value: number | null) {
   return `${toPersianNumber(size.toFixed(index ? 1 : 0))} ${units[index]}`;
 }
 
-function dayLabel(iso: string) {
-  const date = new Date(`${iso}T12:00:00Z`);
-  return new Intl.DateTimeFormat("fa-IR", { day: "numeric", month: "numeric", timeZone: "UTC" }).format(date);
-}
+
 
 function Tile({ label, value, detail, tone = "muted" }: { label: string; value: string; detail?: string; tone?: "muted" | "warning" | "success" | "danger" }) {
   return (
@@ -198,6 +196,24 @@ export function AdminStatsConsole({ canControl }: { canControl: boolean }) {
             <Tile label="نتیجه‌های منتشرشده" value={toPersianNumber(stats.totals.results_published)} tone="success" detail={`${toPersianNumber(stats.totals.unread_notifications)} اخوانده‌نشده`}/>
             <Tile label="در انتظار تصحیح" value={toPersianNumber(stats.grading.exams_awaiting)} tone={stats.grading.exams_awaiting ? "warning" : "muted"} detail={`${toPersianNumber(stats.grading.written_ungraded)} پاسخ تشریحی بدون نمره · ${toPersianNumber(stats.grading.share_of_results)}٪ نتیجه‌ها`}/>
             <Tile label="میانگین و قبولی" value={`${toPersianNumber(stats.scores.average_percentage)}٪`} detail={`${toPersianNumber(stats.scores.pass_rate)}٪ قبولی از ${toPersianNumber(stats.scores.results_scored)} نتیجه نمره‌دار`}/>
+          </div>
+
+          {/* One set of axes for all five series: five separate bar charts each answer "what did this do",
+              and only an overlay answers "did submissions follow starts, and did either follow the papers
+              being written". */}
+          <div className="rounded-2xl border p-3.5">
+            <p className="text-[11px] font-black">روند چهارده روز اخیر</p>
+            <p className="mt-0.5 text-[10px] leading-5 text-muted-foreground">
+              هر رشته را می‌توانید خاموش کنید؛ «رویدادهای نشست» یک مرتبه بزرگ‌تر از بقیه است و بدون خاموش‌کردن،
+              بقیهٔ خط‌ها روی محور می‌خوابند.
+            </p>
+            <TrendChart className="mt-3" series={series.map(([key, points]) => ({ key, label: SERIES_LABELS[key] ?? key, points }))}/>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <ShareBars title="ترکیب کاربران" counts={stats.totals.users_by_role} emptyHint="هنوز حسابی ساخته نشده است."/>
+            <ShareBars title="وضعیت آزمون‌ها" counts={stats.totals.exams_by_status} emptyHint="هنوز آزمونی ثبت نشده است."/>
+            <ShareBars title="وضعیت پاسخ‌برگ‌ها" counts={stats.totals.attempts_by_status} emptyHint="هنوز کسی آزمون نداده است."/>
           </div>
 
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">

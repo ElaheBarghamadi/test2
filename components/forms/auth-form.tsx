@@ -36,9 +36,15 @@ const offlineCopy = "اتصال اینترنت برقرار نیست؛ پس از
 const addressInput = { type: "email" as const, dir: "ltr" as const, autoCapitalize: "none" as const, autoCorrect: "off" as const, spellCheck: false, inputMode: "email" as const };
 
 /** Filled by the «حساب نمونه» shortcut. Kept next to `seed_demo`'s own output, which is the source. */
+/**
+ * The accounts `manage.py seed_demo` produces. Keep the two lists in step: a chip that fills an address
+ * nobody seeded is a chip that fails with a server error and no explanation.
+ */
 const DEMO_ACCOUNTS = [
   { role: "دانش‌آموز", email: "student1@examora.test", password: "Examora1234!" },
   { role: "آموزگار", email: "teacher@examora.test", password: "Examora1234!" },
+  { role: "مدیر مدرسه", email: "principal@examora.test", password: "Examora1234!" },
+  { role: "مدیر سامانه", email: "admin@examora.test", password: "Examora1234!" },
 ] as const;
 
 const ROLES = [
