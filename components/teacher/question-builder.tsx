@@ -1,9 +1,11 @@
 "use client";
 
-import { Check, ChevronDown, ChevronUp, CircleCheck, Copy, Eye, GripVertical, ListPlus, Plus, Save, Trash2, TriangleAlert, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, CircleCheck, Copy, Eye, FileText, GripVertical, Headphones, ImagePlus, ListPlus, Plus, Trash2, TriangleAlert, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { Question, QuestionOption, QuestionType } from "@/lib/types/domain";
+import type { MatchingQuestion, Question, QuestionOption, QuestionType } from "@/lib/types/domain";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
+import { PrivateMedia } from "@/components/shared/private-media";
+import type { QuestionMediaAsset } from "@/lib/types/domain";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
@@ -11,11 +13,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { cn, toPersianNumber } from "@/lib/utils";
+import { parseQuestionText } from "@/lib/exam/question-text-import";
 
 const questionTypes: Array<{ type: QuestionType; label: string; description: string }> = [
   { type: "single_choice", label: "چندگزینه‌ای", description: "یک پاسخ درست" },
   { type: "multiple_choice", label: "چندپاسخی", description: "چند پاسخ درست" },
   { type: "true_false", label: "درست / نادرست", description: "یک انتخاب دوگانه" },
+  { type: "matching", label: "وصل‌کردنی", description: "هر پرسش را به پاسخ درست وصل کنید" },
   { type: "short_answer", label: "پاسخ کوتاه", description: "پاسخ متنی کوتاه" },
   { type: "essay", label: "تشریحی", description: "پاسخ نوشتاری" },
 ];
@@ -31,7 +35,13 @@ const optionIds = (options: QuestionOption[], correctIds: string[]) => options.m
 function cloneQuestion(question: Question, id = question.id): Question {
   if (question.type === "single_choice") return { ...question, id, options: question.options.map((option, index) => ({ ...option, id: `${id}-option-${index}`, value: `${id}-option-${index}` })), correctOptionId: question.options[0] ? `${id}-option-0` : undefined };
   if (question.type === "multiple_choice") return { ...question, id, options: question.options.map((option, index) => ({ ...option, id: `${id}-option-${index}`, value: `${id}-option-${index}` })), correctOptionIds: question.options.map((_, index) => `${id}-option-${index}`).slice(0, 1) };
-  return { ...question, id };
+  if (question.type === "matching") return {
+    ...question,
+    id,
+    pairs: question.pairs.map((pair, index) => ({ ...pair, id: `${id}-pair-${index}`, optionId: `${id}-option-${index}` })),
+    options: [],
+  };
+  return { ...question, id, media: question.media?.map((media) => ({ ...media })) };
 }
 
 export function blankQuestion(type: QuestionType, order: number): Question {
@@ -39,6 +49,15 @@ export function blankQuestion(type: QuestionType, order: number): Question {
   if (type === "single_choice") return { ...base, type, options: createOptions(), correctOptionId: "" };
   if (type === "multiple_choice") return { ...base, type, options: createOptions(), correctOptionIds: [] };
   if (type === "true_false") return { ...base, type, correctAnswer: true };
+  if (type === "matching") return {
+    ...base,
+    type,
+    options: [],
+    pairs: [
+      { id: newOptionId(), prompt: "", answer: "", optionId: newOptionId() },
+      { id: newOptionId(), prompt: "", answer: "", optionId: newOptionId() },
+    ],
+  };
   if (type === "short_answer") return { ...base, type, expectedAnswers: [], caseSensitive: false, placeholder: "پاسخ کوتاه خود را بنویسید...", maxLength: 150 };
   return { ...base, type, placeholder: "پاسخ تشریحی خود را بنویسید...", maxLength: 1200, gradingNote: "" };
 }
@@ -82,18 +101,29 @@ function BankFields({ question, onChange }: { question: Question; onChange: (que
 /** Everything Django's publish gate refuses, phrased for the teacher. One source for list + editor. */
 export function questionIssues(question: Question): string[] {
   const issues: string[] = [];
-  if (!question.stem.trim()) issues.push("متن سؤال را وارد کنید.");
+  const hasPromptImage = (question.media ?? []).some((media) => media.kind === "image");
+  if (!question.stem.trim() && !(question.imageOnly && hasPromptImage)) issues.push("متن سؤال را وارد کنید یا یک تصویر به‌عنوان صورت کامل سؤال ثبت کنید.");
+  if (question.imageOnly && !hasPromptImage) issues.push("برای صورت سؤال تصویری، دست‌کم یک تصویر اضافه کنید.");
   if (question.points <= 0) issues.push("نمرهٔ سؤال باید بزرگ‌تر از صفر باشد.");
   const labelled = (options: QuestionOption[]) => options.filter((option) => option.label.trim()).length;
   if (question.type === "single_choice") {
     if (question.options.length < MIN_OPTIONS) issues.push(`حداقل ${toPersianNumber(MIN_OPTIONS)} گزینه لازم است.`);
+    if (question.options.length > MAX_OPTIONS) issues.push(`حداکثر ${toPersianNumber(MAX_OPTIONS)} گزینه مجاز است.`);
     if (labelled(question.options) !== question.options.length) issues.push("متن همهٔ گزینه‌ها را کامل کنید.");
     if (question.options.length >= MIN_OPTIONS && labelled(question.options) === question.options.length && !question.correctOptionId) issues.push("پاسخ درست را علامت بزنید.");
   }
   if (question.type === "multiple_choice") {
     if (question.options.length < MIN_OPTIONS) issues.push(`حداقل ${toPersianNumber(MIN_OPTIONS)} گزینه لازم است.`);
+    if (question.options.length > MAX_OPTIONS) issues.push(`حداکثر ${toPersianNumber(MAX_OPTIONS)} گزینه مجاز است.`);
     if (labelled(question.options) !== question.options.length) issues.push("متن همهٔ گزینه‌ها را کامل کنید.");
     if (question.options.length >= MIN_OPTIONS && labelled(question.options) === question.options.length && !question.correctOptionIds?.length) issues.push("حداقل یک پاسخ درست را علامت بزنید.");
+  }
+  if (question.type === "matching") {
+    if (question.pairs.length < 2) issues.push("برای وصل‌کردنی دست‌کم دو جفت بسازید.");
+    if (question.pairs.some((pair) => !pair.prompt.trim())) issues.push("متن همهٔ پرسش‌های سمت راست را کامل کنید.");
+    if (question.pairs.some((pair) => !pair.answer?.trim())) issues.push("متن همهٔ پاسخ‌های سمت چپ را کامل کنید.");
+    const answers = question.pairs.map((pair) => pair.answer?.trim().toLocaleLowerCase("fa") ?? "").filter(Boolean);
+    if (new Set(answers).size !== answers.length) issues.push("پاسخ‌های سمت چپ باید یکتا باشند.");
   }
   if (question.type === "short_answer" && (question.expectedAnswers?.length ?? 0) > 0) {
     if (question.expectedAnswers?.some((answer) => !answer.trim())) issues.push("پاسخ‌های قابل‌قبول را خالی نگذارید.");
@@ -102,12 +132,20 @@ export function questionIssues(question: Question): string[] {
   return issues;
 }
 export function questionIsComplete(question: Question) { return questionIssues(question).length === 0; }
+function questionCountText(questions: Question[]) {
+  const incompleteCount = questions.filter((question) => !questionIsComplete(question)).length;
+  return incompleteCount ? ` · ${toPersianNumber(incompleteCount)} سؤال نیازمند تکمیل` : " · همهٔ سؤال‌ها آماده‌اند";
+}
 
 export function TeacherQuestionBuilder({ questions, onChange, className }: { questions: Question[]; onChange: (questions: Question[]) => void; className?: string }) {
   const [selectedId, setSelectedId] = useState(questions[0]?.id ?? "");
   const [adding, setAdding] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importedQuestions, setImportedQuestions] = useState<Question[] | null>(null);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const selected = useMemo(() => questions.find((question) => question.id === selectedId) ?? questions[0], [questions, selectedId]);
   const ordered = questions.map((question, index) => ({ ...question, order: index + 1 }));
   const incomplete = useMemo(() => questions.filter((question) => !questionIsComplete(question)).length, [questions]);
@@ -117,13 +155,48 @@ export function TeacherQuestionBuilder({ questions, onChange, className }: { que
   function duplicateSelected() { if (!selected) return; const copy = cloneQuestion(selected, `question-${Date.now().toString(36)}`); const titledCopy = { ...copy, stem: selected.stem ? `${selected.stem} (کپی)` : "" } as Question; replace([...questions, titledCopy]); setSelectedId(titledCopy.id); }
   function deleteSelected() { if (!selected) return; const remaining = questions.filter((question) => question.id !== selected.id); replace(remaining); setSelectedId(remaining[0]?.id ?? ""); setDeleteOpen(false); }
   function moveSelected(delta: -1 | 1) { if (!selected) return; const index = questions.findIndex((question) => question.id === selected.id); const target = index + delta; if (target < 0 || target >= questions.length) return; const next = [...questions]; [next[index], next[target]] = [next[target], next[index]]; replace(next); }
+  function previewImport() {
+    const result = parseQuestionText(importText, questions.length + 1);
+    setImportedQuestions(result.questions);
+    setImportWarnings(result.warnings);
+  }
+  function addImportedQuestions() {
+    if (!importedQuestions?.length) return;
+    replace([...questions, ...importedQuestions]);
+    setSelectedId(importedQuestions[0].id);
+    setImportOpen(false);
+    setImportText("");
+    setImportedQuestions(null);
+    setImportWarnings([]);
+  }
+  function closeImport() {
+    setImportOpen(false);
+    setImportedQuestions(null);
+    setImportWarnings([]);
+  }
 
   return <div className={cn("grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]", className)}>
     <Card className="overflow-hidden xl:max-h-[720px]">
-      <CardHeader className="flex-row items-center justify-between gap-3"><div><CardTitle>سؤال‌های آزمون</CardTitle><CardDescription>{toPersianNumber(questions.length)} سؤال · {toPersianNumber(questions.reduce((sum, question) => sum + question.points, 0))} نمره{incomplete ? ` · ${toPersianNumber(incomplete)} سؤال نیازمند تکمیل` : ""}</CardDescription></div><Button type="button" size="icon-sm" onClick={() => setAdding(!adding)} aria-label="افزودن سؤال"><Plus className="h-4 w-4"/></Button></CardHeader>
+      <CardHeader className="flex-row items-center justify-between gap-3"><div><CardTitle>سؤال‌های آزمون</CardTitle><CardDescription>{toPersianNumber(questions.length)} سؤال · {toPersianNumber(questions.reduce((sum, question) => sum + question.points, 0))} نمره{incomplete ? ` · ${toPersianNumber(incomplete)} سؤال نیازمند تکمیل` : ""}</CardDescription></div><div className="flex shrink-0 items-center gap-2"><Button type="button" variant="outline" size="sm" onClick={() => { setImportText(""); setImportedQuestions(null); setImportWarnings([]); setImportOpen(true); }}><FileText className="h-4 w-4"/>ورود از متن</Button><Button type="button" size="icon-sm" onClick={() => setAdding(!adding)} aria-label="افزودن سؤال"><Plus className="h-4 w-4"/></Button></div></CardHeader>
       <CardContent className="relative"><div className="space-y-2 overflow-y-auto xl:max-h-[560px]">{adding && <QuestionTypePicker onPick={addQuestion}/>} {questions.length === 0 ? <div className="rounded-2xl border border-dashed bg-muted/30 p-6 text-center"><ListPlus className="mx-auto h-6 w-6 text-primary"/><p className="mt-3 text-sm font-black">اولین سؤال را اضافه کنید</p><p className="mt-1 text-xs leading-5 text-muted-foreground">از دکمهٔ بالا نوع سؤال را انتخاب کنید.</p></div> : ordered.map((question) => <button type="button" onClick={() => setSelectedId(question.id)} key={question.id} className={cn("flex w-full items-center gap-2.5 rounded-xl border p-3 text-right transition-all", selected?.id === question.id ? "border-primary bg-primary/[.06] shadow-sm" : "border-transparent bg-muted/55 hover:border-border hover:bg-card")}><GripVertical className="h-4 w-4 shrink-0 text-muted-foreground"/><span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg text-xs font-black", selected?.id === question.id ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground")}>{toPersianNumber(question.order)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-extrabold">{question.stem || "بدون متن سؤال"}</span><span className="mt-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">{questionTypeLabel[question.type]} · {toPersianNumber(question.points)} نمره</span></span>{questionIsComplete(question) ? <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" title="آماده"/> : <span className="flex shrink-0 items-center gap-1 rounded-lg bg-amber-500/10 px-1.5 py-1 text-[9px] font-black text-amber-700 dark:text-amber-400">{toPersianNumber(questionIssues(question).length)} مورد</span>}</button>)}</div></CardContent>
     </Card>
     {selected ? <QuestionEditor question={selected} onChange={updateSelected} onPreview={() => setPreviewOpen(true)} onDuplicate={duplicateSelected} onDelete={() => setDeleteOpen(true)} onMove={moveSelected} first={questions[0]?.id === selected.id} last={questions[questions.length - 1]?.id === selected.id}/> : <QuestionEmpty onAdd={() => setAdding(true)}/>}
+    <Dialog open={importOpen} onClose={closeImport} title="ورود چند سؤال از متن" description="قالب سؤال‌ها را بچسبانید، پیش‌نمایش را بررسی کنید و سپس به ویرایشگر اضافه کنید." size="lg">
+      <div className="space-y-4">
+        <div className="rounded-2xl bg-muted/55 p-3 text-xs leading-6 text-muted-foreground">
+          سؤال‌های گزینه‌ای، پاسخ کوتاه و تشریحی پذیرفته می‌شوند. سؤال‌ها را با خط جداکنندهٔ <code dir="ltr" className="rounded bg-card px-1.5 py-0.5 font-mono">---</code> از هم جدا کنید. برای کلید گزینه‌ای، برچسب گزینه را بنویسید؛ با چند برچسب سؤال چندپاسخی ساخته می‌شود.
+          <pre dir="rtl" className="mt-2 whitespace-pre-wrap rounded-xl border bg-card p-3 font-mono text-[11px] leading-6 text-foreground">{"سؤال: پایتخت آذربایجان کدام است؟\nالف) باکو\nب) گنجه\nپاسخ: الف\nنمره: ۲\n---\nسؤال: پایتخت ایران چیست؟\nپاسخ: تهران"}</pre>
+          <p className="mt-2">بدون گزینه و با «پاسخ:» سؤال پاسخ‌کوتاه ساخته می‌شود؛ بدون کلید، سؤال تشریحی می‌شود. درست‌ونادرست را از سازندهٔ معمولی بسازید.</p>
+        </div>
+        <label className="block text-sm font-bold">متن سؤال‌ها<Textarea className="mt-2 min-h-48 font-mono text-xs leading-6" value={importText} onChange={(event) => { setImportText(event.target.value); setImportedQuestions(null); setImportWarnings([]); }} placeholder="متن سؤال‌ها را اینجا بچسبانید…" dir="auto"/></label>
+        {importedQuestions === null ? <div className="flex justify-end"><Button onClick={previewImport} disabled={!importText.trim()}><Eye className="h-4 w-4"/>بررسی و پیش‌نمایش</Button></div> : <div className="space-y-3">
+          <div role="status" className="rounded-xl border bg-muted/35 p-3 text-sm font-bold">{toPersianNumber(importedQuestions.length)} سؤال شناسایی شد{importedQuestions.length ? ` · ${toPersianNumber(importedQuestions.reduce((sum, question) => sum + question.points, 0))} نمره` : ""}{importedQuestions.length > 0 && questionCountText(importedQuestions)}</div>
+          {importWarnings.length > 0 && <div className="rounded-xl border border-amber-500/30 bg-amber-500/[.06] p-3 text-xs leading-5"><p className="font-bold text-amber-800 dark:text-amber-300">نیاز به بازبینی</p><ul className="mt-1 list-inside list-disc text-muted-foreground">{importWarnings.slice(0, 4).map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul>{importWarnings.length > 4 && <p className="mt-1 text-muted-foreground">و {toPersianNumber(importWarnings.length - 4)} پیام دیگر.</p>}</div>}
+          {importedQuestions.length > 0 && <div className="max-h-48 space-y-2 overflow-y-auto rounded-xl border p-3">{importedQuestions.slice(0, 8).map((question, index) => <div key={question.id} className="flex items-start gap-2 border-b pb-2 last:border-0 last:pb-0"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-muted text-xs font-black">{toPersianNumber(index + 1)}</span><div className="min-w-0 flex-1"><p className="text-xs font-bold">{question.stem || "بدون متن سؤال"}</p><p className="mt-1 text-[10px] text-muted-foreground">{questionTypeLabel[question.type]} · {toPersianNumber(question.points)} نمره{!questionIsComplete(question) ? " · نیازمند تکمیل" : ""}</p></div></div>)}{importedQuestions.length > 8 && <p className="text-center text-xs text-muted-foreground">و {toPersianNumber(importedQuestions.length - 8)} سؤال دیگر</p>}</div>}
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" variant="outline" onClick={() => { setImportedQuestions(null); setImportWarnings([]); }}>ویرایش متن</Button><Button type="button" onClick={addImportedQuestions} disabled={!importedQuestions.length}>افزودن {toPersianNumber(importedQuestions.length)} سؤال به آزمون</Button></div>
+        </div>}
+      </div>
+    </Dialog>
     <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} title="پیش‌نمایش دانش‌آموز" description="این بخش نحوهٔ نمایش سؤال در آزمون را نشان می‌دهد." size="md"><div className="rounded-2xl border bg-surface p-4"><QuestionRenderer question={selected ?? blankQuestion("single_choice", 1)} value={null} onChange={() => undefined} disabled/></div><div className="mt-5 flex justify-end"><Button onClick={() => setPreviewOpen(false)}>بستن پیش‌نمایش</Button></div></Dialog>
     <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)} title="حذف سؤال؟" description={selected ? `«${selected.stem || "بدون عنوان"}» از این آزمون حذف می‌شود.` : undefined} size="sm"><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={() => setDeleteOpen(false)}>انصراف</Button><Button variant="destructive" data-autofocus onClick={deleteSelected}><Trash2 className="h-4 w-4"/>حذف سؤال</Button></div></Dialog>
   </div>;
@@ -148,21 +221,138 @@ function QuestionEditor({ question, onChange, onPreview, onDuplicate, onDelete, 
  */
 export function QuestionFields({ question, onChange, autosaved = false }: { question: Question; onChange: (question: Question) => void; autosaved?: boolean }) {
   const issues = questionIssues(question);
-  function changeType(type: QuestionType) { if (type === question.type) return; const fresh = blankQuestion(type, question.order); onChange({ ...fresh, id: question.id, stem: question.stem, points: question.points, helpText: question.helpText, explanation: question.explanation }); }
+  function changeType(type: QuestionType) {
+    if (type === question.type) return;
+    const fresh = blankQuestion(type, question.order);
+    onChange({
+      ...fresh,
+      id: question.id,
+      stem: question.stem,
+      points: question.points,
+      helpText: question.helpText,
+      explanation: question.explanation,
+      difficulty: question.difficulty,
+      tags: question.tags,
+      media: question.media?.map((media) => ({ ...media })),
+      imageOnly: question.imageOnly,
+      allowImageAnswer: question.allowImageAnswer,
+      allowAudioAnswer: question.allowAudioAnswer,
+    });
+  }
   return <>
       <div className="grid gap-4 sm:grid-cols-[1fr_130px]"><label className="block text-sm font-bold">نوع سؤال<select value={question.type} onChange={(event) => changeType(event.target.value as QuestionType)} className="mt-2 h-11 w-full rounded-xl border bg-background px-3 text-sm">{questionTypes.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}</select></label><label className="block text-sm font-bold">نمره<Input className="mt-2" type="number" min="0" max="100" step="0.25" value={question.points} onChange={(event) => onChange({ ...question, points: Math.max(0, Number(event.target.value)) })}/></label></div>
-      <label className="mt-5 block text-sm font-bold">متن سؤال<Textarea className="mt-2 min-h-28" value={question.stem} onChange={(event) => onChange({ ...question, stem: event.target.value })} placeholder="متن روشن و کامل سؤال را وارد کنید..." maxLength={1000}/><span className="mt-1 block text-left text-[10px] font-bold text-muted-foreground">{toPersianNumber(question.stem.length)} / ۱۰۰۰</span></label>
+      <div className="mt-5 rounded-2xl border bg-muted/25 p-4">
+        <label className="flex cursor-pointer items-start gap-3 text-sm font-bold">
+          <input type="checkbox" checked={question.imageOnly === true} onChange={(event) => onChange({ ...question, imageOnly: event.target.checked, ...(event.target.checked ? { stem: "" } : {}) })} className="mt-1 h-4 w-4 accent-[hsl(var(--primary))]"/>
+          <span><span className="block">صورت سؤال کاملاً تصویری است</span><span className="mt-1 block text-[11px] leading-5 font-normal text-muted-foreground">اگر فعال باشد، متن تایپی حذف می‌شود و باید تصویر سؤال را اضافه کنید.</span></span>
+        </label>
+        {!question.imageOnly && <label className="mt-4 block text-sm font-bold">متن سؤال<Textarea className="mt-2 min-h-28" value={question.stem} onChange={(event) => onChange({ ...question, stem: event.target.value })} placeholder="متن روشن و کامل سؤال را وارد کنید..." maxLength={1000}/><span className="mt-1 block text-left text-[10px] font-bold text-muted-foreground">{toPersianNumber(question.stem.length)} / ۱۰۰۰</span></label>}
+        <PromptMediaEditor question={question} onChange={onChange}/>
+      </div>
       <label className="mt-4 block text-sm font-bold">راهنمای همین سؤال (اختیاری)<Input className="mt-2" value={question.helpText ?? ""} onChange={(event) => onChange({ ...question, helpText: event.target.value })} placeholder="مثلاً از واحد میلی‌متر استفاده کنید."/></label>
       {question.type === "single_choice" && <SingleChoiceEditor question={question} onChange={onChange}/>}
       {question.type === "multiple_choice" && <MultipleAnswerEditor question={question} onChange={onChange}/>}
       {question.type === "true_false" && <TrueFalseEditor question={question} onChange={onChange}/>}
+      {question.type === "matching" && <MatchingEditor question={question} onChange={onChange}/>}
       {question.type === "short_answer" && <ShortAnswerEditor question={question} onChange={onChange}/>}
       {question.type === "essay" && <WrittenEditor question={question} onChange={onChange}/>}
+      <AnswerMediaOptions question={question} onChange={onChange}/>
       <BankFields question={question} onChange={onChange}/>
       <label className="mt-5 block text-sm font-bold">توضیح یا بازخورد (اختیاری)<Textarea className="mt-2 min-h-20" value={question.explanation ?? ""} onChange={(event) => onChange({ ...question, explanation: event.target.value })} placeholder="توضیحی که بعداً می‌تواند به دانش‌آموز نمایش داده شود..."/></label>
       <div className="mt-5 flex items-center justify-between border-t pt-5"><span className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground">{issues.length === 0 ? <><CircleCheck className="h-4 w-4 text-success"/>آماده برای انتشار</> : <><TriangleAlert className="h-4 w-4 text-warning"/>نیازمند تکمیل</>}</span>{autosaved ? <Badge variant="neutral">به‌صورت خودکار ذخیره می‌شود</Badge> : <Badge variant="neutral">با ذخیره به بانک افزوده می‌شود</Badge>}</div>
       {issues.length > 0 && <ul className="mt-3 space-y-1 rounded-2xl border border-amber-500/25 bg-amber-500/[.07] p-3 text-xs leading-6 text-amber-900 dark:text-amber-300">{issues.map((issue) => <li key={issue} className="flex gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"/>{issue}</li>)}</ul>}
   </>;
+}
+
+function PromptMediaEditor({ question, onChange }: { question: Question; onChange: (question: Question) => void }) {
+  const media = question.media ?? [];
+  const [uploadIssue, setUploadIssue] = useState<string | null>(null);
+
+  function addFiles(files: FileList | null, kind: "image" | "audio") {
+    if (!files?.length) return;
+    setUploadIssue(null);
+    const available = Math.max(0, 8 - media.length);
+    if (!available) { setUploadIssue("برای هر سؤال حداکثر ۸ رسانه مجاز است."); return; }
+    const accepted: QuestionMediaAsset[] = [];
+    for (const file of Array.from(files).slice(0, available)) {
+      const limit = kind === "image" ? 5 * 1024 * 1024 : 15 * 1024 * 1024;
+      if (file.size <= 0 || file.size > limit) {
+        setUploadIssue(kind === "image" ? "هر تصویر باید حداکثر ۵ مگابایت باشد." : "هر فایل صوتی باید حداکثر ۱۵ مگابایت باشد.");
+        continue;
+      }
+      accepted.push({ id: `pending-${newOptionId()}`, kind, file, order: media.length + accepted.length + 1, altText: "" });
+    }
+    if (accepted.length) onChange({ ...question, media: [...media, ...accepted] });
+    if (files.length > available) setUploadIssue("بخشی از فایل‌ها اضافه نشد؛ سقف ۸ رسانه برای هر سؤال است.");
+  }
+
+  function updateAsset(id: string, patch: Partial<QuestionMediaAsset>) {
+    onChange({ ...question, media: media.map((asset, index) => asset.id === id ? { ...asset, ...patch, order: index + 1 } : { ...asset, order: index + 1 }) });
+  }
+
+  function removeAsset(id: string) {
+    onChange({ ...question, media: media.filter((asset) => asset.id !== id).map((asset, index) => ({ ...asset, order: index + 1 })) });
+  }
+
+  return <section className="mt-4 rounded-2xl border border-primary/10 bg-background/80 p-3.5">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div><h3 className="text-xs font-black">رسانهٔ صورت سؤال</h3><p className="mt-1 text-[10px] leading-5 text-muted-foreground">JPEG، PNG یا WebP تا ۵ مگابایت؛ صوت MP3، OGG، WAV یا WebM تا ۱۵ مگابایت.</p></div>
+      <div className="flex flex-wrap gap-2">
+        <label className={cn("inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-xl border px-3 text-[11px] font-bold hover:bg-muted", media.length >= 8 && "pointer-events-none opacity-50")}>
+          <ImagePlus className="h-3.5 w-3.5"/>تصویر
+          <input className="sr-only" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple disabled={media.length >= 8} onChange={(event) => { addFiles(event.target.files, "image"); event.currentTarget.value = ""; }}/>
+        </label>
+        <label className={cn("inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-xl border px-3 text-[11px] font-bold hover:bg-muted", media.length >= 8 && "pointer-events-none opacity-50")}>
+          <Headphones className="h-3.5 w-3.5"/>صدا
+          <input className="sr-only" type="file" accept=".mp3,.ogg,.wav,.webm,audio/mpeg,audio/ogg,audio/wav,audio/webm" multiple disabled={media.length >= 8} onChange={(event) => { addFiles(event.target.files, "audio"); event.currentTarget.value = ""; }}/>
+        </label>
+      </div>
+    </div>
+    {media.length > 0 && <div className="mt-3 space-y-2.5">{media.map((asset) => <div key={asset.id} className="flex flex-col gap-2 rounded-xl border bg-card p-2.5 sm:flex-row sm:items-start">
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex items-center justify-between gap-2 text-[10px] font-bold text-muted-foreground"><span>{asset.kind === "image" ? "تصویر" : "صدا"} · {asset.file?.name || asset.contentType || "رسانهٔ ذخیره‌شده"}</span><span>{asset.file ? `${(asset.file.size / (1024 * 1024)).toFixed(1)} مگابایت` : "ذخیره‌شده"}</span></div>
+        <PrivateMedia kind={asset.kind} file={asset.file} url={asset.url} alt={asset.altText || "پیش‌نمایش صورت سؤال"} className={asset.kind === "image" ? "max-h-44 w-auto" : ""}/>
+        {asset.kind === "image" && <Input className="mt-2 h-9 text-xs" maxLength={180} value={asset.altText ?? ""} onChange={(event) => updateAsset(asset.id, { altText: event.target.value })} placeholder="توضیح کوتاه تصویر برای دسترس‌پذیری" aria-label="توضیح تصویر"/>}
+      </div>
+      <Button type="button" variant="ghost" size="icon-sm" className="self-end text-destructive sm:self-start" onClick={() => removeAsset(asset.id)} aria-label="حذف رسانه"><Trash2 className="h-4 w-4"/></Button>
+    </div>)}</div>}
+    {uploadIssue && <p role="alert" className="mt-2 text-[11px] font-bold text-destructive">{uploadIssue}</p>}
+    <p className="mt-2 text-[10px] leading-5 text-muted-foreground">فایل‌ها خصوصی می‌مانند و پس از ذخیرهٔ آزمون بارگذاری می‌شوند. اگر سؤال کاملاً تصویری است، گزینهٔ بالای این بخش را هم فعال کنید.</p>
+  </section>;
+}
+
+function AnswerMediaOptions({ question, onChange }: { question: Question; onChange: (question: Question) => void }) {
+  const enabled = question.allowImageAnswer === true || question.allowAudioAnswer === true;
+  return <section className="mt-5 rounded-2xl border border-dashed bg-muted/25 p-4">
+    <div><h3 className="text-sm font-black">پاسخ رسانه‌ای دانش‌آموز</h3><p className="mt-1 text-[11px] leading-5 text-muted-foreground">اختیاری است. فایل‌ها تا ۵ مگابایت برای تصویر و ۱۵ مگابایت برای صدا پذیرفته می‌شوند.</p></div>
+    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+      <label className="flex cursor-pointer items-center gap-2 rounded-xl border bg-card p-3 text-xs font-bold"><input type="checkbox" checked={question.allowImageAnswer === true} onChange={(event) => onChange({ ...question, allowImageAnswer: event.target.checked })} className="h-4 w-4 accent-[hsl(var(--primary))]"/><ImagePlus className="h-4 w-4 text-primary"/>اجازهٔ بارگذاری تصویر</label>
+      <label className="flex cursor-pointer items-center gap-2 rounded-xl border bg-card p-3 text-xs font-bold"><input type="checkbox" checked={question.allowAudioAnswer === true} onChange={(event) => onChange({ ...question, allowAudioAnswer: event.target.checked })} className="h-4 w-4 accent-[hsl(var(--primary))]"/><Headphones className="h-4 w-4 text-primary"/>اجازهٔ بارگذاری صدا</label>
+    </div>
+    {enabled && <p className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/[.06] p-3 text-[10px] leading-5 text-amber-900 dark:text-amber-200">پاسخ‌های فایلی بعداً در برگهٔ تصحیح معلم دیده می‌شوند و خودکار از روی تصویر/صدا نمره نمی‌گیرند؛ برای این سؤال تصحیح انسانی در نظر گرفته می‌شود.</p>}
+  </section>;
+}
+
+function MatchingEditor({ question, onChange }: { question: MatchingQuestion; onChange: (question: Question) => void }) {
+  const updatePair = (id: string, patch: { prompt?: string; answer?: string }) => onChange({ ...question, pairs: question.pairs.map((pair) => pair.id === id ? { ...pair, ...patch } : pair) });
+  const addPair = () => {
+    if (question.pairs.length >= 12) return;
+    onChange({ ...question, pairs: [...question.pairs, { id: newOptionId(), prompt: "", answer: "", optionId: newOptionId() }] });
+  };
+  const removePair = (id: string) => {
+    if (question.pairs.length <= 2) return;
+    onChange({ ...question, pairs: question.pairs.filter((pair) => pair.id !== id) });
+  };
+  return <section className="mt-5 rounded-2xl border bg-muted/25 p-4">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-black">جفت‌های وصل‌کردنی</h3><p className="mt-1 text-[11px] leading-5 text-muted-foreground">برای هر ردیف، یک پرسش و پاسخ درست بنویسید. سمت پاسخ‌ها برای دانش‌آموز به‌هم‌ریخته نمایش داده می‌شود.</p></div><Button type="button" variant="outline" size="sm" onClick={addPair} disabled={question.pairs.length >= 12}><Plus className="h-3.5 w-3.5"/>جفت</Button></div>
+    <div className="mt-3 space-y-2">{question.pairs.map((pair, index) => <div key={pair.id} className="grid gap-2 rounded-xl border bg-card p-3 sm:grid-cols-[32px_minmax(0,1fr)_minmax(0,1fr)_40px] sm:items-center">
+      <span className="grid h-8 w-8 place-items-center rounded-lg bg-muted text-xs font-black text-muted-foreground">{toPersianNumber(index + 1)}</span>
+      <Input value={pair.prompt} onChange={(event) => updatePair(pair.id, { prompt: event.target.value })} placeholder={`پرسش ${toPersianNumber(index + 1)}`} aria-label={`پرسش وصل‌کردنی ${index + 1}`}/>
+      <Input value={pair.answer ?? ""} onChange={(event) => updatePair(pair.id, { answer: event.target.value })} placeholder={`پاسخ درست ${toPersianNumber(index + 1)}`} aria-label={`پاسخ وصل‌کردنی ${index + 1}`}/>
+      <Button type="button" variant="ghost" size="icon-sm" className="justify-self-end text-destructive" onClick={() => removePair(pair.id)} disabled={question.pairs.length <= 2} aria-label={`حذف جفت ${index + 1}`}><Trash2 className="h-4 w-4"/></Button>
+    </div>)}</div>
+    <p className="mt-2 text-[10px] text-muted-foreground">{toPersianNumber(question.pairs.length)} از ۱۲ جفت · نمره به تعداد اتصال‌های درست، متناسب تقسیم می‌شود.</p>
+  </section>;
 }
 
 /** Full option CRUD: reorder, duplicate, remove, and mark the key — all mirrored onto the write payload. */

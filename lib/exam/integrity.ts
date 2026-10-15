@@ -4,41 +4,38 @@ import type { ExamIntegrityRules, ExamSettings, IntegrityPolicy } from "@/lib/ty
 /**
  * The vocabulary of exam integrity, in one place.
  *
- * The rules themselves are the server's to decide (`ExamSettings.integrityPolicy` plus the flags under it);
- * this module only says what they mean in Persian, so a label is never invented twice — and so the sentence a
- * teacher reads while switching monitoring on is the same sentence the student's screen and the marking sheet
- * repeat back to them.
+ * Rules come from the server. This module only explains the teacher's saved policy in Persian and keeps the
+ * same honest limits visible to students, teachers and the marking report.
  */
-
 export const INTEGRITY_POLICY_OPTIONS: Array<{ value: IntegrityPolicy; title: string; description: string }> = [
   {
     value: "off",
     title: "خاموش",
-    description: "هیچ رفتاری در مرورگر دانش‌آموز ثبت یا محدود نمی‌شود. حالت پیش‌فرض هر آزمون.",
+    description: "پایش رفتار مرورگر و ثبت مشخصات اتصال خاموش است؛ هیچ‌کدام از قواعد این بخش اجرا نمی‌شود.",
   },
   {
     value: "observe",
-    title: "فقط ثبت",
-    description: "خروج از تب، کپی و چسباندن، و تمام‌صفحه در کارنامه ثبت می‌شود تا خودتان قضاوت کنید. چیزی از دانش‌آموز گرفته نمی‌شود.",
+    title: "فقط هشدار و ثبت",
+    description: "سیگنال‌های مرورگر ثبت می‌شوند؛ خروج از صفحه فقط پس از پایان مهلت بازگشت اخطار می‌شود و آزمون هیچ‌وقت خودکار متوقف نمی‌شود.",
   },
   {
     value: "enforce",
-    title: "ثبت و محدودیت",
-    description: "قواعد پایین اجرا می‌شوند: کپی/چسباندن بسته، تمام‌صفحهٔ اجباری، قفل دستگاه، و سقف بیرون‌رفتن از تب.",
+    title: "هشدار و تشدید پیامد",
+    description: "قواعد انتخابی اجرا می‌شوند؛ تعداد اخطارهای پیش از توقف قابل تنظیم است و خروج بعد از آن آزمون را می‌بندد.",
   },
 ];
 
 export const INTEGRITY_POLICY_LABELS: Record<IntegrityPolicy, string> = {
-  off: "بدون مراقبت",
-  observe: "فقط ثبت رویداد",
-  enforce: "ثبت و محدودیت",
+  off: "بدون پایش مرورگر",
+  observe: "فقط هشدار و ثبت",
+  enforce: "هشدار و تشدید پیامد",
 };
 
 /** One line per recorded signal kind, including the ones only monitoring produces. */
 export const SIGNAL_LABELS: Record<string, string> = {
   session_switch: "نشست دیگری برگه را در دست گرفت",
-  tab_hidden: "تب آزمون پنهان شد",
-  tab_visible: "دانش‌آموز به تب آزمون برگشت",
+  tab_hidden: "صفحهٔ آزمون بیش از مهلت مجاز پنهان بود",
+  tab_visible: "دانش‌آموز پس از خروج طولانی به آزمون برگشت",
   disconnected: "اتصال قطع شد",
   reconnected: "اتصال برقرار شد",
   auto_submitted: "آزمون به‌صورت خودکار ارسال شد",
@@ -49,9 +46,10 @@ export const SIGNAL_LABELS: Record<string, string> = {
   cut: "متن بریده شد",
   paste: "متنی به پاسخ چسبانده شد",
   fullscreen_enter: "حالت تمام‌صفحه آغاز شد",
-  fullscreen_exit: "از حالت تمام‌صفحه بیرون رفت",
-  session_lock_refused: "ادامهٔ آزمون از دستگاه دیگر رد شد",
-  tab_limit_reached: "سقف بیرون‌رفتن از تب پر شد",
+  fullscreen_exit: "از تمام‌صفحه بیرون رفت",
+  screenshot_shortcut: "فشردن میان‌بر چاپ/تصویر صفحه در آزمون مشاهده شد",
+  session_lock_refused: "ادامهٔ آزمون از مرورگر دیگری رد شد",
+  tab_limit_reached: "خروج طولانی پس از پایان اخطارها؛ آزمون متوقف شد",
 };
 
 export const OFF_RULES: ExamIntegrityRules = {
@@ -62,26 +60,26 @@ export const OFF_RULES: ExamIntegrityRules = {
   requireFullscreen: false,
   lockToOneDevice: false,
   maxTabSwitches: 0,
+  tabSwitchGraceSeconds: 0,
+  recordAccessInfo: false,
+  blockScreenshotShortcuts: false,
   tabSwitches: 0,
   tabSwitchesRemaining: null,
   copyEvents: 0,
 };
 
-export function signalLabel(kind: string): string {
-  return SIGNAL_LABELS[kind] ?? kind;
-}
-
 /**
  * The rules this exam runs under, read from its settings.
  *
  * Mirrors the server: the master switch is applied here rather than assumed, because a settings object can
- * hold `block_copy_paste: true` from last term while monitoring is off — and a client that blocked the
- * clipboard on its own initiative would be enforcing a rule nobody chose.
+ * hold a rule from last term while monitoring is off — and a client that enforced rules on its own would
+ * enforce a rule the teacher had switched off.
  */
 export function rulesFromSettings(settings: ExamSettings): ExamIntegrityRules {
   const policy = settings.integrityPolicy ?? "off";
   const records = policy !== "off";
   const enforced = policy === "enforce";
+  const maxTabSwitches = enforced ? (settings.integrityTabLimit ?? 0) : 0;
   return {
     policy,
     records,
@@ -89,31 +87,47 @@ export function rulesFromSettings(settings: ExamSettings): ExamIntegrityRules {
     blockCopyPaste: enforced && settings.integrityBlockCopyPaste === true,
     requireFullscreen: enforced && settings.integrityRequireFullscreen === true,
     lockToOneDevice: enforced && settings.integrityLockToOneDevice === true,
-    maxTabSwitches: enforced ? (settings.integrityTabLimit ?? 0) : 0,
+    maxTabSwitches,
+    tabSwitchGraceSeconds: records ? (settings.integrityTabGraceSeconds ?? 5) : 0,
+    recordAccessInfo: records && settings.integrityRecordAccessInfo === true,
+    blockScreenshotShortcuts: enforced && settings.integrityBlockScreenshotShortcuts === true,
     tabSwitches: 0,
-    tabSwitchesRemaining: enforced && settings.integrityTabLimit ? settings.integrityTabLimit : null,
+    tabSwitchesRemaining: maxTabSwitches > 0 ? maxTabSwitches : null,
     copyEvents: 0,
   };
 }
 
 /** What the rules mean in one sentence, for a screen that only shows rather than edits. */
 export function describeIntegrity(rules: ExamIntegrityRules): string {
-  if (rules.policy === "off") return "مراقبت مرورگر برای این آزمون خاموش است.";
-  const active = [
-    rules.blockCopyPaste && "کپی و چسباندن بسته",
+  if (rules.policy === "off") return "پایش رفتار مرورگر برای این آزمون خاموش است.";
+  const parts = [
+    `بازگشت تا ${toPersianNumber(rules.tabSwitchGraceSeconds)} ثانیه بدون ثبت تخلف`,
+    rules.blockCopyPaste && "ثبت تلاش‌های کپی/بریدن و مسدودسازی چسباندن در صفحه",
     rules.requireFullscreen && "تمام‌صفحه اجباری",
-    rules.lockToOneDevice && "قفل روی یک دستگاه",
-    rules.maxTabSwitches > 0 && `سقف ${toPersianNumber(rules.maxTabSwitches)} بار بیرون‌رفتن از تب`,
+    rules.lockToOneDevice && "قفل نشست بر اساس مرورگر شروع‌کننده",
+    rules.blockScreenshotShortcuts && "مسدودسازی کمکیِ میان‌برهای چاپ/تصویر صفحه",
+    rules.recordAccessInfo && "ثبت IP و مشخصات تقریبی مرورگر/دستگاه در گزارش معلم",
   ].filter(Boolean) as string[];
-  if (rules.policy === "observe") return `رویدادها ثبت می‌شوند؛ چیزی محدود نمی‌شود. (${active.length ? `قواعد ذخیره‌شده: ${active.join("، ")}` : "بدون قاعده"})`;
-  return active.length ? `محدودیت‌های فعال: ${active.join("، ")}` : "ثبت رویداد فعال است، بدون قاعدهٔ محدودکننده.";
+  if (!rules.enforced) {
+    return `رویدادهای قابل مشاهده ثبت می‌شوند و پس از مهلت، هشدار می‌آید؛ آزمون خودکار متوقف نمی‌شود. ${parts.join("؛ ")}.`;
+  }
+  parts.push(
+    rules.maxTabSwitches > 0
+      ? `${toPersianNumber(rules.maxTabSwitches)} اخطار پیش از توقف؛ خروج طولانیِ بعدی آزمون را می‌بندد`
+      : "توقف خودکار پس از خروج از صفحه خاموش است",
+  );
+  return `محدودیت‌های فعال: ${parts.join("؛ ")}.`;
 }
 
-/** The runner's own counter, phrased the way a student should read it: what is left, not what was done. */
+/** The runner's counter, phrased as the remaining warnings before a later departure closes the attempt. */
 export function tabBudgetNotice(rules: ExamIntegrityRules): string | null {
   if (!rules.maxTabSwitches || rules.tabSwitchesRemaining === null) return null;
   const left = rules.tabSwitchesRemaining;
-  if (left <= 0) return "سقف بیرون‌رفتن از تب کامل شد؛ آزمون بسته می‌شود.";
-  if (left <= 2) return `باقی‌ماندهٔ خروج مجاز از تب: ${toPersianNumber(left)} بار. پس از آن آزمون بسته می‌شود.`;
+  if (left <= 0) return "اخطارهای پیش از توقف تکمیل شد؛ خروج طولانیِ بعدی آزمون را می‌بندد.";
+  if (left <= 2) return `${toPersianNumber(left)} اخطار تا توقف باقی مانده است؛ خروج طولانیِ بعدی پس از آن آزمون را می‌بندد.`;
   return null;
+}
+
+export function signalLabel(kind: string): string {
+  return SIGNAL_LABELS[kind] ?? kind;
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import uuid
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -8,8 +9,16 @@ from django.db import models
 from django.utils import timezone
 
 from apps.core.models import TimeStampedUUIDModel
+from apps.core.private_storage import PrivateMediaStorage
 from apps.exams.models import Exam, Question, QuestionOption
 from apps.users.models import User
+
+
+_PRIVATE_MEDIA_STORAGE = PrivateMediaStorage()
+
+
+def _answer_media_path(instance, _filename: str) -> str:  # type: ignore[no-untyped-def]
+    return f"answer-media/{instance.answer.attempt_id}/{instance.answer.question_id}/{uuid.uuid4().hex}"
 
 
 class ExamAttempt(TimeStampedUUIDModel):
@@ -43,10 +52,18 @@ class ExamAttempt(TimeStampedUUIDModel):
     answer_frontier = models.PositiveSmallIntegerField(default=0)
     # Tab/device ownership of the session. Enforced server-side so a second tab cannot clobber answers.
     client_session = models.CharField(max_length=64, blank=True)
-    # Fingerprint of the browser that started this attempt, computed server-side from the request. It is
-    # compared only when the teacher locked the exam to one device, and it separates "same browser, new tab"
-    # (allowed, because a refresh must never cost a student their exam) from "different machine" (refused).
+    # Short hash of the starting User-Agent, stored only for an enabled enforced browser lock. It allows the
+    # same browser after refresh; a different User-Agent may be refused, but this cannot identify hardware and
+    # different physical devices may share or spoof the same value.
     device_signature = models.CharField(max_length=64, blank=True)
+    # Readable connection metadata is collected only when the teacher explicitly enabled it for this exam.
+    # These are a start-time snapshot, not a claim to identify a person or physical device.
+    client_ip_address = models.GenericIPAddressField(null=True, blank=True)
+    client_user_agent = models.CharField(max_length=512, blank=True)
+    # Visibility departures are provisional until the configured grace period has elapsed. They are not
+    # AttemptEvent rows until the server confirms a long departure, so quick returns create no warning.
+    visibility_hidden_at = models.DateTimeField(null=True, blank=True)
+    visibility_violation_recorded = models.BooleanField(default=False)
     session_switch_count = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
@@ -113,6 +130,30 @@ class StudentAnswer(TimeStampedUUIDModel):
             raise ValidationError(errors)
 
 
+class StudentAnswerAttachment(TimeStampedUUIDModel):
+    """Private image/audio response, linked to the answer rather than embedded in JSON or base64."""
+
+    class Kind(models.TextChoices):
+        IMAGE = "image", "Image"
+        AUDIO = "audio", "Audio"
+
+    answer = models.ForeignKey(StudentAnswer, on_delete=models.CASCADE, related_name="attachments")
+    kind = models.CharField(max_length=8, choices=Kind.choices, db_index=True)
+    file = models.FileField(upload_to=_answer_media_path, storage=_PRIVATE_MEDIA_STORAGE, max_length=255)
+    original_name = models.CharField(max_length=180)
+    content_type = models.CharField(max_length=80)
+    size_bytes = models.PositiveIntegerField()
+    sha256 = models.CharField(max_length=64)
+
+    class Meta:
+        ordering = ("created_at",)
+        indexes = [models.Index(fields=("answer", "kind", "created_at"))]
+        constraints = [models.CheckConstraint(condition=models.Q(size_bytes__gt=0), name="answer_media_size_positive")]
+
+    def __str__(self) -> str:
+        return f"{self.kind} · {self.answer_id}"
+
+
 class AttemptEvent(TimeStampedUUIDModel):
     """Server-recorded session and activity signals for one attempt.
 
@@ -136,6 +177,7 @@ class AttemptEvent(TimeStampedUUIDModel):
         PASTE = "paste", "Pasted text into an answer"
         FULLSCREEN_ENTER = "fullscreen_enter", "Fullscreen started"
         FULLSCREEN_EXIT = "fullscreen_exit", "Fullscreen left"
+        SCREENSHOT_SHORTCUT = "screenshot_shortcut", "A common print/screenshot shortcut reached the exam page"
         SESSION_LOCK_REFUSED = "session_lock_refused", "Another device was refused the attempt"
         TAB_LIMIT_REACHED = "tab_limit_reached", "Tab-switch limit reached"
 

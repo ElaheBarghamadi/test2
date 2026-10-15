@@ -113,7 +113,12 @@ export function ExamCalendar({ exams, role, onSelect }: { exams: Exam[]; role: "
                 aria-current={day.isToday ? "date" : undefined}
                 tabIndex={focusIndex === index ? 0 : -1}
                 onFocus={() => setFocusIndex(index)}
-                onClick={() => { if (dayExams[0]) onSelect ? onSelect(dayExams[0]) : openExam(dayExams[0], role); }}
+                onClick={() => {
+                  const firstExam = dayExams[0];
+                  if (!firstExam) return;
+                  if (onSelect) onSelect(firstExam);
+                  else openExam(firstExam, role);
+                }}
                 className={cn(
                   "relative flex min-h-16 flex-col rounded-xl border p-1.5 text-right transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   day.inMonth ? "bg-card" : "bg-muted/35 text-muted-foreground/60",

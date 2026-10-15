@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Clock3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supportsPersianCalendar } from "@/lib/utils/persian-calendar";
@@ -44,6 +44,8 @@ export function PersianDateTimeField({ label, value, onChange, timezone, min, ma
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const generatedId = useId();
+  const fieldId = id ?? generatedId;
 
   const parsed = useMemo(() => parseWallClock(value), [value]);
   const selected = parsed?.persian ?? null;
@@ -73,8 +75,8 @@ export function PersianDateTimeField({ label, value, onChange, timezone, min, ma
 
   if (!supported) {
     return (
-      <FieldShell label={label} required={required} error={error} hint={`${label} — این مرورگر تقویم فارسی را ندارد؛ تاریخ میلادی وارد کنید.`}>
-        <Input id={id} type="datetime-local" value={value} onChange={(event) => onChange(event.target.value)} aria-invalid={Boolean(error)}/>
+      <FieldShell id={fieldId} label={label} required={required} error={error} hint={`${label} — این مرورگر تقویم فارسی را ندارد؛ تاریخ میلادی وارد کنید.`}>
+        <Input id={fieldId} type="datetime-local" value={value} onChange={(event) => onChange(event.target.value)} aria-invalid={Boolean(error)} aria-describedby={error ? `${fieldId}-error` : undefined}/>
       </FieldShell>
     );
   }
@@ -97,15 +99,15 @@ export function PersianDateTimeField({ label, value, onChange, timezone, min, ma
 
   return (
     <div ref={rootRef} className="relative">
-      <FieldShell label={label} required={required} error={error} hint={hint}>
+      <FieldShell id={fieldId} label={label} required={required} error={error} hint={hint}>
         <button
-          id={id}
+          id={fieldId}
           type="button"
           ref={triggerRef}
           onClick={() => setOpen((current) => !current)}
           aria-expanded={open}
           aria-haspopup="dialog"
-          aria-invalid={Boolean(error)}
+          aria-describedby={error ? `${fieldId}-error` : undefined}
           className={cn(
             "flex h-11 w-full items-center gap-2 rounded-xl border bg-background px-3 text-right text-sm font-bold transition-colors hover:border-primary/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             error && "border-destructive",
@@ -200,12 +202,12 @@ export function PersianDateTimeField({ label, value, onChange, timezone, min, ma
   );
 }
 
-function FieldShell({ label, required, error, hint, children }: { label: string; required?: boolean; error?: string; hint?: string; children: React.ReactNode }) {
+function FieldShell({ id, label, required, error, hint, children }: { id: string; label: string; required?: boolean; error?: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block text-sm font-bold">
       <span>{label}{required && <span className="mr-1 text-destructive">*</span>}</span>
       <div className="mt-2">{children}</div>
-      {error && <span className="mt-1.5 block text-xs font-bold text-destructive">{error}</span>}
+      {error && <span id={`${id}-error`} className="mt-1.5 block text-xs font-bold text-destructive">{error}</span>}
       {hint && !error && <span className="mt-1.5 block text-[11px] font-normal leading-5 text-muted-foreground">{hint}</span>}
     </label>
   );

@@ -44,38 +44,57 @@ export function questionIdentityParts(question: Question): Record<string, unknow
     // there are two questions, and merging them would drop one teacher's wording.
     explanation: normalizeWord(question.explanation),
     marks: Number(question.points || 0).toFixed(2),
+    media_hashes: (question.media ?? []).map((media) => media.sha256 ?? (media.file ? `pending:${media.file.name}:${media.file.size}:${media.file.lastModified}` : `stored:${media.id}`)).sort(),
+  };
+  const mediaConfig = {
+    allow_image_answer: question.allowImageAnswer === true,
+    allow_audio_answer: question.allowAudioAnswer === true,
+    image_only: question.imageOnly === true,
   };
   switch (question.type) {
     case "single_choice":
       return {
         ...base,
+        configuration: mediaConfig,
         options: question.options.map((option) => ({ text: normalizeWord(option.label), is_correct: option.id === question.correctOptionId })),
       };
     case "multiple_choice":
       return {
         ...base,
+        configuration: mediaConfig,
         options: question.options.map((option) => ({ text: normalizeWord(option.label), is_correct: (question.correctOptionIds ?? []).includes(option.id) })),
       };
     case "true_false":
       // The two controls are fixed wording, and the write path stores them in this order.
       return {
         ...base,
+        configuration: mediaConfig,
         options: [
           { text: "درست", is_correct: question.correctAnswer !== false },
           { text: "نادرست", is_correct: question.correctAnswer === false },
         ],
       };
+    case "matching":
+      return {
+        ...base,
+        configuration: {
+          ...mediaConfig,
+          matching_pairs: question.pairs.map((pair) => ({ prompt: normalizeWord(pair.prompt), answer: normalizeWord(pair.answer) })),
+        },
+        options: question.pairs.map((pair) => ({ text: normalizeWord(pair.answer), is_correct: false })),
+      };
     case "short_answer":
       return {
         ...base,
         configuration: {
+          ...mediaConfig,
           expected_answers: words(question.expectedAnswers).sort(),
           case_sensitive: question.caseSensitive === true,
           max_length: question.maxLength ?? null,
         },
       };
     case "essay":
-      return { ...base, configuration: { max_length: question.maxLength ?? null } };
+      return { ...base, configuration: { ...mediaConfig, max_length: question.maxLength ?? null } };
   }
 }
 

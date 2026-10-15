@@ -2,6 +2,9 @@ from django.urls import path
 
 from .views import (
     StudentAttemptAnswerView,
+    StudentAttemptAnswerAttachmentCollectionView,
+    StudentAttemptAnswerAttachmentDetailView,
+    StudentAnswerAttachmentFileView,
     StudentAttemptBatchAnswerView,
     StudentAttemptClaimView,
     StudentAttemptDetailView,
@@ -21,6 +24,9 @@ urlpatterns = [
     path("attempts/<uuid:attempt_id>/", StudentAttemptDetailView.as_view(), name="attempt-detail"),
     path("attempts/<uuid:attempt_id>/answers/", StudentAttemptBatchAnswerView.as_view(), name="attempt-answer-batch"),
     path("attempts/<uuid:attempt_id>/answers/<uuid:question_id>/", StudentAttemptAnswerView.as_view(), name="attempt-answer"),
+    path("attempts/<uuid:attempt_id>/answers/<uuid:question_id>/attachments/", StudentAttemptAnswerAttachmentCollectionView.as_view(), name="attempt-answer-attachments"),
+    path("attempts/<uuid:attempt_id>/answers/<uuid:question_id>/attachments/<uuid:attachment_id>/", StudentAttemptAnswerAttachmentDetailView.as_view(), name="attempt-answer-attachment-detail"),
+    path("media/answers/<uuid:attachment_id>/", StudentAnswerAttachmentFileView.as_view(), name="answer-attachment-file"),
     path("attempts/<uuid:attempt_id>/flagged-questions/<uuid:question_id>/", StudentAttemptFlagView.as_view(), name="attempt-question-flag"),
     path("attempts/<uuid:attempt_id>/submit/", StudentAttemptSubmitView.as_view(), name="attempt-submit"),
     path("attempts/<uuid:attempt_id>/heartbeat/", StudentAttemptHeartbeatView.as_view(), name="attempt-heartbeat"),

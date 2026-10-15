@@ -59,14 +59,14 @@ describe("the words around the rules", () => {
 
   it("names the active restrictions without overstating them", () => {
     const text = describeIntegrity(rulesFromSettings(settings({ integrityPolicy: "enforce", integrityLockToOneDevice: true, integrityTabLimit: 4 })));
-    expect(text).toContain("قفل روی یک دستگاه");
+    expect(text).toContain("قفل نشست بر اساس مرورگر");
     expect(text).toContain("۴");
   });
 
   it("warns only when the budget is nearly gone, in Persian digits", () => {
     expect(tabBudgetNotice({ maxTabSwitches: 9, tabSwitchesRemaining: 8 } as never)).toBeNull();
     expect(tabBudgetNotice({ maxTabSwitches: 9, tabSwitchesRemaining: 2 } as never)).toContain("۲");
-    expect(tabBudgetNotice({ maxTabSwitches: 9, tabSwitchesRemaining: 0 } as never)).toContain("کامل شد");
+    expect(tabBudgetNotice({ maxTabSwitches: 9, tabSwitchesRemaining: 0 } as never)).toContain("تکمیل شد");
   });
 
   it("labels every kind the server can record, including the monitored ones", () => {

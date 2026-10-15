@@ -61,7 +61,7 @@ describe("persian civil calendar", () => {
   });
 
   it("walks months without drifting, forwards and back", () => {
-    let cursor = shiftPersianMonth({ year: 1405, month: 12, day: 15 }, 1);
+    const cursor = shiftPersianMonth({ year: 1405, month: 12, day: 15 }, 1);
     expect(cursor).toEqual({ year: 1406, month: 1, day: 1 });
     expect(shiftPersianMonth({ year: 1406, month: 1, day: 1 }, -1)).toEqual({ year: 1405, month: 12, day: 1 });
     // Twelve months out is the same month of the next year, whatever the mix of 31/30/29-day months.

@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import type { JournalRecord } from "@/lib/exam/answer-journal";
-import type { AnswerValue, Exam, ExamAnswer, ExamAttempt } from "@/lib/types/domain";
+import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, StudentAnswerMedia } from "@/lib/types/domain";
 
 interface AttemptState {
   attempt: ExamAttempt | null;
@@ -19,6 +19,7 @@ interface AttemptState {
   restoreJournal: (record: JournalRecord) => void;
   start: () => void;
   setAnswer: (questionId: string, value: AnswerValue) => void;
+  setAnswerAttachments: (questionId: string, attachments: StudentAnswerMedia[], serverRevision: number) => void;
   toggleFlag: (questionId: string) => void;
   setCurrentQuestion: (index: number) => void;
   /** The server's navigation frontier, re-read on every heartbeat. */
@@ -104,6 +105,22 @@ export const useExamAttemptStore = create<AttemptState>((set, get) => ({
     const attempt = state.attempt; const revision = attempt.answerRevision + 1;
     return { attempt: { ...attempt, answerRevision: revision, saveStatus: attempt.connectionStatus === "offline" ? "saved_locally" : "saving", pendingAnswerQuestionIds: append(attempt.pendingAnswerQuestionIds, questionId), answers: { ...attempt.answers, [questionId]: { ...withCurrentAnswer(attempt, questionId), value, updatedAt: new Date().toISOString() } } } };
   }),
+  setAnswerAttachments: (questionId, attachments, serverRevision) => set((state) => {
+    if (!state.attempt) return state;
+    const attempt = state.attempt;
+    const answers = {
+      ...attempt.answers,
+      [questionId]: { ...withCurrentAnswer(attempt, questionId), attachments, updatedAt: new Date().toISOString() },
+    };
+    const pending = hasPending(attempt);
+    return { attempt: {
+      ...attempt,
+      answers,
+      serverRevision: Math.max(attempt.serverRevision ?? 0, serverRevision),
+      saveStatus: pending ? attempt.saveStatus : "saved",
+      lastSavedAt: pending ? attempt.lastSavedAt : new Date().toISOString(),
+    } };
+  }),
   toggleFlag: (questionId) => set((state) => {
     if (!state.attempt || !["in_progress", "expired"].includes(state.attempt.status)) return state;
     const attempt = state.attempt; const previous = withCurrentAnswer(attempt, questionId);
@@ -158,10 +175,10 @@ export const useExamAttemptStore = create<AttemptState>((set, get) => ({
       pendingAnswerQuestionIds: [], pendingFlagQuestionIds: [], saveStatus: "saved", lastSavedAt: new Date().toISOString(),
       // The server told us which revision it now holds, so the next write is built from that, and a
       // queue that drained while offline cannot look stale to the server afterwards.
-      serverRevision: typeof serverRevision === "number" ? serverRevision : Math.max(state.attempt.serverRevision ?? 0, (state.attempt.serverRevision ?? 0) + 1),
+      serverRevision: Math.max(state.attempt.serverRevision ?? 0, typeof serverRevision === "number" ? serverRevision : (state.attempt.serverRevision ?? 0) + 1),
     } };
   }),
-  acceptRevision: (serverRevision) => set((state) => !state.attempt ? state : { attempt: { ...state.attempt, serverRevision } }),
+  acceptRevision: (serverRevision) => set((state) => !state.attempt ? state : { attempt: { ...state.attempt, serverRevision: Math.max(state.attempt.serverRevision ?? 0, serverRevision) } }),
   setSessionConflict: (sessionConflict) => set((state) => !state.attempt ? state : { attempt: { ...state.attempt, sessionConflict, ...(sessionConflict ? {} : {}) } }),
   markSaveFailed: (revision) => set((state) => !state.attempt || state.attempt.answerRevision !== revision ? state : { attempt: { ...state.attempt, saveStatus: "error" } }),
   setConnectionStatus: (connectionStatus) => set((state) => {

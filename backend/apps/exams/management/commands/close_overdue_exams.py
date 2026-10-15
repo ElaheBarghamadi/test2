@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand
 
+from apps.attempts.services import purge_expired_access_info
 from apps.exams.services import close_overdue_exams
 
 
@@ -17,4 +18,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options) -> None:  # type: ignore[no-untyped-def]
         closed = close_overdue_exams()
-        self.stdout.write(self.style.SUCCESS(f"{closed} exam(s) moved to completed."))
+        purged = purge_expired_access_info()
+        self.stdout.write(
+            self.style.SUCCESS(f"{closed} exam(s) moved to completed; {purged} old access snapshot(s) scrubbed.")
+        )

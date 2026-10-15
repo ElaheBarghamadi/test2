@@ -248,7 +248,8 @@ describe("what the marking sheet says about monitoring", () => {
       ...sheet,
       integrity: {
         policy: "enforce", records: true, enforced: true, block_copy_paste: true, require_fullscreen: false,
-        lock_to_one_device: true, max_tab_switches: 3, tab_switches: 2, tab_switches_remaining: 1, copy_events: 4,
+        lock_to_one_device: true, max_tab_switches: 3, tab_switch_grace_seconds: 5, record_access_info: false,
+        block_screenshot_shortcuts: false, tab_switches: 2, tab_switches_remaining: 1, copy_events: 4,
       },
       session_signals: [
         ...sheet.session_signals,
@@ -258,9 +259,9 @@ describe("what the marking sheet says about monitoring", () => {
     await openDesk("sheet");
 
     const panel = await screen.findByText(/^مراقبت از تقلب:/);
-    expect(panel.parentElement?.textContent).toContain("ثبت و محدودیت");
-    expect(document.body.textContent).toContain("۲ بار بیرون‌رفتن از تب از ۳");
-    expect(document.body.textContent).toContain("۴ کپی یا چسباندن");
+    expect(panel.parentElement?.textContent).toContain("هشدار و تشدید پیامد");
+    expect(document.body.textContent).toContain("۲ اخطار ثبت‌شده از ۳ اخطار پیش از توقف");
+    expect(document.body.textContent).toContain("۴ کپی، بریدن یا چسباندن");
     // The timeline reads as sentences, not as an API's snake_case.
     expect(await screen.findByText("متنی به پاسخ چسبانده شد")).toBeTruthy();
   });
@@ -276,7 +277,7 @@ describe("what the marking sheet says about monitoring", () => {
     await openDesk("sheet");
     expect(await screen.findByText(/^مراقبت از تقلب:/));
     expect(document.body.textContent).toContain("خاموش است");
-    expect(document.body.textContent).toContain("۰ بار بیرون‌رفتن از تب");
+    expect(document.body.textContent).toContain("۰ اخطار ثبت‌شده");
   });
 });
 

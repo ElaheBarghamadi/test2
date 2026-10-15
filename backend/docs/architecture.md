@@ -27,6 +27,8 @@ Detailed request/response documentation is in [`api-v1.md`](api-v1.md).
 | `DJANGO_PASSWORD_RESET_TIMEOUT_SECONDS` | Reset-link lifetime (three hours by default; Django's own default is three days). |
 | `DJANGO_CORS_ALLOW_CREDENTIALS` | Off by default; bearer tokens need no ambient credentials. |
 | `DJANGO_SECURE_SSL_REDIRECT` / `DJANGO_SECURE_HSTS_SECONDS` / `DJANGO_ALLOWED_HOSTS` | Transport hardening, applied when `DJANGO_DEBUG=false`. |
+| `DJANGO_TRUSTED_PROXY_CIDRS` | Optional comma-separated CIDRs for reverse proxies trusted to set `X-Forwarded-For`; empty by default, so forwarded client IPs are ignored. |
+| `EXAM_ACCESS_INFO_RETENTION_DAYS` | Days to retain opt-in IP/User-Agent/device-signature metadata after attempt finalization (default 30); schedule the scrub command daily. |
 | `DJANGO_DATA_UPLOAD_MAX_BYTES` / `DJANGO_DATA_UPLOAD_MAX_FIELDS` / `DJANGO_FILE_UPLOAD_MAX_BYTES` | Request-body ceilings (2.5 MB, 400 fields); lower them per deployment, never raise them without a reason. |
 | `DEFAULT_FROM_EMAIL` / `DJANGO_EMAIL_BACKEND` | Reset-email sender and Django delivery backend; configure SMTP variables in production. |
 
@@ -54,7 +56,7 @@ Self-profile updates use structured nested profile serializers. They cannot muta
 
 ### Exams and settings
 
-`Exam` owns teacher, metadata, duration, schedule, status, and a persisted total mark value. The narrow one-to-one `ExamSettings` model holds navigation, question and option randomization, the complete-answer-sheet rule, result visibility, correct-answer visibility, attempt limits, and the passing percentage; API input uses this structured model rather than an unvalidated settings blob, and every field is validated in both `clean()` and the serializer.
+`Exam` owns teacher, metadata, duration, schedule, status, and a persisted total mark value. The narrow one-to-one `ExamSettings` model holds navigation, question and option randomization, the complete-answer-sheet rule, result visibility, correct-answer visibility, attempt limits, the passing percentage, and teacher-selected integrity policy/rules (off, observe, or enforce); API input uses this structured model rather than an unvalidated settings blob, and every field is validated in both `clean()` and the serializer.
 
 Normal patches never change status. Service functions in `apps.exams.services` own publishing, completion, archive, restore, duplication, and ordering transitions. `status_before_archive` is a small internal field that lets restore return an exam to its prior state; it is not client-writable.
 
@@ -73,6 +75,15 @@ Teacher serializers may include `is_correct`, explanation, and configuration. Th
 `validate_exam_for_publication()` is the shared publish gate. It requires a title, valid schedule, at least one question, and valid option/type configuration. Publishing atomically selects `scheduled` for future starts or `active` otherwise; expired schedules and invalid transitions return structured DRF validation errors.
 
 `duplicate_exam()` copies settings, questions, and options in a transaction, assigns the caller as owner, forces the duplicate to `draft`, and leaves the source untouched.
+
+
+### Browser integrity monitoring and connection metadata
+
+Integrity controls are deliberately teacher-selected per exam. `off` records no browser activity; `observe` stores eligible signals and warns the student but never stops the attempt; `enforce` applies selected rules. A hidden page starts a provisional server-timestamped interval. If the browser returns before the configured grace period, that provisional state is cleared without a warning; if it remains hidden past the grace, the server records one warning. `max_tab_switches=N` means N warnings and the *next* confirmed long departure closes the attempt, grades saved answers, and leaves the teacher a signal trail. No unsaved work is invented or discarded.
+
+These are weak, browser-reported signals, not proof of cheating. The page may be hidden for legitimate reasons, browser timers can be throttled, and a malicious/modified client can omit or forge a signal. The page-level shortcut handler only attempts to block common print/save/PrintScreen key events; a regular website cannot block operating-system screenshot tools or reliably inspect/disable browser extensions, including AI helpers. Clipboard events retain only a short field label and text length, not the copied/pasted content. Fullscreen and clipboard behavior are browser-mediated and remain bypassable. Teacher reports must be reviewed in context; no event automatically changes a score except the explicit configured tab-limit stop, which only closes the writing window and grades saved answers.
+
+IP and raw User-Agent capture are separately opt-in (`record_access_info`) and are returned only by the teacher attempt-report endpoint. By default, `X-Forwarded-For` is ignored; deployment may set `DJANGO_TRUSTED_PROXY_CIDRS` for an immediate reverse proxy it controls. The recorded IP may still identify a shared NAT/VPN/proxy, while User-Agent is self-reported/spoofable. A one-device lock stores only a short SHA-256-derived User-Agent signature, and only when the enforced lock is enabled; it is not a hardware fingerprint or identity proof. A daily `manage.py close_overdue_exams` run also scrubs IP, User-Agent, and signature fields after `EXAM_ACCESS_INFO_RETENTION_DAYS` (30 by default) from finalized attempts. Deployments without that housekeeping run do not have automatic retention and should schedule `manage.py purge_attempt_access_info` themselves.
 
 ### Student attempts, timing, and results
 
@@ -242,5 +253,5 @@ Create an administrative user in a controlled environment with `./.venv/bin/pyth
 ## Deliberately deferred
 
 - Partial credit inside one multiple-answer question (exact-set matching is a deliberate rule with stored results behind it), fuzzy/NLP assessment, and post-exam answer-key review (`show_correct_answers` is stored and editable but no student route reads it yet).
-- Redis, WebSockets, Celery, proctoring, screen capture, advanced analytics, and deployment pipeline work. Session detection, offline recovery, and clock reconciliation are all HTTP + snapshot state, which is sufficient at a school's scale and removes a failure domain rather than adding one.
-- Automatic activation still runs lazily: reading the teacher exam list closes exams whose window has passed, and `manage.py close_overdue_exams` does the same for everyone when wired to cron.
+- Redis, WebSockets, Celery, full proctoring, screen recording, reliable OS-level screenshot prevention, browser-extension/AI detection, advanced analytics, and deployment pipeline work. Session detection, offline recovery, and clock reconciliation are all HTTP + snapshot state, which is sufficient at a school's scale and removes a failure domain rather than adding one. The implemented page-level controls remain best-effort, not lockdown.
+- Automatic activation still runs lazily: reading the teacher exam list closes exams whose window has passed. Schedule `manage.py close_overdue_exams` daily to do the same for everyone and scrub access snapshots beyond their retention window; `manage.py purge_attempt_access_info` is available when retention must run independently.

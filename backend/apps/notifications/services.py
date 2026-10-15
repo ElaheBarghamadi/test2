@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from django.db import models as dj_models
+from django.db.models import Q
 
 from apps.exams.models import Exam
 from apps.users.models import User
@@ -33,10 +34,13 @@ def exam_audience(exam: Exam):  # type: ignore[no-untyped-def]
     teacher_school_id = SchoolMembership.objects.filter(user=exam.teacher).values_list("school_id", flat=True).first()
     if teacher_school_id:
         students = students.filter(school_membership__school_id=teacher_school_id)
-    if exam.grade:
-        students = students.filter(student_profile__grade=exam.grade)
-    if exam.class_name:
-        students = students.filter(student_profile__class_name=exam.class_name)
+    if exam.audience_mode == Exam.AudienceMode.SELECTED:
+        students = students.filter(Q(eligible_exams=exam) | Q(student_groups__targeted_exams=exam))
+    else:
+        if exam.grade:
+            students = students.filter(student_profile__grade=exam.grade)
+        if exam.class_name:
+            students = students.filter(student_profile__class_name=exam.class_name)
     return students.exclude(pk=exam.teacher_id).distinct()
 
 

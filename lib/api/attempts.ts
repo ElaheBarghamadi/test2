@@ -1,7 +1,7 @@
 import { apiRequest } from "@/lib/api/client";
-import type { ApiAttemptDto, ApiAttemptHeartbeatDto, ApiAvailableExamDto, ApiIntegritySignalDto, ApiStudentAnswerDto, ApiStudentResultDto, ApiSubmitAttemptDto } from "@/lib/api/dtos";
+import type { ApiAttemptDto, ApiAttemptHeartbeatDto, ApiAvailableExamDto, ApiIntegritySignalDto, ApiStudentAnswerDto, ApiStudentAttachmentMutationDto, ApiStudentResultDto, ApiSubmitAttemptDto } from "@/lib/api/dtos";
 
-export type ApiAnswerInput = { selected_option_ids: string[] } | { text: string };
+export type ApiAnswerInput = { selected_option_ids: string[] } | { matches: Record<string, string> } | { text: string };
 export type ApiBatchAnswerInput = ApiAnswerInput & { question_id: string };
 
 /**
@@ -29,6 +29,14 @@ export const attemptsApi = {
   detail: (attemptId: string, guards?: AttemptWriteGuards) => apiRequest<ApiAttemptDto>(`/student/attempts/${attemptId}/`, { headers: guardHeaders(guards) }),
   saveAnswer: (attemptId: string, questionId: string, answer: ApiAnswerInput, signal?: AbortSignal, guards?: AttemptWriteGuards) => apiRequest<ApiStudentAnswerDto>(`/student/attempts/${attemptId}/answers/${questionId}/`, { method: "PATCH", body: answer, signal, headers: guardHeaders(guards) }),
   saveAnswers: (attemptId: string, answers: ApiBatchAnswerInput[], signal?: AbortSignal, guards?: AttemptWriteGuards) => apiRequest<ApiStudentAnswerDto[]>(`/student/attempts/${attemptId}/answers/`, { method: "PATCH", body: { answers }, signal, headers: guardHeaders(guards) }),
+  uploadAnswerAttachment: (attemptId: string, questionId: string, file: File, kind: "image" | "audio", guards?: AttemptWriteGuards) => {
+    const body = new FormData();
+    body.append("file", file);
+    body.append("kind", kind);
+    return apiRequest<ApiStudentAttachmentMutationDto>(`/student/attempts/${attemptId}/answers/${questionId}/attachments/`, { method: "POST", body, headers: guardHeaders(guards) });
+  },
+  deleteAnswerAttachment: (attemptId: string, questionId: string, attachmentId: string, guards?: AttemptWriteGuards) =>
+    apiRequest<ApiStudentAttachmentMutationDto>(`/student/attempts/${attemptId}/answers/${questionId}/attachments/${attachmentId}/`, { method: "DELETE", headers: guardHeaders(guards) }),
   setFlag: (attemptId: string, questionId: string, flagged: boolean, signal?: AbortSignal, guards?: AttemptWriteGuards) => apiRequest<ApiStudentAnswerDto>(`/student/attempts/${attemptId}/flagged-questions/${questionId}/`, { method: flagged ? "POST" : "DELETE", signal, headers: guardHeaders(guards) }),
   submit: (attemptId: string, guards?: AttemptWriteGuards & { trigger?: "manual" | "auto" }) => apiRequest<ApiSubmitAttemptDto>(`/student/attempts/${attemptId}/submit/`, {
     method: "POST",
@@ -47,7 +55,7 @@ export const attemptsApi = {
    */
   recordSignal: (
     attemptId: string,
-    kind: "tab_hidden" | "tab_visible" | "disconnected" | "reconnected" | "copy" | "cut" | "paste" | "fullscreen_enter" | "fullscreen_exit",
+    kind: "tab_hidden" | "tab_hidden_timeout" | "tab_visible" | "disconnected" | "reconnected" | "copy" | "cut" | "paste" | "fullscreen_enter" | "fullscreen_exit" | "screenshot_shortcut",
     guards?: AttemptWriteGuards,
     detail?: Record<string, unknown>,
   ) => apiRequest<ApiIntegritySignalDto>(`/student/attempts/${attemptId}/signals/`, { method: "POST", body: { kind, ...(detail ? { detail } : {}) }, headers: guardHeaders(guards) }),

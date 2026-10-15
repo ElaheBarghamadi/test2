@@ -8,8 +8,8 @@ delete-and-recreate that follows detaches the answers and grades of attempts tha
 So "completely duplicate" gets one definition, shared by the write path, the bank import and the migration
 that cleaned up the copies the old code left behind:
 
-* identity is the *content*: type, wording, instructions, configuration, marks and the ordered options with
-  which one of them is the key;
+* identity is the *content*: type, wording, instructions, configuration, marks, ordered options with
+  which one of them is the key, and the hashes of any prompt media;
 * wording is normalised (NFKC, trimmed, whitespace collapsed, casefolded) because a stray space or a
   different letter case is the same question typed twice, not a new one;
 * `order`, difficulty and tags are *not* part of it — reordering a paper or re-tagging a question must
@@ -84,8 +84,18 @@ def content_identity(
     marks: Any = 1,
     configuration: Mapping[str, Any] | None = None,
     options: Iterable[Mapping[str, Any]] = (),
+    media_hashes: Iterable[str] = (),
 ) -> str:
     """A stable fingerprint of one question's content. Options are taken in the order given."""
+    identity_configuration = dict(configuration or {})
+    # Prompt IDs are storage/UI identity, not content. Ignore them so copying a matching question does not
+    # defeat duplicate detection just because its left-side rows received new client IDs.
+    matching_pairs = identity_configuration.get("matching_pairs")
+    if isinstance(matching_pairs, list):
+        identity_configuration["matching_pairs"] = [
+            {"prompt": normalize_wording(pair.get("prompt")), "answer": normalize_wording(pair.get("answer"))}
+            for pair in matching_pairs if isinstance(pair, Mapping)
+        ]
     payload = {
         "type": str(question_type),
         "text": normalize_wording(text),
@@ -94,17 +104,26 @@ def content_identity(
         # there are not "the same question", and merging them would quietly drop one teacher's wording.
         "explanation": normalize_wording(explanation),
         "marks": _marks(marks),
-        "configuration": _canonical(configuration or {}),
+        "configuration": _canonical(identity_configuration),
         "options": [
             {"text": normalize_wording(option.get("text")), "is_correct": bool(option.get("is_correct"))}
             for option in options
         ],
     }
+    media_hash_list = sorted(str(digest) for digest in media_hashes)
+    if media_hash_list:
+        payload["media_hashes"] = media_hash_list
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def question_content_hash(question: Any) -> str:
-    """The identity of a saved question, read back from its own rows."""
+def question_content_hash(question: Any, *, media_hashes: Iterable[str] | None = None) -> str:
+    """The identity of a saved question, read back from its own rows.
+
+    `media_hashes` is an override for an in-flight media add/remove: callers can validate the resulting
+    identity before they commit the file mutation. If omitted, the saved question's current media are read.
+    """
+    if media_hashes is None:
+        media_hashes = question.media.order_by("id").values_list("sha256", flat=True)
     return content_identity(
         question_type=question.type,
         text=question.text,
@@ -113,4 +132,5 @@ def question_content_hash(question: Any) -> str:
         marks=question.marks,
         configuration=question.configuration or {},
         options=[{"text": option.text, "is_correct": option.is_correct} for option in question.options.order_by("order")],
+        media_hashes=media_hashes,
     )

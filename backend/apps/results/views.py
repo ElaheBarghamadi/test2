@@ -19,6 +19,7 @@ from apps.attempts.grading import (
     requires_manual_grading,
     selected_option_ids,
 )
+from apps.attempts.client_info import describe_user_agent
 from apps.attempts.models import ExamAttempt, StudentAnswer
 from apps.attempts.services import _grade_attempt, attempt_timing, integrity_summary
 from apps.exams.models import Exam, Question
@@ -36,6 +37,18 @@ from .serializers import (
     TeacherResultFeedbackSerializer,
     TeacherResultSerializer,
 )
+
+
+def _teacher_access_info(attempt: ExamAttempt) -> dict | None:
+    """Return only the explicitly collected start-time connection snapshot to teacher reporting."""
+    if not attempt.client_ip_address and not attempt.client_user_agent:
+        return None
+    return {
+        "ip_address": attempt.client_ip_address,
+        "user_agent": attempt.client_user_agent,
+        "captured_at": attempt.started_at,
+        **describe_user_agent(attempt.client_user_agent),
+    }
 
 
 class TeacherResultsAccessMixin:
@@ -246,7 +259,7 @@ class TeacherAttemptDetailView(TeacherResultsAccessMixin, APIView):
             .select_related("question")
             # The sheet shows a mark per question, which means the answer key has to be at hand; without
             # this prefetch every row would re-query its options.
-            .prefetch_related("selected_options", "question__options")
+            .prefetch_related("selected_options", "question__options", "attachments")
             .order_by("question__order")
         )
         result = getattr(attempt, "result", None)
@@ -280,6 +293,7 @@ class TeacherAttemptDetailView(TeacherResultsAccessMixin, APIView):
                 # Both halves travel together on purpose: a count without its rule invites a verdict the
                 # settings never authorised.
                 "integrity": integrity_summary(attempt),
+                "access_info": _teacher_access_info(attempt),
                 "session_signals": TeacherAttemptEventSerializer(attempt.events.all()[:40], many=True).data,
             }
         )
@@ -370,7 +384,7 @@ def _grading_board(exam: Exam, attempts) -> dict:  # type: ignore[type-arg]
     answers = (
         StudentAnswer.objects.filter(attempt__in=attempts, question__in=questions)
         .select_related("attempt", "question")
-        .prefetch_related("selected_options", "question__options")
+        .prefetch_related("selected_options", "question__options", "attachments")
     )
     marks: dict[tuple[str, str], AnswerMark] = {}
     for answer in answers:
@@ -490,7 +504,7 @@ class TeacherExamQuestionGradingView(TeacherResultsAccessMixin, APIView):
             str(answer.attempt_id): answer
             for answer in StudentAnswer.objects.filter(
                 attempt__in=list(attempts.values()), question=question
-            ).select_related("attempt", "question").prefetch_related("selected_options", "question__options")
+            ).select_related("attempt", "question").prefetch_related("selected_options", "question__options", "attachments")
         }
         entry = ManualGradeSerializer
 
@@ -581,7 +595,7 @@ def _question_rows(exam: Exam, question: Question, attempts) -> list[dict]:  # t
         str(answer.attempt_id): answer
         for answer in StudentAnswer.objects.filter(attempt__in=attempts, question=question)
         .select_related("attempt", "question")
-        .prefetch_related("selected_options", "question__options")
+        .prefetch_related("selected_options", "question__options", "attachments")
     }
     rows = []
     for attempt in attempts:
@@ -744,7 +758,7 @@ class TeacherExamExportView(TeacherResultsAccessMixin, APIView):
         ])
         marks_by_attempt: dict[str, dict[str, str]] = {}
         for answer in StudentAnswer.objects.filter(attempt__in=attempts, question__exam=exam).prefetch_related(
-            "question__options", "selected_options"
+            "question__options", "selected_options", "attachments"
         ):
             mark = grade_answer(answer.question, answer)
             marks_by_attempt.setdefault(str(answer.attempt_id), {})[str(answer.question_id)] = f"{mark.awarded:.2f}"
@@ -800,7 +814,7 @@ class TeacherExamAutoMarksView(TeacherResultsAccessMixin, APIView):
         questions = list(Question.objects.filter(exam=exam).prefetch_related("options"))
         answers = {
             (str(answer.attempt_id), str(answer.question_id)): answer
-            for answer in StudentAnswer.objects.filter(attempt__in=attempts, question__in=questions)
+            for answer in StudentAnswer.objects.filter(attempt__in=attempts, question__in=questions).prefetch_related("attachments", "selected_options")
         }
         touched: set[str] = set()
         confirmed = 0

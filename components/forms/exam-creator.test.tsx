@@ -155,27 +155,27 @@ describe("integrity monitoring", () => {
     const fieldset = screen.getByText("مراقبت از تقلب").closest("fieldset")!;
     expect((within(fieldset).getByRole("radio", { name: /خاموش/ }) as HTMLInputElement).checked).toBe(true);
     const switches = within(fieldset).getAllByRole("switch");
-    expect(switches).toHaveLength(3);
+    expect(switches).toHaveLength(5);
     expect(switches.every((item) => (item as HTMLButtonElement).disabled)).toBe(true);
-    expect(within(fieldset).getByText(/پیش‌فرض خاموش است/)).toBeTruthy();
+    expect(within(fieldset).getByText(/خاموش‌بودن، حالت پیش‌فرض هر آزمون است/)).toBeTruthy();
   });
 
   it("hands the rules to the teacher when enforcement is chosen", () => {
     openSettings();
     const fieldset = screen.getByText("مراقبت از تقلب").closest("fieldset")!;
-    fireEvent.click(within(fieldset).getByRole("radio", { name: /ثبت و محدودیت/ }));
+    fireEvent.click(within(fieldset).getByRole("radio", { name: /هشدار و تشدید پیامد/ }));
 
-    const clipboard = within(fieldset).getByRole("switch", { name: /بستن کپی و چسباندن/ });
+    const clipboard = within(fieldset).getByRole("switch", { name: /ثبت کپی\/بریدن و بستن چسباندن/ });
     expect((clipboard as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(clipboard);
     expect(clipboard.getAttribute("aria-checked")).toBe("true");
-    // A limit only exists once monitoring can act on it, so the select opens with the same switch.
-    expect((within(fieldset).getByRole("combobox", { name: /سقف بیرون‌رفتن از تب/ }) as HTMLSelectElement).disabled).toBe(false);
+    // A warning budget only exists once enforcement is selected.
+    expect((within(fieldset).getByRole("spinbutton", { name: /اخطارهای پیش از توقف/ }) as HTMLInputElement).disabled).toBe(false);
   });
 
   it("says what the mechanism cannot do, in the same breath as what it can", () => {
     openSettings();
     const fieldset = screen.getByText("مراقبت از تقلب").closest("fieldset")!;
-    expect(within(fieldset).getByText(/تقلب را دشوار می‌کند، نه ناممکن/)).toBeTruthy();
+    expect(within(fieldset).getByText(/نمی‌تواند همهٔ افزونه‌های هوش مصنوعی.*تقلب را ناممکن/)).toBeTruthy();
   });
 });

@@ -9,8 +9,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * after twenty seconds and says what happened, and these tests keep that behaviour (and the caller-supplied
  * cancellation it must not swallow) honest.
  */
-const fetchMock = vi.hoisted(() => vi.fn());
-
 vi.mock("@/lib/api/config", () => ({ getApiBaseUrl: () => "/api/v1" }));
 vi.mock("@/lib/api/session-mirror", () => ({ syncSessionMirror: vi.fn() }));
 vi.mock("@/lib/api/token-storage", () => ({ tokenStorage: { get: () => null, updateAccess: vi.fn(), clear: vi.fn() } }));

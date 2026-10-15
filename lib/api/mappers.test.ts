@@ -150,15 +150,15 @@ describe("toQuestionWritePayload", () => {
 
   it("only sends case sensitivity next to a real answer key", () => {
     const withKey: Question = { id: "q1", order: 1, stem: "نام اندامک", type: "short_answer", points: 1, required: true, expectedAnswers: ["میتوکندری"], caseSensitive: true, maxLength: 80 };
-    expect(toQuestionWritePayload(withKey).configuration).toEqual({ expected_answers: ["میتوکندری"], case_sensitive: true, max_length: 80 });
+    expect(toQuestionWritePayload(withKey).configuration).toEqual({ allow_image_answer: false, allow_audio_answer: false, image_only: false, expected_answers: ["میتوکندری"], case_sensitive: true, max_length: 80 });
 
     const withoutKey: Question = { ...withKey, expectedAnswers: [], caseSensitive: true, maxLength: undefined };
-    expect(toQuestionWritePayload(withoutKey).configuration).toEqual({});
+    expect(toQuestionWritePayload(withoutKey).configuration).toEqual({ allow_image_answer: false, allow_audio_answer: false, image_only: false });
   });
 
   it("writes the essay grading note without empty noise", () => {
     const essay: Question = { id: "q1", order: 1, stem: "توضیح دهید", type: "essay", points: 4, required: true, maxLength: 1200, gradingNote: "  به استدلال نمره بدهید  " };
-    expect(toQuestionWritePayload(essay).configuration).toEqual({ max_length: 1200, grading_note: "به استدلال نمره بدهید" });
+    expect(toQuestionWritePayload(essay).configuration).toEqual({ allow_image_answer: false, allow_audio_answer: false, image_only: false, max_length: 1200, grading_note: "به استدلال نمره بدهید" });
   });
 });
 
@@ -244,6 +244,9 @@ describe("toExamWritePayload", () => {
       // the rules on would not be the teacher's to control.
       integrity_policy: "off",
       max_tab_switches: 0,
+      tab_switch_grace_seconds: 5,
+      record_access_info: false,
+      block_screenshot_shortcuts: false,
       block_copy_paste: false,
       require_fullscreen: false,
       lock_to_one_device: false,

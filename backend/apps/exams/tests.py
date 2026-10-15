@@ -867,33 +867,43 @@ class ExamIntegritySettingsApiTests(TeacherExamApiTests):
         payload = {
             "integrity_policy": "enforce",
             "max_tab_switches": 3,
+            "tab_switch_grace_seconds": 8,
             "block_copy_paste": True,
             "require_fullscreen": True,
             "lock_to_one_device": True,
+            "record_access_info": True,
+            "block_screenshot_shortcuts": True,
         }
         saved = self.client.patch(f"/api/v1/exams/{exam_id}/", {"settings": payload}, format="json")
         self.assertEqual(saved.status_code, 200, saved.data)
         settings = saved.data["settings"]
         self.assertEqual((settings["integrity_policy"], settings["max_tab_switches"]), ("enforce", 3))
+        self.assertEqual(settings["tab_switch_grace_seconds"], 8)
         self.assertTrue(settings["block_copy_paste"] and settings["require_fullscreen"] and settings["lock_to_one_device"])
+        self.assertTrue(settings["record_access_info"] and settings["block_screenshot_shortcuts"])
 
         # A duplicate copies the discipline rules with the paper, because they describe the exam.
         copy = self.client.post(f"/api/v1/exams/{exam_id}/duplicate/", format="json")
         self.assertEqual(copy.status_code, 201)
         copied = self.client.get(f"/api/v1/exams/{copy.data['id']}/").data["settings"]
         self.assertEqual(copied["integrity_policy"], "enforce", copied)
+        self.assertEqual((copied["tab_switch_grace_seconds"], copied["max_tab_switches"]), (8, 3))
+        self.assertTrue(copied["record_access_info"] and copied["block_screenshot_shortcuts"])
 
         off = self.client.patch(
             f"/api/v1/exams/{exam_id}/", {"settings": {"integrity_policy": "off", "max_tab_switches": 0}}, format="json"
         )
         self.assertEqual(off.data["settings"]["integrity_policy"], "off")
 
-    def test_an_absurd_tab_limit_and_an_unknown_policy_are_refused(self) -> None:
+    def test_an_absurd_tab_limit_or_grace_period_and_an_unknown_policy_are_refused(self) -> None:
         self.authenticate(self.teacher)
         exam_id = self.create_exam().id
         absurd = self.client.patch(f"/api/v1/exams/{exam_id}/", {"settings": {"max_tab_switches": 5000}}, format="json")
         self.assertEqual(absurd.status_code, 400)
         self.assertIn("max_tab_switches", absurd.data["detail"]["settings"])
+        excessive_grace = self.client.patch(f"/api/v1/exams/{exam_id}/", {"settings": {"tab_switch_grace_seconds": 121}}, format="json")
+        self.assertEqual(excessive_grace.status_code, 400)
+        self.assertIn("tab_switch_grace_seconds", excessive_grace.data["detail"]["settings"])
         invented = self.client.patch(f"/api/v1/exams/{exam_id}/", {"settings": {"integrity_policy": "surveil"}}, format="json")
         self.assertEqual(invented.status_code, 400)
 

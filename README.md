@@ -17,42 +17,64 @@ backend/                          Django 5 + Django REST Framework service
   docs/api-v1.md                  Implemented API request/response reference
 ```
 
-## One-command development stack
+## Standard local development (separate services)
 
-`npm run dev` is the whole app, not just the frontend. `scripts/dev-stack.mjs` prepares and starts
-everything, in order, and a single Ctrl+C stops both sides:
+The recommended workflow runs the backend and frontend as separate processes. This keeps their logs,
+restarts, and failures independent. Run the following from the repository root. Requirements: Node.js and
+Python 3.12+ on `PATH`.
 
-1. Creates `backend/.env` (with a freshly generated `DJANGO_SECRET_KEY`) and `.env.local` from the
-   shipped examples when they are missing.
-2. Creates the Python environment in `backend/.venv` and installs `backend/requirements.lock` —
-   only when the lockfile changed since the last run.
-3. Applies database migrations (`migrate`); when models moved ahead of the migration files it runs
-   `makemigrations` first, so a fresh clone never serves a stale schema.
-4. Starts Django on `http://127.0.0.1:8000` and waits for `/health/` before starting Next.js on
-   `http://localhost:3000`. If a healthy API already answers on the port it is reused untouched.
+Install the frontend dependencies once after cloning:
 
 ```bash
-npm run dev            # frontend + backend + migrations (the default)
-npm run dev:turbo      # the same stack, with Next.js on Turbopack
-npm run dev:web        # only the Next.js dev server (the old `npm run dev`)
-npm run dev:api        # only backend setup + Django
-npm run setup          # prepare env/venv/dependencies/migrations, then exit
+npm ci
 ```
 
-The only prerequisites are Node.js and Python 3.12+ on `PATH`. The script needs no extra npm
-packages and works the same on Windows, macOS and Linux.
+### 1. Start the backend — terminal 1
+
+```bash
+npm run dev:api
+```
+
+On first run this creates missing environment files, prepares `backend/.venv`, installs the locked Python
+dependencies, applies migrations, and starts Django on `http://127.0.0.1:8000`. Wait until the terminal
+reports that the API is up. With the default blank `DATABASE_URL`, Django uses local SQLite, so a separate
+database service is not required. If using PostgreSQL, start it and configure `DATABASE_URL` in
+`backend/.env` before starting the API.
+
+### 2. Start the frontend — terminal 2
+
+Open another terminal in the same repository and run:
+
+```bash
+npm run dev
+```
+
+`npm run dev` now starts **only Next.js** on `http://localhost:3000`; local API calls are proxied to the
+backend from the first terminal. Once Next.js reports ready, open `http://localhost:3000`, sign in as a
+teacher, then visit `/teacher/exams/create`.
+
+Stop each process with `Ctrl+C` in its own terminal. The same workflow works on Windows, macOS, and Linux.
+
+### Other run modes
+
+```bash
+npm run setup              # prepare env, Python venv, dependencies, and migrations; then exit
+npm run dev:api            # backend only; includes first-run setup
+npm run dev:web            # frontend only; alias for `npm run dev`
+npm run dev:turbo          # frontend only, with Turbopack
+npm run dev:stack          # optional convenience: start backend + frontend in one terminal
+npm run dev:stack:turbo    # both services with Turbopack for the frontend
+```
+
+The standard workflow is the two-terminal API-then-frontend sequence above; `dev:stack` is retained as an
+optional shortcut.
 
 ## Frontend
 
-The frontend remains the repository root. Copy the public-safe API example and start the app:
-
-```bash
-cp .env.local.example .env.local   # optional: `npm run dev` creates it for you
-npm ci
-npm run dev                        # boots Django (setup + migrate) and Next.js together
-```
-
-`NEXT_PUBLIC_API_BASE_URL=/api/v1` uses the server-only `API_PROXY_TARGET` rewrite in local development, so browser code never embeds a localhost API URL. For a deployed HTTPS API, set `NEXT_PUBLIC_API_BASE_URL` to its `/api/v1` origin and configure Django CORS for the frontend origin.
+The frontend is at the repository root. `.env.local` is created from the shipped example if it is missing.
+`NEXT_PUBLIC_API_BASE_URL=/api/v1` uses the server-only `API_PROXY_TARGET` rewrite in local development, so
+browser code never embeds a localhost API URL. For a deployed HTTPS API, set `NEXT_PUBLIC_API_BASE_URL` to
+its `/api/v1` origin and configure Django CORS for the frontend origin.
 
 The same variable does one more job: it is where `middleware.ts` asks Django whether a session is alive
 before it renders a protected page (`/student/*`, `/teacher/*`, `/admin/*`). Without it, the gate falls back
@@ -67,8 +89,8 @@ component that refetches from Django on mount (`Cache-Control: private, no-store
 screens pays for compilation *and* a round trip. Nothing is wrong with the machine.
 
 ```bash
-npm run dev:turbo           # the same dev server on Turbopack: much faster route compiles
-npm run build && npm start  # pre-compiled pages — use this when the work is browsing, not editing
+npm run dev:turbo           # faster frontend route compiles with Turbopack
+npm run build && npm start  # pre-compiled frontend; run the API separately
 ```
 
 On the backend, `manage.py runserver` already answers concurrent requests on one thread each (Django's
@@ -76,7 +98,8 @@ development server is threaded by default; `--nothreading` opts out, which is wh
 several fetches feel queued). Add `--noreload` to stop the file watcher re-importing the whole project on
 every save, and keep `DEBUG=False` out of the picture — the slow part is the reload, not the settings.
 
-Validate a production build (do not run it concurrently with `npm run dev`):
+Validate a production build after stopping the Next.js dev process (do not run the build concurrently with
+`npm run dev`):
 
 ```bash
 npm run build

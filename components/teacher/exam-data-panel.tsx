@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, FileJson, ShieldCheck, Upload } from "lucide-react";
+import { Download, FileJson, Printer, ShieldCheck, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { examsApi } from "@/lib/api/exams";
 import { resultsApi } from "@/lib/api/results";
@@ -8,6 +8,8 @@ import { apiErrorMessage } from "@/lib/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog } from "@/components/ui/dialog";
+import { createPrintableExamHtml } from "@/lib/exam/printable-paper";
 import { useToastStore } from "@/lib/state/toast-store";
 import { downloadFile, stamp } from "@/lib/utils/download";
 import { toPersianNumber } from "@/lib/utils";
@@ -34,8 +36,10 @@ function readText(file: File) {
 
 export function ExamDataPanel({ examId, examTitle, questionCount }: { examId: string; examTitle: string; questionCount: number }) {
   const toast = useToastStore((state) => state.push);
-  const [busy, setBusy] = useState<"export" | "csv" | "import" | null>(null);
+  const [busy, setBusy] = useState<"export" | "csv" | "import" | "print" | null>(null);
   const [bundle, setBundle] = useState<string | null>(null);
+  const [printOpen, setPrintOpen] = useState(false);
+  const [includeAnswerKey, setIncludeAnswerKey] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
   async function exportPaper() {
@@ -51,6 +55,42 @@ export function ExamDataPanel({ examId, examTitle, questionCount }: { examId: st
       });
     } catch (reason) {
       toast({ title: "خروجی گرفته نشد", description: apiErrorMessage(reason), variant: "error" });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Open the print window synchronously from the button click so popup blockers allow it. */
+  async function printPaper() {
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      toast({ title: "پنجرهٔ چاپ باز نشد", description: "اجازهٔ بازشدن پنجرهٔ جدید را برای این سایت فعال کنید و دوباره بزنید.", variant: "error" });
+      return;
+    }
+    setPrintOpen(false);
+    setBusy("print");
+    printWindow.document.open();
+    printWindow.document.write("<!doctype html><html lang=\"fa\" dir=\"rtl\"><meta charset=\"utf-8\"><title>آماده‌سازی برگه</title><body style=\"font:16px Tahoma,Arial,sans-serif;padding:40px;text-align:center\">در حال آماده‌سازی برگهٔ آزمون…</body></html>");
+    printWindow.document.close();
+    try {
+      const received = await examsApi.exportExam(examId);
+      if (printWindow.closed) return;
+      printWindow.document.open();
+      printWindow.document.write(createPrintableExamHtml(received, includeAnswerKey));
+      printWindow.document.close();
+      window.setTimeout(() => {
+        if (printWindow.closed) return;
+        printWindow.focus();
+        printWindow.print();
+      }, 350);
+      toast({
+        title: "برگهٔ چاپ آماده است",
+        description: includeAnswerKey ? "در پنجرهٔ چاپ، چاپگر یا «ذخیره به‌صورت PDF» را انتخاب کنید؛ کلید پاسخ در صفحهٔ جداگانه است." : "در پنجرهٔ چاپ، چاپگر یا «ذخیره به‌صورت PDF» را انتخاب کنید.",
+        variant: "success",
+      });
+    } catch (reason) {
+      if (!printWindow.closed) printWindow.close();
+      toast({ title: "برگه آماده نشد", description: apiErrorMessage(reason), variant: "error" });
     } finally {
       setBusy(null);
     }
@@ -93,6 +133,7 @@ export function ExamDataPanel({ examId, examTitle, questionCount }: { examId: st
   }
 
   return (
+    <>
     <Card>
       <CardHeader>
         <CardTitle>داده‌های این آزمون</CardTitle>
@@ -100,6 +141,9 @@ export function ExamDataPanel({ examId, examTitle, questionCount }: { examId: st
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex flex-wrap gap-2">
+          <Button size="sm" onClick={() => { setIncludeAnswerKey(false); setPrintOpen(true); }} disabled={busy !== null}>
+            <Printer className="h-4 w-4"/>{busy === "print" ? "در حال آماده‌سازی…" : "چاپ / ذخیرهٔ PDF"}
+          </Button>
           <Button variant="outline" size="sm" onClick={() => void exportPaper()} disabled={busy !== null}>
             <FileJson className="h-4 w-4"/>{busy === "export" ? "در حال آماده‌سازی…" : "دانلود فایل آزمون"}
           </Button>
@@ -139,5 +183,22 @@ export function ExamDataPanel({ examId, examTitle, questionCount }: { examId: st
         <p className="text-[11px] text-muted-foreground">«{examTitle}» روی همین سرور مانده است؛ این فایل فقط یک نسخهٔ اضافه است.</p>
       </CardContent>
     </Card>
+    <Dialog open={printOpen} onClose={() => setPrintOpen(false)} title="چاپ برگهٔ آزمون" description="نسخهٔ موردنیاز را انتخاب کنید. پنجرهٔ چاپ باز می‌شود؛ برای دریافت فایل، «ذخیره به‌صورت PDF» را بزنید." size="md">
+      <div role="radiogroup" aria-label="محتوای برگه" className="space-y-3">
+        <label className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition-colors ${!includeAnswerKey ? "border-primary bg-primary/[.05]" : "hover:bg-muted/40"}`}>
+          <input type="radio" name="exam-paper-version" checked={!includeAnswerKey} onChange={() => setIncludeAnswerKey(false)} className="mt-1 accent-primary"/>
+          <span><span className="block text-sm font-extrabold">نسخهٔ دانش‌آموز</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">سؤال‌ها و فضای پاسخ؛ بدون نمایش کلید یا پاسخ درست.</span></span>
+        </label>
+        <label className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition-colors ${includeAnswerKey ? "border-primary bg-primary/[.05]" : "hover:bg-muted/40"}`}>
+          <input type="radio" name="exam-paper-version" checked={includeAnswerKey} onChange={() => setIncludeAnswerKey(true)} className="mt-1 accent-primary"/>
+          <span><span className="block text-sm font-extrabold">نسخهٔ دبیر + کلید پاسخ</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">کلید در صفحه‌ای جدا می‌آید؛ پیش از توزیع، صفحهٔ کلید را جدا کنید.</span></span>
+        </label>
+      </div>
+      <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <Button variant="outline" onClick={() => setPrintOpen(false)}>انصراف</Button>
+        <Button onClick={() => void printPaper()} disabled={busy !== null}><Printer className="h-4 w-4"/>آماده‌سازی برگه</Button>
+      </div>
+    </Dialog>
+    </>
   );
 }

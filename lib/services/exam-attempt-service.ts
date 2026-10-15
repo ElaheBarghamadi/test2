@@ -1,6 +1,5 @@
 import { attemptsApi, type ApiAnswerInput, type AttemptWriteGuards } from "@/lib/api/attempts";
 import { ApiError, apiErrorMessage } from "@/lib/api/client";
-import { toStudentAttempt } from "@/lib/api/mappers";
 import type { AnswerValue, Exam, ExamAttempt, Question } from "@/lib/types/domain";
 
 export interface SaveAttemptRequest {
@@ -56,6 +55,7 @@ function toAnswerInput(question: Question, value: AnswerValue): ApiAnswerInput {
     const option = value === true ? question.optionIds?.true : value === false ? question.optionIds?.false : "";
     return { selected_option_ids: option ? [option] : [] };
   }
+  if (question.type === "matching") return { matches: value && typeof value === "object" && !Array.isArray(value) ? value : {} };
   return { text: typeof value === "string" ? value : "" };
 }
 
@@ -69,6 +69,7 @@ export interface SaveAttemptResult {
 /** What the runner may report about the browser. Every kind is an observation, never a verdict. */
 export type IntegritySignalKind =
   | "tab_hidden"
+  | "tab_hidden_timeout"
   | "tab_visible"
   | "disconnected"
   | "reconnected"
@@ -76,7 +77,8 @@ export type IntegritySignalKind =
   | "cut"
   | "paste"
   | "fullscreen_enter"
-  | "fullscreen_exit";
+  | "fullscreen_exit"
+  | "screenshot_shortcut";
 
 export const examAttemptService = {
   /**

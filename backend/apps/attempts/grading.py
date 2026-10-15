@@ -14,7 +14,7 @@ written answers and short answers with no key, and zero for a question the stude
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import TYPE_CHECKING, Any
 
 from apps.exams.models import Question
@@ -26,6 +26,7 @@ ZERO = Decimal("0.00")
 
 VERDICT_UNANSWERED = "unanswered"
 VERDICT_CORRECT = "correct"
+VERDICT_PARTIAL = "partial"
 VERDICT_INCORRECT = "incorrect"
 VERDICT_PENDING = "pending"
 VERDICT_MANUAL = "manual"
@@ -49,6 +50,12 @@ def selected_option_ids(answer: StudentAnswer | None) -> list[str]:
 def answer_has_value(question: Question, answer: StudentAnswer | None) -> bool:
     if answer is None:
         return False
+    cached_attachments = getattr(answer, "_prefetched_objects_cache", {}).get("attachments")
+    if cached_attachments is not None:
+        if cached_attachments:
+            return True
+    elif answer.attachments.exists():
+        return True
     if question.type in {
         Question.Type.MULTIPLE_CHOICE,
         Question.Type.MULTIPLE_ANSWER,
@@ -56,6 +63,9 @@ def answer_has_value(question: Question, answer: StudentAnswer | None) -> bool:
     }:
         return bool(selected_option_ids(answer))
     data: Any = getattr(answer, "answer_data", None)
+    if question.type == Question.Type.MATCHING:
+        matches = data.get("matches") if isinstance(data, dict) else None
+        return isinstance(matches, dict) and any(isinstance(value, str) and value for value in matches.values())
     text = data.get("text") if isinstance(data, dict) else None
     return isinstance(text, str) and bool(text.strip())
 
@@ -64,12 +74,15 @@ def requires_manual_grading(question: Question) -> bool:
     """Whether this question needs a human, before looking at whether the student answered it.
 
     Written answers always do; a short answer does only when the teacher never typed an expected answer,
-    because there is then nothing to match against.
+    because there is then nothing to match against. If image/audio responses are enabled, the prompt can be
+    answered in a form the automatic key cannot inspect, so this question is routed to the teacher's desk.
     """
+    configuration = question.configuration if isinstance(question.configuration, dict) else {}
+    if configuration.get("allow_image_answer") or configuration.get("allow_audio_answer"):
+        return True
     if question.type == Question.Type.WRITTEN:
         return True
     if question.type == Question.Type.SHORT_ANSWER:
-        configuration = question.configuration or {}
         return not configuration.get("expected_answers", [])
     return False
 
@@ -126,6 +139,28 @@ def grade_answer(question: Question, answer: StudentAnswer | None, *, ignore_man
             for item in configuration.get("expected_answers", [])
         }
         is_correct = comparable_answer in comparable_expected
+    elif question.type == Question.Type.MATCHING:
+        configuration = question.configuration if isinstance(question.configuration, dict) else {}
+        pairs = configuration.get("matching_pairs", [])
+        options_by_text = {option.text.strip().casefold(): str(option.id) for option in question.options.all()}
+        expected = {
+            str(pair.get("id")): options_by_text.get(str(pair.get("answer", "")).strip().casefold(), "")
+            for pair in pairs if isinstance(pair, dict) and pair.get("id")
+        }
+        expected = {prompt_id: option_id for prompt_id, option_id in expected.items() if option_id}
+        if not expected:
+            return AnswerMark(awarded=ZERO, verdict=VERDICT_INCORRECT, requires_manual=False)
+        data: Any = answer.answer_data if isinstance(answer.answer_data, dict) else {}
+        matches = data.get("matches") if isinstance(data.get("matches"), dict) else {}
+        correct_count = sum(str(matches.get(prompt_id, "")) == option_id for prompt_id, option_id in expected.items())
+        awarded = (marks * Decimal(correct_count) / Decimal(len(expected))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if correct_count == len(expected):
+            verdict = VERDICT_CORRECT
+        elif correct_count:
+            verdict = VERDICT_PARTIAL
+        else:
+            verdict = VERDICT_INCORRECT
+        return AnswerMark(awarded=awarded, verdict=verdict, requires_manual=False)
     else:
         selected = {str(option_id) for option_id in selected_option_ids(answer)}
         correct_ids = {str(option.id) for option in question.options.all() if option.is_correct}

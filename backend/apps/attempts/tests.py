@@ -4,7 +4,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from django.test import TestCase
+from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -12,6 +12,7 @@ from apps.exams.models import Exam, ExamSettings, Question, QuestionOption
 from apps.results.models import ExamResult
 from apps.users.models import StudentProfile, User
 
+from .client_info import client_ip_from_request, describe_user_agent
 from .models import AttemptEvent, ExamAttempt, StudentAnswer
 
 
@@ -98,8 +99,9 @@ class StudentExamApiTests(TestCase):
             configuration={"max_length": 500, "grading_note": "Assess concepts."},
         )
 
-    def start(self, exam: Exam, *, session: str = ""):
+    def start(self, exam: Exam, *, session: str = "", **request_meta):
         headers = {"HTTP_X_EXAM_SESSION": session} if session else {}
+        headers.update(request_meta)
         return self.client.post(f"/api/v1/student/exams/{exam.id}/start/", **headers)
 
     @staticmethod
@@ -725,6 +727,12 @@ class StudentExamConductingApiTests(StudentExamApiTests):
 class AttemptConcurrencyAndSessionApiTests(StudentExamApiTests):
     """Server-side guards: nobody overwrites a newer answer, and one attempt has one writer."""
 
+    def signal(self, attempt_id, kind: str, *, detail=None):
+        payload = {"kind": kind}
+        if detail is not None:
+            payload["detail"] = detail
+        return self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", payload, format="json")
+
     def test_revision_advances_and_a_stale_write_is_rejected(self) -> None:
         exam = self.make_exam()
         question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
@@ -850,28 +858,39 @@ class AttemptConcurrencyAndSessionApiTests(StudentExamApiTests):
         self.assertEqual(beat.data["answer_frontier"], 0)
         self.assertEqual(ExamAttempt.objects.get(pk=attempt_id).client_session, "tab-a")
 
-    def test_client_signals_are_stored_and_unknown_ones_are_refused(self) -> None:
+    def test_client_signals_are_stored_after_grace_and_unknown_ones_are_refused(self) -> None:
         exam = self.make_exam()
-        question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        exam.settings.integrity_policy = ExamSettings.IntegrityPolicy.OBSERVE
+        exam.settings.block_copy_paste = True
+        exam.settings.tab_switch_grace_seconds = 5
+        exam.settings.save()
         attempt_id = self.start(exam).data["id"]
 
-        hidden = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "tab_hidden"}, format="json")
+        hidden = self.signal(attempt_id, "tab_hidden")
         self.assertEqual(hidden.status_code, 200)
-        self.assertEqual(hidden.data["policy"], "off", "the rules ride back on the signal that changed them")
+        self.assertEqual(hidden.data["policy"], "observe", "the rules ride back on the signal that changed them")
+        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_HIDDEN).count(), 0)
+        ExamAttempt.objects.filter(pk=attempt_id).update(
+            visibility_hidden_at=timezone.now() - timedelta(seconds=6)
+        )
+        confirmed = self.signal(attempt_id, "tab_hidden_timeout")
+        self.assertTrue(confirmed.data["violation_recorded"])
         self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_HIDDEN).count(), 1)
+        self.signal(attempt_id, "tab_visible")
 
-        invented = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "guilty"}, format="json")
+        invented = self.signal(attempt_id, "guilty")
         self.assertEqual(invented.status_code, 400)
-        # Clipboard watching is the teacher's to switch on, so a paste signal is refused while the exam is
-        # unmonitored rather than being stored "just in case".
-        paste = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "paste"}, format="json")
-        self.assertEqual(paste.status_code, 400)
-        self.assertFalse(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.PASTE).exists())
+        # Clipboard watching is opt-in and is currently enabled for this attempt. The answer content is never stored.
+        paste = self.signal(attempt_id, "paste", detail={"field": "TEXTAREA", "length": 14, "text": "private answer"})
+        self.assertEqual(paste.status_code, 200)
+        paste_event = AttemptEvent.objects.get(attempt_id=attempt_id, kind=AttemptEvent.Kind.PASTE)
+        self.assertEqual(paste_event.detail, {"field": "textarea", "length": 14})
 
         self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
-        after_submit = self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": "tab_hidden"}, format="json")
+        after_submit = self.signal(attempt_id, "tab_hidden")
         self.assertEqual(after_submit.status_code, 200, "a finalized attempt records nothing more, and does not error")
-        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id).count(), 1)
+        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id).count(), 3)
 
     def test_auto_submit_is_attributed_to_the_timer(self) -> None:
         exam = self.make_exam()
@@ -1724,8 +1743,17 @@ class ExamIntegrityApiTests(StudentExamApiTests):
         settings.save()
         exam.refresh_from_db()
 
-    def signal(self, attempt_id, kind: str, **headers):
-        return self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", {"kind": kind}, format="json", **headers)
+    def signal(self, attempt_id, kind: str, *, detail=None, **headers):
+        payload = {"kind": kind}
+        if detail is not None:
+            payload["detail"] = detail
+        return self.client.post(f"/api/v1/student/attempts/{attempt_id}/signals/", payload, format="json", **headers)
+
+    @staticmethod
+    def age_pending_departure(attempt_id, seconds: int = 6) -> None:
+        ExamAttempt.objects.filter(pk=attempt_id).update(
+            visibility_hidden_at=timezone.now() - timedelta(seconds=seconds)
+        )
 
     def test_nothing_is_recorded_or_restricted_until_the_teacher_asks(self) -> None:
         exam = self.make_exam()
@@ -1738,16 +1766,22 @@ class ExamIntegrityApiTests(StudentExamApiTests):
         self.assertFalse(rules["enforced"])
         self.assertIsNone(rules["tab_switches_remaining"], "no budget, so nothing to spend")
         self.assertEqual(self.signal(attempt_id, "copy").status_code, 400)
+        self.assertEqual(self.signal(attempt_id, "tab_hidden").status_code, 400)
         self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id).count(), 0)
 
-    def test_observing_records_without_consequence(self) -> None:
+    def test_observing_records_and_warns_without_consequence(self) -> None:
         exam = self.make_exam()
         self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
         attempt_id = self.start(exam).data["id"]
-        self.monitor(exam, policy="observe", max_tab_switches=1, block_copy_paste=True)
+        self.monitor(exam, policy="observe", max_tab_switches=1, block_copy_paste=True, tab_switch_grace_seconds=5)
 
-        self.assertEqual(self.signal(attempt_id, "tab_hidden").status_code, 200)
-        self.assertEqual(self.signal(attempt_id, "tab_hidden").status_code, 200)
+        for _ in range(2):
+            self.assertEqual(self.signal(attempt_id, "tab_hidden").status_code, 200)
+            self.age_pending_departure(attempt_id)
+            confirmed = self.signal(attempt_id, "tab_hidden_timeout")
+            self.assertTrue(confirmed.data["violation_recorded"])
+            self.assertEqual(confirmed.data["status"], "in_progress")
+            self.assertEqual(self.signal(attempt_id, "tab_visible").status_code, 200)
         self.assertEqual(self.signal(attempt_id, "copy").status_code, 200, "clipboard watching is on")
 
         attempt = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data
@@ -1757,13 +1791,13 @@ class ExamIntegrityApiTests(StudentExamApiTests):
         self.assertFalse(attempt["integrity"]["block_copy_paste"], "a rule that cannot bite is not sent as if it could")
         self.assertEqual(attempt["integrity"]["tab_switches_remaining"], None)
 
-    def test_the_tab_budget_closes_the_exam_when_enforced(self) -> None:
+    def test_the_next_long_departure_after_the_warning_budget_closes_the_exam(self) -> None:
         from apps.results.models import ExamResult
 
         exam = self.make_exam()
         question = self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
         attempt_id = self.start(exam).data["id"]
-        self.monitor(exam, policy="enforce", max_tab_switches=2)
+        self.monitor(exam, policy="enforce", max_tab_switches=2, tab_switch_grace_seconds=5)
         option = str(question.options.order_by("order").first().id)
         self.client.patch(
             f"/api/v1/student/attempts/{attempt_id}/answers/{question.id}/",
@@ -1771,14 +1805,31 @@ class ExamIntegrityApiTests(StudentExamApiTests):
             format="json",
         )
 
-        first = self.signal(attempt_id, "tab_hidden")
-        self.assertEqual(first.data["tab_switches_remaining"], 1)
-        second = self.signal(attempt_id, "tab_hidden")
-        self.assertEqual(second.data["status"], "expired", "the last allowed switch is the one that closes it")
-        self.assertEqual(second.data["tab_switches_remaining"], 0)
+        for warning_number in (1, 2):
+            self.assertEqual(self.signal(attempt_id, "tab_hidden").status_code, 200)
+            self.age_pending_departure(attempt_id)
+            warning = self.signal(attempt_id, "tab_hidden_timeout")
+            self.assertTrue(warning.data["violation_recorded"])
+            self.assertFalse(warning.data.get("auto_submitted"))
+            self.assertEqual(warning.data["tab_switches"], warning_number)
+            self.assertEqual(self.signal(attempt_id, "tab_visible").status_code, 200)
 
-        self.assertTrue(
-            AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_LIMIT_REACHED).exists()
+        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_HIDDEN).count(), 2)
+        self.assertEqual(self.signal(attempt_id, "tab_hidden").status_code, 200)
+        self.age_pending_departure(attempt_id)
+        third = self.signal(attempt_id, "tab_hidden_timeout")
+        self.assertEqual(third.data["status"], "expired", "the departure after two warnings closes the exam")
+        self.assertTrue(third.data["auto_submitted"])
+        self.assertEqual(third.data["tab_switches"], 2, "the over-budget departure is not counted as a warning")
+        self.assertEqual(third.data["tab_switches_remaining"], 0)
+
+        limit_event = AttemptEvent.objects.get(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_LIMIT_REACHED)
+        self.assertEqual(limit_event.detail["warning_count_before_close"], 2)
+        self.assertEqual(limit_event.detail["warning_limit"], 2)
+        self.assertEqual(
+            AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_HIDDEN).count(),
+            2,
+            "only the two configured warnings are counted as tab departures",
         )
         # Work already saved is graded, not thrown away; only the window closes.
         result = ExamResult.objects.get(attempt_id=attempt_id)
@@ -1790,6 +1841,72 @@ class ExamIntegrityApiTests(StudentExamApiTests):
         )
         self.assertEqual(refused.status_code, 409)
         self.assertEqual(refused.data["code"], "attempt_finalized")
+
+    def test_a_short_departure_is_cleared_without_an_event_or_warning(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="enforce", max_tab_switches=1, tab_switch_grace_seconds=5)
+        attempt_id = self.start(exam).data["id"]
+
+        hidden = self.signal(attempt_id, "tab_hidden")
+        self.assertEqual(hidden.data["tab_switches"], 0, "hiding starts a provisional timer only")
+        returned = self.signal(attempt_id, "tab_visible")
+        self.assertFalse(returned.data.get("violation_recorded"))
+        self.assertEqual(returned.data["tab_switches"], 0)
+        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id, kind__in=["tab_hidden", "tab_visible"]).count(), 0)
+        attempt = ExamAttempt.objects.get(pk=attempt_id)
+        self.assertIsNone(attempt.visibility_hidden_at)
+
+    def test_timeout_signal_cannot_invent_a_long_departure(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="observe", tab_switch_grace_seconds=5)
+        attempt_id = self.start(exam).data["id"]
+        result = self.signal(attempt_id, "tab_hidden_timeout")
+        self.assertFalse(result.data.get("violation_recorded"))
+        self.assertEqual(result.data["tab_switches"], 0)
+        self.assertFalse(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_HIDDEN).exists())
+
+    def test_turning_monitoring_off_clears_a_pending_visibility_timer(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="observe", tab_switch_grace_seconds=5)
+        attempt_id = self.start(exam).data["id"]
+        self.signal(attempt_id, "tab_hidden")
+        self.monitor(exam, policy="off")
+
+        disabled = self.signal(attempt_id, "tab_hidden_timeout")
+        self.assertEqual(disabled.data["policy"], "off")
+        self.assertFalse(disabled.data.get("violation_recorded"))
+        self.assertIsNone(ExamAttempt.objects.get(pk=attempt_id).visibility_hidden_at)
+        self.monitor(exam, policy="observe")
+        later = self.signal(attempt_id, "tab_hidden_timeout")
+        self.assertFalse(later.data.get("violation_recorded"))
+        self.assertEqual(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.TAB_HIDDEN).count(), 0)
+
+    def test_screenshot_shortcut_signals_are_best_effort_and_require_the_teacher_switch(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="enforce", block_screenshot_shortcuts=True)
+        attempt_id = self.start(exam).data["id"]
+        captured = self.signal(
+            attempt_id,
+            "screenshot_shortcut",
+            detail={"shortcut": "print_screen", "browser_duration": 999, "extra": "not stored"},
+        )
+        self.assertEqual(captured.status_code, 200)
+        event = AttemptEvent.objects.get(attempt_id=attempt_id, kind=AttemptEvent.Kind.SCREENSHOT_SHORTCUT)
+        self.assertEqual(event.detail, {"shortcut": "print_screen"}, "untrusted fields are discarded")
+
+        other_exam = self.make_exam()
+        self.add_choice_question(other_exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(other_exam, policy="enforce", block_screenshot_shortcuts=False)
+        other_attempt = self.start(other_exam).data["id"]
+        refused = self.signal(other_attempt, "screenshot_shortcut", detail={"shortcut": "print_screen"})
+        self.assertEqual(refused.status_code, 400)
+        self.assertFalse(
+            AttemptEvent.objects.filter(attempt_id=other_attempt, kind=AttemptEvent.Kind.SCREENSHOT_SHORTCUT).exists()
+        )
 
     def test_a_device_lock_refuses_another_browser_but_never_a_refresh(self) -> None:
         exam = self.make_exam()
@@ -1851,8 +1968,24 @@ class ExamIntegrityApiTests(StudentExamApiTests):
             (False, False),
             "a rule the teacher cannot be penalised for is not sent to the runner as one",
         )
-        self.signal(attempt_id, "fullscreen_exit")
-        self.assertTrue(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.FULLSCREEN_EXIT).exists())
+        fullscreen = self.signal(attempt_id, "fullscreen_exit")
+        self.assertEqual(fullscreen.status_code, 400, "fullscreen is not a rule in observation mode")
+        self.assertFalse(AttemptEvent.objects.filter(attempt_id=attempt_id, kind=AttemptEvent.Kind.FULLSCREEN_EXIT).exists())
+
+    def test_fullscreen_signals_are_saved_only_when_the_enforced_rule_is_active(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="enforce", require_fullscreen=True)
+        attempt_id = self.start(exam).data["id"]
+        self.assertEqual(self.signal(attempt_id, "fullscreen_enter").status_code, 200)
+        self.assertEqual(self.signal(attempt_id, "fullscreen_exit").status_code, 200)
+        self.assertEqual(
+            AttemptEvent.objects.filter(
+                attempt_id=attempt_id,
+                kind__in=[AttemptEvent.Kind.FULLSCREEN_ENTER, AttemptEvent.Kind.FULLSCREEN_EXIT],
+            ).count(),
+            2,
+        )
 
     def test_the_teacher_reads_the_rules_next_to_the_counts(self) -> None:
         exam = self.make_exam()
@@ -1860,6 +1993,9 @@ class ExamIntegrityApiTests(StudentExamApiTests):
         self.monitor(exam, policy="enforce", max_tab_switches=5, block_copy_paste=True)
         attempt_id = self.start(exam).data["id"]
         self.signal(attempt_id, "tab_hidden")
+        self.age_pending_departure(attempt_id)
+        self.signal(attempt_id, "tab_hidden_timeout")
+        self.signal(attempt_id, "tab_visible")
         self.signal(attempt_id, "paste")
 
         self.client.force_authenticate(self.teacher)
@@ -1869,6 +2005,87 @@ class ExamIntegrityApiTests(StudentExamApiTests):
         kinds = [event["kind"] for event in board["session_signals"]]
         self.assertIn("paste", kinds)
         self.assertIn("tab_hidden", kinds)
+
+
+    def test_access_metadata_is_opt_in_and_visible_only_to_the_teacher(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="observe", record_access_info=True)
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0 Safari/537.36"
+        attempt_id = self.start(exam, HTTP_USER_AGENT=user_agent, REMOTE_ADDR="198.51.100.42").data["id"]
+        attempt = ExamAttempt.objects.get(pk=attempt_id)
+        self.assertEqual(attempt.client_ip_address, "198.51.100.42")
+        self.assertEqual(attempt.client_user_agent, user_agent)
+
+        student_detail = self.client.get(f"/api/v1/student/attempts/{attempt_id}/").data
+        self.assertNotIn("access_info", student_detail)
+        self.assertNotIn("client_ip_address", student_detail)
+
+        self.client.force_authenticate(self.teacher)
+        teacher_detail = self.client.get(f"/api/v1/results/teacher/attempts/{attempt_id}/")
+        self.assertEqual(teacher_detail.status_code, 200, teacher_detail.data)
+        access = teacher_detail.data["access_info"]
+        self.assertEqual(access["ip_address"], "198.51.100.42")
+        self.assertEqual(access["user_agent"], user_agent)
+        self.assertEqual(access["platform"], "Windows")
+        self.assertEqual(access["device_type"], "رایانه")
+        self.assertTrue(access["browser"].startswith("Chrome"))
+
+    def test_access_metadata_and_device_signature_are_scrubbed_after_the_review_window(self) -> None:
+        from apps.attempts.services import purge_expired_access_info
+
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="enforce", record_access_info=True, lock_to_one_device=True)
+        attempt_id = self.start(exam, HTTP_USER_AGENT="Chrome/120 Windows", REMOTE_ADDR="198.51.100.10").data["id"]
+        self.assertTrue(ExamAttempt.objects.get(pk=attempt_id).device_signature)
+        self.client.post(f"/api/v1/student/attempts/{attempt_id}/submit/")
+        old_time = timezone.now() - timedelta(days=31)
+        ExamAttempt.objects.filter(pk=attempt_id).update(submitted_at=old_time)
+
+        purged = purge_expired_access_info(now=timezone.now(), retention_days=30)
+        self.assertEqual(purged, 1)
+        attempt = ExamAttempt.objects.get(pk=attempt_id)
+        self.assertIsNone(attempt.client_ip_address)
+        self.assertEqual(attempt.client_user_agent, "")
+        self.assertEqual(attempt.device_signature, "")
+        self.assertEqual(purge_expired_access_info(now=timezone.now(), retention_days=30), 0, "the purge is idempotent")
+
+    def test_access_metadata_is_not_saved_when_the_teacher_did_not_opt_in(self) -> None:
+        exam = self.make_exam()
+        self.add_choice_question(exam, Question.Type.MULTIPLE_CHOICE)
+        self.monitor(exam, policy="observe", record_access_info=False)
+        attempt_id = self.start(exam, HTTP_USER_AGENT="Firefox/123", REMOTE_ADDR="203.0.113.14").data["id"]
+        attempt = ExamAttempt.objects.get(pk=attempt_id)
+        self.assertIsNone(attempt.client_ip_address)
+        self.assertEqual(attempt.client_user_agent, "")
+        self.assertEqual(attempt.device_signature, "", "a device signature is stored only for an enforced opt-in lock")
+
+        # Turning the option on mid-attempt does not retroactively collect a snapshot on a refresh.
+        self.monitor(exam, policy="observe", record_access_info=True)
+        self.start(exam, HTTP_USER_AGENT="Chrome/124 Windows", REMOTE_ADDR="203.0.113.99")
+        attempt.refresh_from_db()
+        self.assertIsNone(attempt.client_ip_address)
+        self.assertEqual(attempt.client_user_agent, "")
+
+
+class ClientMetadataTests(TestCase):
+    def test_forwarded_ip_is_ignored_unless_the_immediate_peer_is_trusted(self) -> None:
+        factory = RequestFactory()
+        untrusted_peer = factory.get(
+            "/", HTTP_X_FORWARDED_FOR="203.0.113.77", REMOTE_ADDR="198.51.100.4"
+        )
+        trusted_peer = factory.get(
+            "/", HTTP_X_FORWARDED_FOR="203.0.113.77, 10.0.0.2", REMOTE_ADDR="10.0.0.3"
+        )
+        with override_settings(TRUSTED_PROXY_CIDRS=["10.0.0.0/8"]):
+            self.assertEqual(client_ip_from_request(untrusted_peer), "198.51.100.4")
+            self.assertEqual(client_ip_from_request(trusted_peer), "203.0.113.77")
+
+    def test_user_agent_summary_is_coarse_and_does_not_claim_a_hardware_identity(self) -> None:
+        summary = describe_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0 Safari/537.36")
+        self.assertEqual(summary, {"browser": "Chrome 120.0", "platform": "Windows", "device_type": "رایانه"})
+        self.assertEqual(describe_user_agent("")["device_type"], "نامشخص")
 
 
 class AutoMarksAndExportApiTests(CohortGradingApiTests):

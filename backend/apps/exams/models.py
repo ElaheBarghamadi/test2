@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import uuid
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -8,7 +9,16 @@ from django.db import models
 from django.db.models.functions import Lower
 
 from apps.core.models import TimeStampedUUIDModel
+from apps.core.private_storage import PrivateMediaStorage
 from apps.users.models import User
+
+
+_PRIVATE_MEDIA_STORAGE = PrivateMediaStorage()
+
+
+def _question_media_path(instance, _filename: str) -> str:  # type: ignore[no-untyped-def]
+    # Ignore the untrusted browser filename and never create a public/static URL for this object.
+    return f"question-media/{instance.question_id}/{uuid.uuid4().hex}"
 
 
 class Exam(TimeStampedUUIDModel):
@@ -19,11 +29,20 @@ class Exam(TimeStampedUUIDModel):
         COMPLETED = "completed", "Completed"
         ARCHIVED = "archived", "Archived"
 
+    class AudienceMode(models.TextChoices):
+        PROFILE = "profile", "Grade and class"
+        SELECTED = "selected", "Selected groups and students"
+
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     subject = models.CharField(max_length=150, db_index=True)
     grade = models.CharField(max_length=100, blank=True)
     class_name = models.CharField(max_length=100, blank=True)
+    # Existing exams remain on profile targeting after migration. New UI-created exams can require an
+    # explicit roster; selected groups expand to their current members when a student starts the exam.
+    audience_mode = models.CharField(max_length=12, choices=AudienceMode.choices, default=AudienceMode.PROFILE, db_index=True)
+    student_groups = models.ManyToManyField("users.StudentGroup", blank=True, related_name="targeted_exams")
+    students = models.ManyToManyField(settings.AUTH_USER_MODEL, blank=True, related_name="eligible_exams")
     instructions = models.TextField(blank=True)
     teacher = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_exams")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT, db_index=True)
@@ -96,11 +115,10 @@ class ExamSettings(TimeStampedUUIDModel):
     class IntegrityPolicy(models.TextChoices):
         """Whether the exam watches the browser at all, and whether watching has any consequence.
 
-        The teacher owns this switch, in three positions rather than two. `off` records nothing and restricts
-        nothing. `observe` writes what the browser reports next to the answers, so a human can judge it, and
-        changes nothing about the exam. `enforce` additionally applies the rules below: a copy ban, a
-        fullscreen requirement, a one-device lock and a tab-switch limit. Nothing in this class penalises a
-        student on its own while the policy is not `enforce`.
+        The teacher owns this switch, in three positions rather than two. `off` records no browser-monitoring
+        signals and restricts nothing. `observe` records only browser observations and warns the student, so a
+        human can judge them, and changes nothing about the exam. `enforce` additionally applies the rules
+        below. An observation is never a verdict on its own.
         """
 
         OFF = "off", "Off"
@@ -131,13 +149,21 @@ class ExamSettings(TimeStampedUUIDModel):
     # Anti-cheating, off by default: an exam that blocks the clipboard or locks a device is a decision about
     # real students on real machines, and it is the teacher's to make, not the platform's.
     integrity_policy = models.CharField(max_length=12, choices=IntegrityPolicy.choices, default=IntegrityPolicy.OFF)
-    # Counted from server time, over `tab_hidden` events; 0 means "no limit", so observing never submits.
+    # Number of confirmed tab-exit warnings allowed before the *next* confirmed exit closes the attempt;
+    # 0 disables automatic closure. The count is based on events whose duration was verified server-side.
     max_tab_switches = models.PositiveSmallIntegerField(default=0)
+    # A return within this many seconds is not recorded as a tab-exit warning. 5 seconds avoids charging
+    # short browser/OS transitions; 0 means every observed departure is immediately counted.
+    tab_switch_grace_seconds = models.PositiveSmallIntegerField(default=5)
     block_copy_paste = models.BooleanField(default=False)
     require_fullscreen = models.BooleanField(default=False)
-    # The lock is on the *device family* (the browser's own fingerprint), so a refresh or a new tab in the
-    # same browser keeps working and a second machine does not get to answer.
+    # This is a browser User-Agent signature, not a hardware identifier: a refresh in the same browser keeps
+    # working and a different browser family is refused. It cannot prove which physical device is in use.
     lock_to_one_device = models.BooleanField(default=False)
+    # IP/User-Agent are personal connection metadata. Capture is opt-in and only active when monitoring is on.
+    record_access_info = models.BooleanField(default=False)
+    # Best-effort page shortcuts only; a normal website cannot block OS-level captures or extensions.
+    block_screenshot_shortcuts = models.BooleanField(default=False)
 
     @property
     def result_detail_level(self) -> str:
@@ -171,6 +197,9 @@ class ExamSettings(TimeStampedUUIDModel):
             "require_fullscreen": bool(enforced and self.require_fullscreen),
             "lock_to_one_device": bool(enforced and self.lock_to_one_device),
             "max_tab_switches": int(self.max_tab_switches) if enforced else 0,
+            "tab_switch_grace_seconds": int(self.tab_switch_grace_seconds) if self.integrity_records else 0,
+            "record_access_info": bool(self.integrity_records and self.record_access_info),
+            "block_screenshot_shortcuts": bool(enforced and self.block_screenshot_shortcuts),
         }
 
     class Meta:
@@ -186,7 +215,9 @@ class ExamSettings(TimeStampedUUIDModel):
         if self.passing_percentage < 0 or self.passing_percentage > 100:
             errors["passing_percentage"] = "Passing percentage must be between 0 and 100."
         if self.max_tab_switches > 100:
-            errors["max_tab_switches"] = "A tab-switch limit above 100 does not describe an exam."
+            errors["max_tab_switches"] = "A warning limit above 100 does not describe an exam."
+        if self.tab_switch_grace_seconds > 120:
+            errors["tab_switch_grace_seconds"] = "The tab-switch grace period cannot exceed 120 seconds."
         # The sub-rules stay configurable while the policy is off, so a teacher who disables monitoring for
         # one week can turn it back on and find their settings where they left them. They are simply inert.
         if errors:
@@ -252,6 +283,7 @@ class Question(TimeStampedUUIDModel):
     class Type(models.TextChoices):
         MULTIPLE_CHOICE = "multiple_choice", "Multiple choice"
         MULTIPLE_ANSWER = "multiple_answer", "Multiple answer"
+        MATCHING = "matching", "Matching"
         TRUE_FALSE = "true_false", "True / False"
         SHORT_ANSWER = "short_answer", "Short answer"
         WRITTEN = "written", "Written answer"
@@ -345,6 +377,12 @@ class Question(TimeStampedUUIDModel):
 
     def option_validation_errors(self) -> list[str]:
         """Validate persisted options; call this when preparing an exam for publication."""
+        if self.type == self.Type.MATCHING:
+            from .services import question_definition_errors
+
+            option_data = list(self.options.order_by("order").values("text", "is_correct", "order"))
+            errors = question_definition_errors(self.type, option_data, self.configuration)
+            return [message for messages in errors.values() for message in messages]
         options = self.options.all()
         count = options.count()
         correct_count = options.filter(is_correct=True).count()
@@ -386,10 +424,36 @@ class QuestionOption(TimeStampedUUIDModel):
         return f"{self.question} · option {self.order}"
 
     def clean(self) -> None:
-        if self.question.type not in {Question.Type.MULTIPLE_CHOICE, Question.Type.MULTIPLE_ANSWER, Question.Type.TRUE_FALSE}:
+        if self.question.type not in {Question.Type.MULTIPLE_CHOICE, Question.Type.MULTIPLE_ANSWER, Question.Type.TRUE_FALSE, Question.Type.MATCHING}:
             raise ValidationError({"question": "Only choice and true/false questions may have options."})
         if self.order < 1:
             raise ValidationError({"order": "Option order must start at 1."})
+
+
+class QuestionMedia(TimeStampedUUIDModel):
+    """Private teacher-uploaded prompt media; the API serves it only after an ownership/attempt check."""
+
+    class Kind(models.TextChoices):
+        IMAGE = "image", "Image"
+        AUDIO = "audio", "Audio"
+
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name="media")
+    kind = models.CharField(max_length=8, choices=Kind.choices, db_index=True)
+    file = models.FileField(upload_to=_question_media_path, storage=_PRIVATE_MEDIA_STORAGE, max_length=255)
+    original_name = models.CharField(max_length=180)
+    content_type = models.CharField(max_length=80)
+    size_bytes = models.PositiveIntegerField()
+    sha256 = models.CharField(max_length=64)
+    alt_text = models.CharField(max_length=180, blank=True)
+    order = models.PositiveSmallIntegerField(default=1)
+
+    class Meta:
+        ordering = ("order", "created_at")
+        indexes = [models.Index(fields=("question", "kind", "order"))]
+        constraints = [models.CheckConstraint(condition=models.Q(size_bytes__gt=0), name="question_media_size_positive")]
+
+    def __str__(self) -> str:
+        return f"{self.kind} · {self.question_id}"
 
 
 class QuestionTag(TimeStampedUUIDModel):

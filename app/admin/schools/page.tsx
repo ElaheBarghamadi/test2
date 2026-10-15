@@ -23,7 +23,7 @@ export default function AdminSchoolsPage() {
   const principal = viewerRole === "school_admin";
   const [schools, setSchools] = useState<ApiSchoolDto[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null); const [notice, setNotice] = useState<string | null>(null); const [dialog, setDialog] = useState<"create" | ApiSchoolDto | null>(null); const [form, setForm] = useState(initial); const [saving, setSaving] = useState(false);
   const load = async () => { try { setError(null); setSchools(await adminApi.schools()); } catch (reason) { setError(apiErrorMessage(reason, "دریافت فهرست مدارس انجام نشد.")); } finally { setLoading(false); } };
-  useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { void load(); }, []);
   const open = (value: "create" | ApiSchoolDto) => { setNotice(null); setForm(value === "create" ? initial : { name: value.name, city: value.city }); setDialog(value); };
   const submit = async (event: React.FormEvent) => { event.preventDefault(); if (!form.name.trim() || !form.city.trim()) return; setSaving(true); try { if (dialog === "create") await adminApi.createSchool({ name: form.name.trim(), city: form.city.trim() }); else if (dialog) await adminApi.updateSchool(dialog.id, { name: form.name.trim(), city: form.city.trim() }); setDialog(null); setLoading(true); await load(); } catch (reason) { setError(apiErrorMessage(reason, "ذخیره مدرسه انجام نشد.")); } finally { setSaving(false); } };
   const toggle = async (school: ApiSchoolDto) => { try { await adminApi.updateSchool(school.id, { is_active: !school.is_active }); await load(); } catch (reason) { setError(apiErrorMessage(reason, "تغییر وضعیت مدرسه انجام نشد.")); } };

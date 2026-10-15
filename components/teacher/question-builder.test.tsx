@@ -121,6 +121,21 @@ describe("TeacherQuestionBuilder options", () => {
     expect(isDisabled(screen.getByRole("button", { name: /انتقال گزینه ۱ به بالا/ }))).toBe(true);
     expect(isDisabled(screen.getByRole("button", { name: /انتقال گزینه ۲ به پایین/ }))).toBe(true);
   });
+
+  it("previews pasted questions before adding them to the exam", () => {
+    let emittedQuestions: Question[] = [];
+    render(<Harness initial={[singleChoice()]} onEmit={(next) => { emittedQuestions = next; }}/>);
+    fireEvent.click(screen.getByRole("button", { name: /ورود از متن/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "متن سؤال‌ها" }), { target: { value: "سؤال: رنگ آسمان چیست؟\nالف) آبی\nب) سبز\nپاسخ: الف\nنمره: ۲" } });
+    fireEvent.click(screen.getByRole("button", { name: /بررسی و پیش‌نمایش/ }));
+
+    expect(screen.getByRole("status").textContent).toContain("۱ سؤال شناسایی شد");
+    expect(screen.getByText("رنگ آسمان چیست؟")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /افزودن ۱ سؤال به آزمون/ }));
+
+    expect(emittedQuestions).toHaveLength(2);
+    expect(emittedQuestions[1]).toMatchObject({ type: "single_choice", stem: "رنگ آسمان چیست؟", points: 2 });
+  });
 });
 
 describe("questionIssues", () => {
@@ -131,8 +146,13 @@ describe("questionIssues", () => {
   });
 
   it("requires a stem and a positive mark", () => {
-    expect(questionIssues(singleChoice({ stem: "   " }))).toContain("متن سؤال را وارد کنید.");
+    expect(questionIssues(singleChoice({ stem: "   " }))).toContain("متن سؤال را وارد کنید یا یک تصویر به‌عنوان صورت کامل سؤال ثبت کنید.");
     expect(questionIssues(singleChoice({ points: 0 }))).toContain("نمرهٔ سؤال باید بزرگ‌تر از صفر باشد.");
+  });
+
+  it("flags a pasted question that exceeds the option limit", () => {
+    const options = Array.from({ length: 11 }, (_, index) => option(`o${index + 1}`, `گزینه ${index + 1}`, index === 0));
+    expect(questionIssues(singleChoice({ options, correctOptionId: "o1" }))).toContain("حداکثر ۱۰ گزینه مجاز است.");
   });
 
   it("requires at least one accepted answer to be filled for short answers", () => {
@@ -142,7 +162,7 @@ describe("questionIssues", () => {
 
   it("only asks for a stem on a blank true/false question", () => {
     // The two fixed options are always valid, so no option rule should fire.
-    expect(questionIssues(blankQuestion("true_false", 1))).toEqual(["متن سؤال را وارد کنید."]);
+    expect(questionIssues(blankQuestion("true_false", 1))).toEqual(["متن سؤال را وارد کنید یا یک تصویر به‌عنوان صورت کامل سؤال ثبت کنید."]);
     const filled = { ...blankQuestion("true_false", 1), stem: "سؤال درست است؟" };
     expect(questionIssues(filled)).toEqual([]);
   });

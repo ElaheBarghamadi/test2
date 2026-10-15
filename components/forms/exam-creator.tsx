@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, ChevronLeft, Clock3, Eye, FileText, ListChecks, Save, Settings2, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, Clock3, Eye, FileText, Info, ListChecks, Save, Settings2, ShieldAlert, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -88,6 +88,8 @@ export function ExamCreator({ examId }: { examId?: string }) {
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const existing = examId ? exams.find((exam) => exam.id === examId) : undefined;
   useEffect(() => { if (examId) void loadExam(examId); }, [examId, loadExam]);
+  // Hydrate only when the selected exam identity changes; later store refreshes must not overwrite an unsaved draft.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (existing) setDraft(asDraft(existing)); }, [existing?.id]);
   useEffect(() => {
     // Compute this after hydration: a server-rendered clock and the browser clock may differ by a timezone
@@ -459,15 +461,20 @@ function ReviewPublish({ draft, totalMarks, validation }: { draft: ExamDraft; to
  */
 function IntegrityChoice({ settings, onChange }: { settings: ExamSettings; onChange: (patch: Partial<ExamSettings>) => void }) {
   const policy = settings.integrityPolicy ?? "off";
+  const monitoring = policy !== "off";
   const enforced = policy === "enforce";
-  return <fieldset className="mt-4">
-    <legend className="text-sm font-black">مراقبت از تقلب</legend>
-    <p className="mt-1 text-[11px] leading-5 text-muted-foreground">پیش‌فرض خاموش است. انتخاب با شماست که مرورگر دانش‌آموز پایش شود، محدود شود، یا هیچ‌کدام.</p>
+  return <fieldset className="mt-5 overflow-hidden rounded-3xl border border-amber-500/20 bg-gradient-to-br from-amber-500/[.035] via-card to-card p-4 shadow-sm shadow-amber-950/[.02] dark:border-amber-400/20 dark:from-amber-400/[.04]">
+    <legend className="px-1">
+      <span className="inline-flex items-center gap-2 rounded-xl bg-amber-500/10 px-3 py-1.5 text-sm font-black text-amber-950 dark:text-amber-200">
+        <ShieldAlert aria-hidden="true" className="h-4 w-4"/>مراقبت از تقلب
+      </span>
+    </legend>
+    <p className="mt-1 max-w-3xl text-[11px] leading-5 text-muted-foreground">رفتار مرورگر و پیامدها را خودتان انتخاب کنید. خاموش‌بودن، حالت پیش‌فرض هر آزمون است.</p>
     <div className="mt-3 grid gap-2.5 sm:grid-cols-3">
       {INTEGRITY_POLICY_OPTIONS.map((option) => {
         const active = policy === option.value;
-        return <label key={option.value} className={cn("flex cursor-pointer gap-3 rounded-2xl border p-3 transition-colors", active ? "border-primary bg-primary/[.06]" : "hover:bg-muted/60")}>
-          <input type="radio" name="integrity-policy" className="mt-1 h-4 w-4 shrink-0 accent-[hsl(var(--primary))]" checked={active} onChange={() => onChange({ integrityPolicy: option.value })}/>
+        return <label key={option.value} className={cn("flex cursor-pointer gap-3 rounded-2xl border p-3 transition-all duration-200", active ? "border-primary/50 bg-primary/[.07] shadow-sm ring-1 ring-primary/10" : "border-border/70 bg-background/55 hover:-translate-y-px hover:border-primary/30 hover:bg-background hover:shadow-sm")}>
+          <input type="radio" name="integrity-policy" className="mt-1 h-4 w-4 shrink-0 accent-[hsl(var(--primary))] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/20" checked={active} onChange={() => onChange({ integrityPolicy: option.value })}/>
           <span className="min-w-0">
             <span className="block text-xs font-black">{option.title}</span>
             <span className="mt-0.5 block text-[11px] leading-5 text-muted-foreground">{option.description}</span>
@@ -475,19 +482,28 @@ function IntegrityChoice({ settings, onChange }: { settings: ExamSettings; onCha
         </label>;
       })}
     </div>
-    <div className={cn("mt-3 space-y-1 rounded-2xl border p-3 transition-opacity", policy === "off" ? "opacity-45" : "border-primary/25 bg-primary/[.03]")}>
-      <SettingSwitch label="بستن کپی و چسباندن" description="دانش‌آموز نمی‌تواند متنی به پاسخ بچسباند یا از متن آزمون کپی کند؛ هر دو تلاش ثبت می‌شود." checked={settings.integrityBlockCopyPaste === true} onChange={(checked) => onChange({ integrityBlockCopyPaste: checked })} disabled={!enforced}/>
-      <SettingSwitch label="اجبار به تمام‌صفحه" description="بیرون‌رفتن از تمام‌صفحه، صفحهٔ آزمون را می‌پوشاند تا دانش‌آموز برگردد." checked={settings.integrityRequireFullscreen === true} onChange={(checked) => onChange({ integrityRequireFullscreen: checked })} disabled={!enforced}/>
-      <SettingSwitch label="قفل روی یک دستگاه" description="ادامهٔ آزمون از رایانه یا مرورگر دیگر باز نمی‌شود؛ برگهٔ تازه در همان مرورگر آزاد است." checked={settings.integrityLockToOneDevice === true} onChange={(checked) => onChange({ integrityLockToOneDevice: checked })} disabled={!enforced}/>
-      <label className="mt-2 flex flex-wrap items-center gap-2 text-xs font-bold text-muted-foreground">سقف بیرون‌رفتن از تب
-        <select value={String(settings.integrityTabLimit ?? 0)} disabled={!enforced} onChange={(event) => onChange({ integrityTabLimit: Number(event.target.value) })} className="h-10 min-w-40 rounded-xl border bg-background px-3 text-sm font-bold">
-          <option value={0}>بدون سقف</option>
-          {[1, 2, 3, 5, 8].map((count) => <option key={count} value={count}>{toPersianNumber(count)} بار</option>)}
-        </select>
-        <span className="text-[11px] font-normal">پس از پرشدن سقف، آزمون بسته و پاسخ‌های ذخیره‌شده تصحیح می‌شوند.</span>
+    <div className={cn("mt-3 space-y-2 rounded-2xl border p-3.5 transition-all duration-200", !monitoring ? "border-border/70 bg-muted/35 opacity-55" : "border-primary/25 bg-primary/[.035] shadow-inner shadow-primary/[.03]")}>
+      <label className="flex flex-wrap items-center gap-2 text-xs font-bold text-muted-foreground">
+        مهلت بازگشت بدون اخطار
+        <input aria-label="مهلت بازگشت بدون اخطار" type="number" min={0} max={120} step={1} value={settings.integrityTabGraceSeconds ?? 5} disabled={!monitoring} onChange={(event) => onChange({ integrityTabGraceSeconds: Math.min(120, Math.max(0, Number(event.target.value) || 0)) })} className="h-10 w-24 rounded-xl border bg-background px-3 text-sm font-bold shadow-sm focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/15"/>
+        <span>ثانیه</span>
+        <span className="w-full text-[11px] font-normal">اگر دانش‌آموز پیش از پایان این مهلت برگردد، خروج از صفحه نه اخطار می‌شود و نه در گزارش تخلف ثبت می‌شود. بازهٔ مجاز: ۰ تا ۱۲۰ ثانیه.</span>
+      </label>
+      <SettingSwitch label="ثبت کپی/بریدن و بستن چسباندن" description="رخدادهای کپی، بریدن و چسباندن ثبت می‌شوند؛ چسباندن در صفحه مسدود می‌شود، اما رویداد ثبت‌شده مدرک تقلب نیست." checked={settings.integrityBlockCopyPaste === true} onChange={(checked) => onChange({ integrityBlockCopyPaste: checked })} disabled={!enforced}/>
+      <SettingSwitch label="اجبار به تمام‌صفحه" description="با خروج از تمام‌صفحه، صفحهٔ آزمون پوشانده می‌شود تا دانش‌آموز برگردد؛ این قفل سیستم‌عامل نیست." checked={settings.integrityRequireFullscreen === true} onChange={(checked) => onChange({ integrityRequireFullscreen: checked })} disabled={!enforced}/>
+      <SettingSwitch label="قفل ادامه به مرورگر آغازکننده" description="مرورگر دیگری ممکن است رد شود؛ این بررسی بر اساس User-Agent است، شناسهٔ سخت‌افزار یا تشخیص قطعی دستگاه نیست." checked={settings.integrityLockToOneDevice === true} onChange={(checked) => onChange({ integrityLockToOneDevice: checked })} disabled={!enforced}/>
+      <SettingSwitch label="تلاش برای مسدودسازی میان‌برهای چاپ/تصویر" description="اگر کلیدهای شناخته‌شدهٔ Print Screen، چاپ یا ذخیره به صفحه برسند، مرورگر تلاش می‌کند کنش پیش‌فرض را متوقف کند؛ گرفتن تصویر توسط سیستم‌عامل یا افزونه قابل جلوگیری مطمئن نیست." checked={settings.integrityBlockScreenshotShortcuts === true} onChange={(checked) => onChange({ integrityBlockScreenshotShortcuts: checked })} disabled={!enforced}/>
+      <SettingSwitch label="ثبت IP، مرورگر و نوع دستگاه" description="IP شبکه و User-Agent برای گزارش معلم ذخیره می‌شوند. IP ممکن است آدرس پراکسی، شبکهٔ مشترک یا VPN باشد؛ مشخصات مرورگر/دستگاه تقریبی و قابل جعل است." checked={settings.integrityRecordAccessInfo === true} onChange={(checked) => onChange({ integrityRecordAccessInfo: checked })} disabled={!monitoring}/>
+      <label className="mt-2 flex flex-wrap items-center gap-2 text-xs font-bold text-muted-foreground">
+        اخطارهای پیش از توقف
+        <input aria-label="اخطارهای پیش از توقف" type="number" min={0} max={100} step={1} value={settings.integrityTabLimit ?? 0} disabled={!enforced} onChange={(event) => onChange({ integrityTabLimit: Math.min(100, Math.max(0, Number(event.target.value) || 0)) })} className="h-10 w-24 rounded-xl border bg-background px-3 text-sm font-bold shadow-sm focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/15"/>
+        <span className="w-full text-[11px] font-normal">۰ = توقف خودکار خاموش. برای نمونه، ۳ یعنی سه اخطار؛ خروج طولانیِ چهارم آزمون را متوقف می‌کند.</span>
       </label>
     </div>
-    <p className="mt-2 text-[11px] leading-5 text-muted-foreground">این ابزار تقلب را دشوار می‌کند، نه ناممکن؛ متن تایپ‌شده قابل تشخیص نیست و یک دانش‌آموز مصمم می‌تواند دور آن بزند. آنچه می‌بینید ثبت رویدادهاست، نه حکم.</p>
+    <p role="note" className="mt-3 flex items-start gap-2.5 rounded-2xl border border-amber-500/20 bg-amber-500/[.045] p-3 text-[11px] leading-5 text-amber-950/80 dark:text-amber-200/80">
+      <Info aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300"/>
+      <span>وب‌سایت معمولی نمی‌تواند همهٔ افزونه‌های هوش مصنوعی را شناسایی یا خاموش کند، یا از اسکرین‌شات سیستم‌عامل/دستگاه دیگر مطمئن جلوگیری کند. این ابزارها ریسک را کم می‌کنند، نه اینکه تقلب را ناممکن یا یک رویداد را اثبات کنند. برای آزمون پرخطر، مرورگر امن مثل Safe Exam Browser و بازبینی انسانی مناسب‌تر است.</span>
+    </p>
   </fieldset>;
 }
 
@@ -570,7 +586,17 @@ function persianWindowLabel(startAt: string, endAt: string) {
 }
 function Field({ label, required, error, children }: { label: string; required?: boolean; error?: string; children: React.ReactNode }) { return <label className="block text-sm font-bold"><span>{label}{required && <span className="mr-1 text-destructive">*</span>}</span><div className="mt-2">{children}</div>{error && <span className="mt-1.5 block text-xs font-bold text-destructive">{error}</span>}</label>; }
 function Counter({ value, max }: { value: number; max: number }) { return <span className="mt-1 block text-left text-[10px] font-bold text-muted-foreground">{toPersianNumber(value)} / {toPersianNumber(max)}</span>; }
-function SettingSwitch({ label, description, checked, onChange, disabled }: { label: string; description: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) { return <div className={cn("flex items-start justify-between gap-4 rounded-2xl border p-4", disabled && "opacity-55")}><div className="min-w-0"><p className="text-sm font-extrabold">{label}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div><button type="button" role="switch" aria-checked={checked} disabled={disabled} aria-label={label} onClick={() => onChange(!checked)} className={cn("relative h-6 w-11 shrink-0 rounded-full transition-colors", checked ? "bg-primary" : "bg-muted")}><span className={cn("absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform", checked ? "right-6" : "right-1")}/></button></div>; }
+function SettingSwitch({ label, description, checked, onChange, disabled }: { label: string; description: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
+  return <div className={cn("group flex items-start justify-between gap-4 rounded-2xl border border-border/80 bg-background/70 p-4 transition-all", disabled ? "opacity-55" : "hover:border-primary/25 hover:shadow-sm")}>
+    <div className="min-w-0">
+      <p className="text-sm font-extrabold">{label}</p>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
+    </div>
+    <button type="button" role="switch" aria-checked={checked} disabled={disabled} aria-label={label} onClick={() => onChange(!checked)} className={cn("relative h-6 w-11 shrink-0 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/20", checked ? "bg-primary shadow-sm shadow-primary/25" : "bg-muted")}>
+      <span className={cn("absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform", checked ? "right-6" : "right-1")}/>
+    </button>
+  </div>;
+}
 function LayoutChoice({ value, onChange }: { value: ExamSettings["questionLayout"]; onChange: (value: ExamSettings["questionLayout"]) => void }) {
   const options: Array<{ value: ExamSettings["questionLayout"]; title: string; hint: string; icon: typeof FileText }> = [
     { value: "paged", title: "صفحه‌به‌صفحه", hint: "هر سؤال در یک صفحهٔ جداگانه نمایش داده می‌شود.", icon: FileText },

@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FileText, Gauge, Save, Sparkles, Users, Wand2 } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, FileText, Gauge, Save, ShieldAlert, Sparkles, Users, Wand2 } from "lucide-react";
 import type { ApiGradingBoardDto, ApiGradingBoardQuestionDto, ApiGradingQuestionPageDto, ApiTeacherAttemptDetailDto, ApiTeacherResultRowDto } from "@/lib/api/dtos";
 import { apiErrorMessage } from "@/lib/api/client";
 import { resultsApi } from "@/lib/api/results";
@@ -474,12 +474,15 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
           // of anything until the teacher's own limit is next to it — and if no limit was set, that has to be
           // visible too, so nobody reads a number as a violation.
           return (
-            <div className="rounded-2xl border bg-card/70 p-3 text-xs">
-              <p className="font-black">مراقبت از تقلب: {INTEGRITY_POLICY_LABELS[rules.policy]}</p>
-              <p className="mt-1 leading-6 text-muted-foreground">{describeIntegrity(rules)}</p>
-              <p className="mt-2 flex flex-wrap items-center gap-2">
-                <Badge variant={rules.tabSwitches > 0 ? "warning" : "neutral"}>{toPersianNumber(rules.tabSwitches)} بار بیرون‌رفتن از تب{rules.maxTabSwitches ? ` از ${toPersianNumber(rules.maxTabSwitches)}` : ""}</Badge>
-                <Badge variant={rules.copyEvents > 0 ? "warning" : "neutral"}>{toPersianNumber(rules.copyEvents)} کپی یا چسباندن</Badge>
+            <div className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/[.05] via-card to-card p-3.5 text-xs shadow-sm shadow-amber-950/[.02]">
+              <p className="flex items-center gap-2 font-black">
+                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-xl bg-amber-500/10 text-amber-800 dark:text-amber-300"><ShieldAlert aria-hidden="true" className="h-4 w-4"/></span>
+                <span>مراقبت از تقلب: {INTEGRITY_POLICY_LABELS[rules.policy]}</span>
+              </p>
+              <p className="mt-2 leading-6 text-muted-foreground">{describeIntegrity(rules)}</p>
+              <p className="mt-3 flex flex-wrap items-center gap-2 border-t border-amber-500/10 pt-3">
+                <Badge variant={rules.tabSwitches > 0 ? "warning" : "neutral"}>{toPersianNumber(rules.tabSwitches)} اخطار ثبت‌شده{rules.maxTabSwitches ? ` از ${toPersianNumber(rules.maxTabSwitches)} اخطار پیش از توقف` : ""}</Badge>
+                <Badge variant={rules.copyEvents > 0 ? "warning" : "neutral"}>{toPersianNumber(rules.copyEvents)} کپی، بریدن یا چسباندن</Badge>
                 {rules.lockToOneDevice && <Badge variant="neutral">قفل یک‌دستگاه فعال بود</Badge>}
               </p>
             </div>
@@ -488,11 +491,29 @@ function SheetPanel({ sheet, onSaved, rows, onSelectNext }: { sheet: ApiTeacherA
         </CardContent>
       </Card>
 
+      {sheet.access_info && (
+        <details className="rounded-2xl border bg-card/70 p-3 text-xs">
+          <summary className="cursor-pointer font-black">اطلاعات اتصال ثبت‌شده</summary>
+          <dl className="mt-3 grid gap-2 sm:grid-cols-2">
+            <div className="rounded-xl bg-muted/50 p-2.5"><dt className="text-[10px] font-bold text-muted-foreground">IP شبکه</dt><dd className="mt-1 font-mono" dir="ltr">{sheet.access_info.ip_address ?? "ثبت نشده"}</dd></div>
+            <div className="rounded-xl bg-muted/50 p-2.5"><dt className="text-[10px] font-bold text-muted-foreground">مرورگر گزارش‌شده</dt><dd className="mt-1 font-bold">{sheet.access_info.browser}</dd></div>
+            <div className="rounded-xl bg-muted/50 p-2.5"><dt className="text-[10px] font-bold text-muted-foreground">سیستم‌عامل</dt><dd className="mt-1 font-bold">{sheet.access_info.platform}</dd></div>
+            <div className="rounded-xl bg-muted/50 p-2.5"><dt className="text-[10px] font-bold text-muted-foreground">نوع دستگاه (تخمینی)</dt><dd className="mt-1 font-bold">{sheet.access_info.device_type}</dd></div>
+            {sheet.access_info.captured_at && <div className="rounded-xl bg-muted/50 p-2.5 sm:col-span-2"><dt className="text-[10px] font-bold text-muted-foreground">زمان ثبت</dt><dd className="mt-1">{formatDateTime(sheet.access_info.captured_at)}</dd></div>}
+          </dl>
+          <details className="mt-2 rounded-xl bg-muted/40 px-3 py-2">
+            <summary className="cursor-pointer text-[11px] font-bold">User-Agent خام</summary>
+            <code className="mt-2 block break-all text-[10px] leading-5 text-muted-foreground" dir="ltr">{sheet.access_info.user_agent || "ثبت نشده"}</code>
+          </details>
+          <p className="mt-2 leading-5 text-muted-foreground">این داده‌ها فقط با انتخاب معلم ثبت شده‌اند. IP ممکن است آدرس پراکسی، شبکهٔ مشترک یا VPN باشد؛ مرورگر/دستگاه از User-Agent به‌صورت تقریبی خوانده می‌شود و قابل جعل است، نه اثبات هویت.</p>
+        </details>
+      )}
+
       {sheet.session_signals.length > 0 && (
         <details className="rounded-2xl border bg-card/70 p-3 text-xs">
           <summary className="cursor-pointer font-black">نشانه‌های نشست ({toPersianNumber(sheet.session_signals.length)})</summary>
           <p className="mt-2 leading-6 text-muted-foreground">این‌ها مشاهدهٔ سامانه‌اند، نه مدرک تقلب؛ هیچ نمره‌ای بر پایهٔ آن‌ها تغییر نمی‌کند و زمان‌ها از سرور ثبت شده‌اند.</p>
-          <ul className="mt-2 space-y-1">{sheet.session_signals.map((signal) => <li key={signal.id} className="flex items-center justify-between gap-3 rounded-xl bg-muted/50 px-3 py-1.5"><span className="font-bold">{signalLabel(signal.kind)}</span><span className="text-muted-foreground">{signal.created_at ? formatDateTime(signal.created_at) : ""}</span></li>)}</ul>
+          <ul className="mt-2 space-y-1">{sheet.session_signals.map((signal) => <li key={signal.id} className="flex items-center justify-between gap-3 rounded-xl bg-muted/50 px-3 py-1.5"><span className="font-bold">{signalLabel(signal.kind)}{typeof signal.detail?.duration_seconds === "number" ? ` · ${toPersianNumber(signal.detail.duration_seconds)} ثانیه` : ""}</span><span className="text-muted-foreground">{signal.created_at ? formatDateTime(signal.created_at) : ""}</span></li>)}</ul>
         </details>
       )}
 

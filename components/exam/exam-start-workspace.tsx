@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { ArrowLeft, BookOpenCheck, CalendarDays, CheckCircle2, ChevronLeft, Clock3, FileText, ShieldCheck, UserRound } from "lucide-react";
+import { ArrowLeft, BookOpenCheck, CalendarDays, CheckCircle2, ChevronLeft, Clock3, FileText, ShieldCheck } from "lucide-react";
 import type { Exam } from "@/lib/types/domain";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,6 +10,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { ExamWorkspace } from "@/components/exam/exam-workspace";
 import { useExamAttemptStore } from "@/lib/state/exam-attempt-store";
 import { formatDateTime, toPersianNumber } from "@/lib/utils";
+import { describeIntegrity, rulesFromSettings } from "@/lib/exam/integrity";
 
 export function ExamStartWorkspace({ exam, remote = false, onStart }: { exam: Exam; remote?: boolean; onStart?: () => Promise<void> }) {
   const attempt = useExamAttemptStore((state) => state.attempt);
@@ -50,30 +51,94 @@ export function ExamStartWorkspace({ exam, remote = false, onStart }: { exam: Ex
     : canGoBack
       ? "پاسخ‌های پیشین را تا پیش از ارسال نهایی می‌توانید ویرایش کنید."
       : "پاسخی که قفل شد، حتی با رفرش صفحه بازنمی‌گردد.";
+  const integrityRules = rulesFromSettings(exam.settings);
+  const integrityDisclosure = describeIntegrity(integrityRules);
   const rules = [
     layoutRule,
     editRule,
     exam.settings.randomizeQuestions ? "ترتیب سؤال‌ها برای هر دانش‌آموز به‌صورت تصادفی است." : "ترتیب سؤال‌ها برای همهٔ دانش‌آموزان یکسان است.",
-    ...(exam.settings.randomizeOptions ? ["گزینه‌های سؤال‌های چندگزینه‌ای هم برای هر دانش‌آموز جابه‌جا می‌شود؛ این کار جلوی تقلب را می‌گیرد و روی نمره اثری ندارد."] : []),
+    ...(exam.settings.randomizeOptions ? ["گزینه‌های چندگزینه‌ای برای هر دانش‌آموز جابه‌جا می‌شود؛ روی نمره اثری ندارد."] : []),
     "پاسخ‌های شما به‌صورت خودکار در طول آزمون ذخیره می‌شوند.",
-    ...(exam.settings.allowUnanswered === false ? ["این آزمون پاسخ کامل می‌خواهد؛ تا همهٔ سؤال‌ها را پاسخ نداده‌اید نمی‌توانید ارسال کنید."] : []),
-    `شما ${toPersianNumber(exam.settings.attemptLimit ?? 1)} تلاش مجاز دارید${exam.attemptsUsed ? ` که ${toPersianNumber(exam.attemptsUsed)} مورد آن استفاده شده است` : ""}.`,
-    exam.settings.resultVisibility === "immediate" ? "نمرهٔ بخش خودکار بلافاصله پس از ارسال نمایش داده می‌شود." : "نتیجه پس از بررسی و انتشار معلم در دسترس شما قرار می‌گیرد.",
-    ...(startBlock ? [startBlock] : []),
+    ...(exam.settings.allowUnanswered === false ? ["برای ارسال باید به همهٔ سؤال‌ها پاسخ دهید."] : []),
+    ...(integrityRules.policy !== "off" ? [integrityDisclosure] : []),
+    `تلاش مجاز: ${toPersianNumber(exam.settings.attemptLimit ?? 1)}${exam.attemptsUsed ? ` · استفاده‌شده: ${toPersianNumber(exam.attemptsUsed)}` : ""}.`,
+    exam.settings.resultVisibility === "immediate" ? "نمرهٔ بخش خودکار بلافاصله پس از ارسال نمایش داده می‌شود." : exam.settings.resultVisibility === "hidden" ? "نتیجه تنها برای معلم نمایش داده می‌شود." : "نتیجه پس از بررسی و انتشار معلم در دسترس شما قرار می‌گیرد.",
   ];
-  // The confirmation dialog describes the same rules a second time, so it has to move with them: it used to
-  // promise free movement on exams where every question locks behind the student.
   const confirmationNotes = [
     layoutRule,
-    ...(exam.settings.randomizeQuestions || exam.settings.randomizeOptions ? ["ترتیب سؤال‌ها یا گزینه‌های شما با بقیهٔ کلاس یکسان نیست."] : []),
-    ...(exam.settings.allowUnanswered === false ? ["تا پاسخ دادن به همهٔ سؤال‌ها نمی‌توانید ارسال کنید."] : []),
+    "پاسخ‌ها در طول آزمون خودکار ذخیره می‌شوند.",
+    ...(exam.settings.randomizeQuestions || exam.settings.randomizeOptions ? ["ترتیب سؤال‌ها یا گزینه‌ها ممکن است با بقیهٔ کلاس متفاوت باشد."] : []),
+    ...(exam.settings.allowUnanswered === false ? ["برای ارسال باید به همهٔ سؤال‌ها پاسخ دهید."] : []),
+    ...(integrityRules.policy !== "off" ? [integrityDisclosure] : []),
   ];  async function confirmStart() {
     setStarting(true); setStartError(null);
     try { if (onStart) await onStart(); else start(); setConfirmationOpen(false); }
     catch (error) { setStartError(error instanceof Error ? error.message : "شروع آزمون انجام نشد."); }
     finally { setStarting(false); }
   }
-  return <div className="min-h-dvh bg-surface"><header className="border-b bg-background"><div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6"><Link href="/student/dashboard" className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-bold text-muted-foreground hover:bg-muted hover:text-foreground"><ChevronLeft className="h-3.5 w-3.5"/>بازگشت به داشبورد</Link><div className="flex items-center gap-2 text-xs font-bold text-muted-foreground"><ShieldCheck className="h-4 w-4 text-success"/>فضای امن آزمون</div></div></header><main className="mx-auto max-w-6xl p-4 py-8 sm:p-6 sm:py-12"><div className="mb-6 flex items-center gap-2 text-xs font-bold text-primary"><BookOpenCheck className="h-4 w-4"/>آماده‌سازی آزمون</div><div className="grid gap-6 lg:grid-cols-[1.22fr_.78fr]"><Card className="overflow-hidden"><div className="h-1.5 bg-gradient-to-l from-primary via-violet-500 to-teal-400"/><CardHeader className="p-6 sm:p-8"><p className="text-xs font-bold text-muted-foreground">{exam.subject}</p><CardTitle className="mt-2 text-2xl sm:text-3xl">{exam.title}</CardTitle><CardDescription className="mt-3 max-w-2xl text-sm leading-7">{exam.description}</CardDescription></CardHeader><CardContent className="p-6 pt-0 sm:p-8 sm:pt-0"><div className="grid gap-3 sm:grid-cols-3">{[{ icon: FileText, label: "تعداد سؤال", value: exam.questionCount ? `${toPersianNumber(exam.questionCount)} سؤال` : "پس از شروع نمایش داده می‌شود" }, { icon: Clock3, label: "مدت پاسخ‌گویی", value: `${toPersianNumber(exam.settings.durationMinutes)} دقیقه` }, { icon: UserRound, label: "طراح آزمون", value: exam.teacherName || "اطلاعات طراح خصوصی است" }].map((item) => { const Icon = item.icon; return <div key={item.label} className="rounded-2xl bg-muted/65 p-4"><Icon className="h-5 w-5 text-primary"/><p className="mt-5 text-[11px] font-bold text-muted-foreground">{item.label}</p><p className="mt-1 text-sm font-black">{item.value}</p></div>; })}</div><section className="mt-7"><h2 className="text-sm font-black">پیش از شروع بخوانید</h2><ul className="mt-3 space-y-3">{rules.map((rule) => <li key={rule} className="flex items-start gap-2 text-sm leading-6 text-muted-foreground"><CheckCircle2 className="mt-1 h-4 w-4 shrink-0 text-success"/>{rule}</li>)}</ul></section><div className="mt-8 flex flex-col gap-3 border-t pt-5 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-muted-foreground">{startBlock ?? "زمان‌سنج تنها پس از تأیید شما آغاز می‌شود."}</p><Button size="lg" disabled={!canStart} onClick={() => setConfirmationOpen(true)}>شروع آزمون <ArrowLeft className="h-4 w-4"/></Button></div></CardContent></Card><aside className="space-y-4"><Card><CardHeader><CardTitle>زمان برگزاری</CardTitle></CardHeader><CardContent><div className="flex gap-3"><div className="rounded-xl bg-primary/10 p-2.5 text-primary"><CalendarDays className="h-5 w-5"/></div><div className="flex-1"><div className="flex items-center justify-between gap-3 text-xs"><span className="font-bold text-muted-foreground">شروع آزمون</span><span className="font-extrabold">{formatDateTime(exam.startAt)}</span></div><div className="my-3 border-t"/><div className="flex items-center justify-between gap-3 text-xs"><span className="font-bold text-muted-foreground">پایان بازه</span><span className="font-extrabold">{formatDateTime(exam.endAt)}</span></div></div></div></CardContent></Card><Card><CardHeader><CardTitle>خلاصهٔ آزمون</CardTitle></CardHeader><CardContent><div className="space-y-2 text-xs"><SummaryRow label="تعداد سؤال" value={exam.questions.length ? `${toPersianNumber(exam.questions.length)} سؤال` : "پس از شروع مشخص می‌شود"}/><SummaryRow label="کل نمره" value={`${toPersianNumber(exam.settings.totalMarks)} نمره`}/>{exam.settings.passingPercentage > 0 && <SummaryRow label="حداقل نمرهٔ قبولی" value={`${toPersianNumber(exam.settings.passingPercentage)}٪`}/>}<SummaryRow label="تلاش باقی‌مانده" value={`${toPersianNumber(attemptsLeft)} از ${toPersianNumber(exam.settings.attemptLimit ?? 1)}`}/><SummaryRow label="ارسال با سؤال خالی" value={exam.settings.allowUnanswered === false ? "فقط با پاسخ به همهٔ سؤال‌ها" : "ممکن است، نمرهٔ سؤال خالی صفر"}/><SummaryRow label="انتشار نتیجه" value={exam.settings.resultVisibility === "immediate" ? "خودکار و فوری" : exam.settings.resultVisibility === "hidden" ? "تنها برای معلم" : "پس از تأیید معلم"}/></div></CardContent></Card><Card><CardHeader><CardTitle>راهنمای آرامش‌بخش</CardTitle></CardHeader><CardContent><p className="text-sm leading-7 text-muted-foreground">در طول آزمون می‌توانید سؤال‌ها را نشان‌دار کنید و در پایان، یک مرور نهایی داشته باشید. پاسخ‌ها مستقیماً در سرویس آزمون ذخیره می‌شوند.</p></CardContent></Card></aside></div></main><Dialog open={confirmationOpen} onClose={() => !starting && setConfirmationOpen(false)} title="آمادهٔ شروع هستید؟" description={`با شروع آزمون، زمان ${toPersianNumber(exam.settings.durationMinutes)} دقیقه‌ای شما آغاز می‌شود.`}><div className="space-y-2 rounded-2xl bg-primary/5 p-4 text-sm leading-7 text-muted-foreground">{confirmationNotes.map((note) => <p key={note} className="flex gap-2"><CheckCircle2 className="mt-1.5 h-4 w-4 shrink-0 text-success"/>{note}</p>)}</div>{startError && <p role="alert" className="mt-3 rounded-xl bg-destructive/10 p-3 text-xs font-bold text-destructive">{startError}</p>}<div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={() => setConfirmationOpen(false)} disabled={starting}>هنوز نه</Button><Button data-autofocus onClick={() => void confirmStart()} disabled={starting}>{starting ? "در حال آغاز…" : "تأیید و شروع آزمون"} <ArrowLeft className="h-4 w-4"/></Button></div></Dialog></div>;
+  return (
+    <div className="min-h-dvh bg-surface">
+      <header className="border-b bg-background">
+        <div className="mx-auto flex h-14 max-w-3xl items-center justify-between px-4 sm:px-6">
+          <Link href="/student/dashboard" className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-bold text-muted-foreground hover:bg-muted hover:text-foreground"><ChevronLeft className="h-3.5 w-3.5"/>بازگشت</Link>
+          <span className="text-xs font-bold text-muted-foreground">{exam.subject}</span>
+        </div>
+      </header>
+      <main className="mx-auto max-w-3xl p-4 py-6 sm:px-6 sm:py-9">
+        <Card className="overflow-hidden">
+          <CardHeader className="p-5 sm:p-7">
+            <p className="text-xs font-bold text-muted-foreground">آماده‌سازی آزمون</p>
+            <CardTitle className="mt-1 text-2xl sm:text-3xl">{exam.title}</CardTitle>
+            {exam.description && <CardDescription className="mt-2 text-sm leading-6">{exam.description}</CardDescription>}
+          </CardHeader>
+          <CardContent className="space-y-5 p-5 pt-0 sm:p-7 sm:pt-0">
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { icon: Clock3, label: "مدت", value: `${toPersianNumber(exam.settings.durationMinutes)} دقیقه` },
+                { icon: FileText, label: "سؤال‌ها", value: questionCount ? toPersianNumber(questionCount) : "—" },
+                { icon: BookOpenCheck, label: "تلاش باقی‌مانده", value: `${toPersianNumber(attemptsLeft)} از ${toPersianNumber(exam.settings.attemptLimit ?? 1)}` },
+              ].map((item) => { const Icon = item.icon; return <div key={item.label} className="rounded-xl bg-muted/50 p-3"><Icon className="h-4 w-4 text-muted-foreground"/><p className="mt-2 text-[10px] font-bold text-muted-foreground">{item.label}</p><p className="mt-0.5 text-sm font-black">{item.value}</p></div>; })}
+            </div>
+
+            <div className="rounded-xl border bg-background px-4 py-3 text-xs leading-6">
+              <p className="flex items-start gap-2"><ShieldCheck className="mt-1 h-4 w-4 shrink-0 text-success"/><span>{layoutRule}</span></p>
+              <p className="mt-1.5 text-muted-foreground">پاسخ‌ها به‌صورت خودکار در طول آزمون ذخیره می‌شوند؛ زمان‌سنج با تأیید شما آغاز می‌شود.</p>
+              {integrityRules.policy !== "off" && <p className="mt-2 flex items-start gap-2 border-t pt-2 text-muted-foreground"><ShieldCheck className="mt-1 h-4 w-4 shrink-0 text-warning"/><span>{integrityDisclosure}</span></p>}
+            </div>
+
+            <details className="rounded-xl border px-4 py-3">
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-bold"><CalendarDays className="h-4 w-4 text-muted-foreground"/>زمان، نمره و قوانین</summary>
+              <div className="mt-3 space-y-2">
+                <div className="space-y-2 text-xs">
+                  <SummaryRow label="شروع" value={exam.startAt ? formatDateTime(exam.startAt) : "—"}/>
+                  <SummaryRow label="پایان بازه" value={exam.endAt ? formatDateTime(exam.endAt) : "—"}/>
+                  <SummaryRow label="کل نمره" value={`${toPersianNumber(exam.settings.totalMarks)} نمره`}/>
+                  {exam.settings.passingPercentage > 0 && <SummaryRow label="حداقل قبولی" value={`${toPersianNumber(exam.settings.passingPercentage)}٪`}/>}
+                  <SummaryRow label="ارسال با سؤال خالی" value={exam.settings.allowUnanswered === false ? "باید به همه پاسخ دهید" : "ممکن است؛ سؤال خالی نمره نمی‌گیرد"}/>
+                  <SummaryRow label="انتشار نتیجه" value={exam.settings.resultVisibility === "immediate" ? "فوری" : exam.settings.resultVisibility === "hidden" ? "تنها برای معلم" : "پس از بررسی معلم"}/>
+                </div>
+                <ul className="space-y-1 border-t pt-2 text-xs leading-5 text-muted-foreground">
+                  {rules.filter((rule) => rule !== layoutRule && !rule.startsWith("پاسخ‌های شما")).map((rule) => <li key={rule} className="flex items-start gap-2"><CheckCircle2 className="mt-1 h-3.5 w-3.5 shrink-0 text-success"/>{rule}</li>)}
+                </ul>
+              </div>
+            </details>
+
+            {startBlock && <p role="alert" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-5 text-amber-800 dark:text-amber-300">{startBlock}</p>}
+            <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-muted-foreground">{startBlock ? "برای شروع با آموزگار هماهنگ کنید." : "زمان‌سنج پس از تأیید شروع می‌شود."}</p>
+              <Button size="lg" disabled={!canStart} onClick={() => setConfirmationOpen(true)}>شروع آزمون <ArrowLeft className="h-4 w-4"/></Button>
+            </div>
+          </CardContent>
+        </Card>
+      </main>
+
+      <Dialog open={confirmationOpen} onClose={() => !starting && setConfirmationOpen(false)} title="آمادهٔ شروع هستید؟" description={`با تأیید، زمان ${toPersianNumber(exam.settings.durationMinutes)} دقیقه‌ای آغاز می‌شود.`}>
+        <div className="space-y-2 rounded-xl bg-muted/45 p-4 text-sm leading-6 text-muted-foreground">{confirmationNotes.map((note) => <p key={note} className="flex gap-2"><CheckCircle2 className="mt-1 h-4 w-4 shrink-0 text-success"/>{note}</p>)}</div>
+        {startError && <p role="alert" className="mt-3 rounded-xl bg-destructive/10 p-3 text-xs font-bold text-destructive">{startError}</p>}
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={() => setConfirmationOpen(false)} disabled={starting}>برگشت</Button><Button data-autofocus onClick={() => void confirmStart()} disabled={starting}>{starting ? "در حال آغاز…" : "تأیید و شروع آزمون"}<ArrowLeft className="h-4 w-4"/></Button></div>
+      </Dialog>
+    </div>
+  );
 }
 function SummaryRow({ label, value }: { label: string; value: string }) { return <div className="flex items-center justify-between gap-3 rounded-xl bg-muted/65 px-3 py-2"><span className="font-bold text-muted-foreground">{label}</span><span className="font-black">{value}</span></div>; }
 function CompletedAttemptScreen({ exam, attemptId }: { exam: Exam; attemptId: string }) { return <div className="grid min-h-dvh place-items-center bg-surface p-4"><Card className="w-full max-w-md text-center"><CardContent className="p-8"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-emerald-500/10 text-success"><CheckCircle2 className="h-7 w-7"/></div><h1 className="mt-5 text-xl font-black">آزمون ارسال شده است</h1><p className="mt-3 text-sm leading-7 text-muted-foreground">پاسخ‌های آزمون «{exam.title}» ثبت شده‌اند.</p><Button asChild className="mt-6"><Link href={`/student/results/${attemptId}`}>مشاهده وضعیت نتیجه <ArrowLeft className="h-4 w-4"/></Link></Button></CardContent></Card></div>; }

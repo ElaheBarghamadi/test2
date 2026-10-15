@@ -1,22 +1,18 @@
 #!/usr/bin/env node
 /**
- * Full-stack development launcher.
+ * Development launcher for independent services, with an optional full-stack convenience mode.
  *
- * `npm run dev` runs this script, which makes the frontend command mean "the whole app":
+ * Standard workflow uses two terminals: `npm run dev:api` prepares/starts Django, then `npm run dev`
+ * starts Next.js. `npm run dev:stack` keeps the one-command mode available when desired.
  *
- *   1. Fills in missing env files (`backend/.env`, `.env.local`) from the shipped examples,
- *      generating a real DJANGO_SECRET_KEY on first run.
- *   2. Creates the Python virtual environment in `backend/.venv` and installs
- *      `backend/requirements.lock` into it — again only when the lockfile changed.
- *   3. Applies database migrations (`migrate`). If models moved ahead of the migration files,
- *      it makes the migrations first, so a fresh clone never serves a stale schema.
- *   4. Starts Django on 127.0.0.1:8000 and Next.js on 0.0.0.0:3000, with prefixed logs.
- *      If a healthy API already answers on the port, it is reused instead of double-started.
- *   5. One Ctrl+C stops both processes (whole process tree, on every OS).
+ * Setup tasks run before the selected service when needed:
+ *   1. Fill missing env files (`backend/.env`, `.env.local`), generating DJANGO_SECRET_KEY on first run.
+ *   2. Create `backend/.venv` and install `backend/requirements.lock` when it changes.
+ *   3. Apply migrations (and create any missing development migrations).
  *
  * Flags:
- *   --web-only     Only the Next.js dev server (old `npm run dev` behaviour).
- *   --api-only     Only the backend setup + Django.
+ *   --web-only     Only the Next.js dev server.
+ *   --api-only     Only backend setup + Django.
  *   --setup-only   Prepare env/venv/dependencies/migrations, then exit without serving.
  *   --turbo        Run Next.js with --turbo.
  *   --port N       Frontend port (default 3000, or PORT env).
@@ -255,7 +251,7 @@ function startWeb() {
 
 /* --------------------------------------------------------------- main --- */
 async function main() {
-  info("Examora dev stack — one command, whole app. Ctrl+C stops everything.");
+  info(WEB_ONLY ? "Starting Next.js only — start Django with `npm run dev:api` in a separate terminal." : API_ONLY ? "Starting Django API only." : "Starting the full development stack (convenience mode). Ctrl+C stops services started here.");
   ensureEnvFiles();
   if (!WEB_ONLY) {
     ensureVenv();

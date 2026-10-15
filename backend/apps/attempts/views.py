@@ -4,30 +4,40 @@ from uuid import UUID
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, Prefetch
+from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.secure_uploads import inspect_media_upload
 from apps.exams.models import Exam, Question, QuestionOption
 from apps.results.models import ExamResult
 from apps.results.serializers import StudentResultSerializer
+from apps.users.models import User
 from apps.users.permissions import IsOwnStudentAttempt, IsStudent
 
-from .models import ExamAttempt, StudentAnswer
+from .models import ExamAttempt, StudentAnswer, StudentAnswerAttachment
 from .serializers import (
+    StudentAnswerAttachmentSerializer,
     StudentAnswerInputSerializer,
+    StudentAnswerAttachmentUploadSerializer,
     StudentAttemptAnswerSerializer,
     StudentAttemptDetailSerializer,
     StudentAvailableExamSerializer,
     StudentBatchAnswerSerializer,
 )
+from .client_info import client_ip_from_request
 from .services import (
     AttemptConflict,
     AudienceContext,
     attempt_question_ids,
     attempt_timing,
+    add_answer_attachment,
+    delete_answer_attachment,
     claim_session,
     exam_availability,
     heartbeat,
@@ -49,6 +59,11 @@ def _user_agent(request) -> str:  # type: ignore[no-untyped-def]
     User-Agent without leaving its browser, which is a far higher cost than pressing a key.
     """
     return (request.headers.get("User-Agent") or "")[:512]
+
+
+def _client_ip(request) -> str | None:  # type: ignore[no-untyped-def]
+    """Resolve the client IP from REMOTE_ADDR, trusting forwarding headers only from configured proxies."""
+    return client_ip_from_request(request)
 
 
 def _session_context(request) -> tuple[str, int | None]:  # type: ignore[no-untyped-def]
@@ -97,7 +112,8 @@ def _drf_validation_error(exc: DjangoValidationError) -> serializers.ValidationE
 def _ordered_questions(attempt: ExamAttempt) -> list[Question]:
     ordered_ids = attempt_question_ids(attempt)
     questions = Question.objects.filter(exam_id=attempt.exam_id, id__in=ordered_ids).prefetch_related(
-        Prefetch("options", queryset=QuestionOption.objects.order_by("order"))
+        Prefetch("options", queryset=QuestionOption.objects.order_by("order")),
+        Prefetch("media"),
     )
     question_by_id = {str(question.id): question for question in questions}
     return [question_by_id[question_id] for question_id in ordered_ids if question_id in question_by_id]
@@ -110,7 +126,8 @@ def _attempt_detail_queryset():  # type: ignore[no-untyped-def]
             Prefetch(
                 "answers",
                 queryset=StudentAnswer.objects.select_related("question").prefetch_related(
-                    Prefetch("selected_options", queryset=QuestionOption.objects.order_by("order"))
+                    Prefetch("selected_options", queryset=QuestionOption.objects.order_by("order")),
+                    Prefetch("attachments"),
                 ),
             )
         )
@@ -137,10 +154,52 @@ def _attempt_question_indexes(attempt: ExamAttempt) -> dict[str, int]:
 
 def _answer_response(answer_id: UUID) -> Response:
     answer = (
-        StudentAnswer.objects.prefetch_related(Prefetch("selected_options", queryset=QuestionOption.objects.order_by("order")))
-        .get(pk=answer_id)
+        StudentAnswer.objects.prefetch_related(
+            Prefetch("selected_options", queryset=QuestionOption.objects.order_by("order")),
+            Prefetch("attachments"),
+        ).get(pk=answer_id)
     )
     return Response(StudentAttemptAnswerSerializer(answer).data)
+
+
+def _answer_attachment_response(answer: StudentAnswer, attempt: ExamAttempt, *, response_status: int = status.HTTP_201_CREATED) -> Response:
+    hydrated = StudentAnswer.objects.prefetch_related(
+        Prefetch("selected_options", queryset=QuestionOption.objects.order_by("order")),
+        Prefetch("attachments"),
+    ).get(pk=answer.pk)
+    return Response(
+        {
+            "answer": StudentAttemptAnswerSerializer(hydrated).data,
+            "answer_revision": attempt.answer_revision,
+        },
+        status=response_status,
+    )
+
+
+class StudentAnswerAttachmentFileView(APIView):
+    """Stream a private answer file to its student or to the teacher who owns that exam."""
+
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request, attachment_id) -> FileResponse:  # type: ignore[no-untyped-def]
+        attachment = get_object_or_404(
+            StudentAnswerAttachment.objects.select_related("answer__attempt__exam__teacher", "answer__attempt__student"),
+            pk=attachment_id,
+        )
+        user = request.user
+        attempt = attachment.answer.attempt
+        allowed = (
+            user.role == User.Role.ADMIN
+            or (user.role == User.Role.STUDENT and attempt.student_id == user.id)
+            or (user.role == User.Role.TEACHER and attempt.exam.teacher_id == user.id)
+        )
+        if not allowed:
+            raise NotFound()
+        response = FileResponse(attachment.file.open("rb"), content_type=attachment.content_type)
+        response["Content-Disposition"] = "inline"
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
 
 
 class StudentAvailableExamView(APIView):
@@ -199,7 +258,11 @@ class StudentExamStartView(APIView):
         client_session, _ = _session_context(request)
         try:
             attempt, created = start_attempt(
-                exam_id, request.user, client_session=client_session, user_agent=_user_agent(request)
+                exam_id,
+                request.user,
+                client_session=client_session,
+                user_agent=_user_agent(request),
+                client_ip_address=_client_ip(request),
             )
         except (DjangoValidationError, Exam.DoesNotExist) as exc:
             if isinstance(exc, Exam.DoesNotExist):
@@ -281,8 +344,11 @@ class StudentAttemptSignalView(StudentAttemptAccessMixin, APIView):
     rather than discover it on the next autosave.
     """
 
+    throttle_scope = "exam_write"
+
     def post(self, request, attempt_id) -> Response:  # type: ignore[no-untyped-def]
-        kind = (request.data.get("kind") or "").strip()
+        raw_kind = request.data.get("kind")
+        kind = raw_kind.strip() if isinstance(raw_kind, str) else ""
         detail = request.data.get("detail")
         get_object_or_404(ExamAttempt.objects.filter(student=request.user), pk=attempt_id)
         try:
@@ -382,6 +448,65 @@ class StudentAttemptBatchAnswerView(StudentAttemptAccessMixin, APIView):
         )
         answer_by_id = {answer.id: answer for answer in persisted_answers}
         return Response(StudentAttemptAnswerSerializer([answer_by_id[answer_id] for answer_id in answer_ids], many=True).data)
+
+
+class StudentAttemptAnswerAttachmentCollectionView(StudentAttemptAccessMixin, APIView):
+    """Bounded, private image/audio uploads for a question that explicitly enables that response kind."""
+
+    parser_classes = (MultiPartParser, FormParser)
+    throttle_scope = "exam_write"
+
+    def post(self, request, attempt_id, question_id) -> Response:  # type: ignore[no-untyped-def]
+        attempt = self.get_attempt(attempt_id)
+        question = self.get_attempt_question(attempt, question_id)
+        serializer = StudentAnswerAttachmentUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        try:
+            metadata = inspect_media_upload(values["file"], values["kind"])
+        except ValueError as exc:
+            raise serializers.ValidationError({"file": str(exc)}) from exc
+        client_session, expected_revision = _session_context(request)
+        try:
+            answer, updated_attempt = add_answer_attachment(
+                attempt.id,
+                request.user,
+                question,
+                values["file"],
+                metadata,
+                client_session=client_session,
+                expected_revision=expected_revision,
+                question_index=_attempt_question_indexes(attempt).get(str(question.id), 0),
+            )
+        except AttemptConflict as exc:
+            return _conflict_response(exc, attempt)
+        except DjangoValidationError as exc:
+            raise _drf_validation_error(exc) from exc
+        return _answer_attachment_response(answer, updated_attempt)
+
+
+class StudentAttemptAnswerAttachmentDetailView(StudentAttemptAccessMixin, APIView):
+    throttle_scope = "exam_write"
+
+    def delete(self, request, attempt_id, question_id, attachment_id) -> Response:  # type: ignore[no-untyped-def]
+        attempt = self.get_attempt(attempt_id)
+        question = self.get_attempt_question(attempt, question_id)
+        client_session, expected_revision = _session_context(request)
+        try:
+            answer, updated_attempt = delete_answer_attachment(
+                attempt.id,
+                request.user,
+                question,
+                attachment_id,
+                client_session=client_session,
+                expected_revision=expected_revision,
+                question_index=_attempt_question_indexes(attempt).get(str(question.id), 0),
+            )
+        except AttemptConflict as exc:
+            return _conflict_response(exc, attempt)
+        except DjangoValidationError as exc:
+            raise _drf_validation_error(exc) from exc
+        return _answer_attachment_response(answer, updated_attempt, response_status=status.HTTP_200_OK)
 
 
 class StudentAttemptFlagView(StudentAttemptAccessMixin, APIView):

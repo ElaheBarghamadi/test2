@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Archive, ArchiveRestore, CopyPlus, Eye, FolderInput, FolderPlus, Layers, PencilLine, Plus, Search, Shapes, Tag, Trash2 } from "lucide-react";
 import { examsApi } from "@/lib/api/exams";
@@ -113,7 +113,6 @@ export function QuestionBankWorkspace({ initialExamId }: { initialExamId?: strin
     if (!createTarget && exams[0]) setCreateTarget(exams.find((exam) => exam.status === "draft" || exam.status === "scheduled")?.id ?? exams.find((exam) => exam.status !== "archived")?.id ?? exams[0].id);
   }, [createTarget, exams, initialExamId, insertTarget]);
 
-  const selectedQuestions = useMemo(() => questions.filter((question) => selected.includes(question.id)), [questions, selected]);
   const allSelected = questions.length > 0 && selected.length === questions.length;
 
   function toggle(id: string) { setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]); }

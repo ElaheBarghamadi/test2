@@ -118,7 +118,15 @@ describe("ExamWorkspace session handling", () => {
 
   it("warns before closing the tab mid-exam and stays silent once time is up", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    useExamAttemptStore.setState({ attempt: attemptFixture({ status: "in_progress", remainingSeconds: 300 }) });
+    useExamAttemptStore.setState({ attempt: attemptFixture({
+      status: "in_progress",
+      remainingSeconds: 300,
+      integrity: {
+        policy: "observe", records: true, enforced: false, blockCopyPaste: false, requireFullscreen: false,
+        lockToOneDevice: false, maxTabSwitches: 0, tabSwitchGraceSeconds: 5, recordAccessInfo: false,
+        blockScreenshotShortcuts: false, tabSwitches: 0, tabSwitchesRemaining: null, copyEvents: 0,
+      },
+    }) });
     // The server agrees the window is still open, so the session keeps reporting activity signals.
     heartbeat.mockResolvedValue({ server_time: "2026-03-20T05:35:00Z", expires_at: "2026-03-20T06:15:00Z", remaining_seconds: 295, status: "in_progress", answer_revision: 0, session_locked_by_other: false, question_count: 1 });
     detail.mockResolvedValue({
@@ -126,6 +134,7 @@ describe("ExamWorkspace session handling", () => {
       submitted_at: null, last_activity_at: "2026-03-20T05:30:00Z", server_time: "2026-03-20T05:30:00Z",
       expires_at: "2026-03-20T06:15:00Z", remaining_seconds: 300,
       exam: { id: "exam-1", title: exam.title, description: "", subject: "زیست", grade: "۱۲", class_name: "۱", instructions: "", duration_minutes: 45, start_at: exam.startAt, end_at: exam.endAt, total_marks: "2.00", question_count: 1, passing_percentage: 50, result_visibility: "pending", navigation: { allow_previous_questions: true, randomize_questions: false } },
+      integrity: { policy: "observe", records: true, enforced: false, block_copy_paste: false, require_fullscreen: false, lock_to_one_device: false, max_tab_switches: 0, tab_switch_grace_seconds: 5, record_access_info: false, block_screenshot_shortcuts: false, tab_switches: 0, tab_switches_remaining: null, copy_events: 0 },
       questions: [], answers: [],
     });
 

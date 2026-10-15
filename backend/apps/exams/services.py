@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from apps.users.models import User
 
 from .content_identity import question_content_hash
-from .models import Exam, ExamSettings, Question, QuestionOption
+from .models import Exam, ExamSettings, Question, QuestionMedia, QuestionOption
 from apps.notifications.models import Notification
 from apps.notifications.services import notify, notify_exam_audience
 
@@ -37,11 +37,14 @@ def validate_question_configuration(question_type: str, configuration: Any) -> d
         Question.Type.MULTIPLE_CHOICE: set(),
         Question.Type.MULTIPLE_ANSWER: set(),
         Question.Type.TRUE_FALSE: set(),
+        Question.Type.MATCHING: {"matching_pairs"},
         Question.Type.SHORT_ANSWER: {"expected_answers", "case_sensitive", "max_length", "placeholder"},
         Question.Type.WRITTEN: {"max_length", "placeholder", "grading_note"},
     }
+    # Media is an explicit per-question permission. SVG is never accepted by the upload surface.
+    media_fields = {"allow_image_answer", "allow_audio_answer", "image_only"}
     errors: dict[str, list[str]] = {}
-    unknown_fields = set(configuration) - allowed_fields[question_type]
+    unknown_fields = set(configuration) - (allowed_fields.get(question_type, set()) | media_fields)
     if unknown_fields:
         errors["configuration"] = [
             f"Unsupported configuration fields for this question type: {', '.join(sorted(unknown_fields))}."
@@ -62,6 +65,22 @@ def validate_question_configuration(question_type: str, configuration: Any) -> d
             errors.setdefault("configuration", []).append(
                 "expected_answers must be a non-empty list of non-empty strings."
             )
+
+    for flag in media_fields:
+        if flag in configuration and not isinstance(configuration[flag], bool):
+            errors.setdefault("configuration", []).append(f"{flag} must be a boolean.")
+
+    pairs = configuration.get("matching_pairs")
+    if pairs is not None:
+        if not isinstance(pairs, list) or any(
+            not isinstance(pair, dict)
+            or not isinstance(pair.get("id"), str)
+            or not pair.get("id", "").strip()
+            or not isinstance(pair.get("prompt"), str)
+            or not isinstance(pair.get("answer"), str)
+            for pair in pairs
+        ):
+            errors.setdefault("configuration", []).append("matching_pairs must be a list of prompt/answer objects.")
 
     for text_field in ("placeholder", "grading_note"):
         value = configuration.get(text_field)
@@ -97,6 +116,26 @@ def question_definition_errors(
             errors.setdefault("options", []).append("A true/false question needs exactly two options.")
         if require_options and correct_count != 1:
             errors.setdefault("options", []).append("A true/false question needs exactly one correct option.")
+    elif question_type == Question.Type.MATCHING:
+        pairs = configuration.get("matching_pairs", []) if isinstance(configuration, dict) else []
+        prompts = [pair.get("prompt", "").strip() for pair in pairs if isinstance(pair, dict)]
+        answers = [pair.get("answer", "").strip() for pair in pairs if isinstance(pair, dict)]
+        ids = [pair.get("id", "").strip() for pair in pairs if isinstance(pair, dict)]
+        option_texts = [str(option.get("text", "")).strip() for option in option_list]
+        if require_options and len(pairs) < 2:
+            errors.setdefault("configuration", []).append("A matching question needs at least two pairs.")
+        if require_options and (len(prompts) != len(pairs) or any(not prompt for prompt in prompts)):
+            errors.setdefault("configuration", []).append("Every matching prompt must contain text.")
+        if require_options and (len(answers) != len(pairs) or any(not answer for answer in answers)):
+            errors.setdefault("configuration", []).append("Every matching answer must contain text.")
+        if len(ids) != len(set(ids)):
+            errors.setdefault("configuration", []).append("Matching prompt IDs must be unique.")
+        if len({answer.casefold() for answer in answers}) != len(answers):
+            errors.setdefault("configuration", []).append("Matching answers must be unique.")
+        if require_options and (len(option_texts) != len(pairs) or set(option_texts) != set(answers)):
+            errors.setdefault("options", []).append("Matching choices must correspond one-to-one with the answers.")
+        if any(bool(option.get("is_correct")) for option in option_list):
+            errors.setdefault("options", []).append("Matching choices do not use multiple-choice answer keys.")
     elif question_type in {Question.Type.SHORT_ANSWER, Question.Type.WRITTEN} and option_list:
         errors.setdefault("options", []).append("Text questions cannot have answer options.")
     return errors
@@ -113,6 +152,11 @@ def validate_exam_for_publication(exam: Exam) -> None:
         errors.setdefault("end_at", []).append("End time must be after start time.")
     if not exam.questions.exists():
         errors.setdefault("questions", []).append("An exam needs at least one question.")
+    if exam.audience_mode == Exam.AudienceMode.SELECTED:
+        direct_recipients = exam.students.filter(role="student", is_active=True).exists()
+        group_recipients = exam.student_groups.filter(students__role="student", students__is_active=True).exists()
+        if not direct_recipients and not group_recipients:
+            errors.setdefault("audience", []).append("At least one active student or non-empty student group must be selected.")
 
     for question in exam.questions.prefetch_related("options").order_by("order"):
         option_data = [
@@ -124,6 +168,9 @@ def validate_exam_for_publication(exam: Exam) -> None:
             errors[f"question:{question.id}"] = [
                 message for messages in question_errors.values() for message in messages
             ]
+        configuration = question.configuration if isinstance(question.configuration, dict) else {}
+        if configuration.get("image_only") and not question.media.filter(kind="image").exists():
+            errors.setdefault(f"question:{question.id}", []).append("An image-only question must have a valid prompt image.")
     if errors:
         raise ValidationError(errors)
 
@@ -158,6 +205,27 @@ def refresh_total_marks(exam: Exam) -> None:
     total = exam.questions.aggregate(total=Sum("marks"))["total"] or 0
     exam.total_marks = total
     exam.save(update_fields=("total_marks", "updated_at"))
+
+
+def _copy_question_media(source: Question, destination: Question) -> None:
+    """Copy private prompt files into a new question-owned path; never share mutable media rows."""
+    for source_media in source.media.all():
+        source_media.file.open("rb")
+        target = QuestionMedia(
+            question=destination,
+            kind=source_media.kind,
+            original_name=source_media.original_name,
+            content_type=source_media.content_type,
+            size_bytes=source_media.size_bytes,
+            sha256=source_media.sha256,
+            alt_text=source_media.alt_text,
+            order=source_media.order,
+        )
+        try:
+            target.file.save(source_media.original_name, source_media.file, save=False)
+            target.save()
+        finally:
+            source_media.file.close()
 
 
 def _locked_exam(exam_id) -> Exam:
@@ -324,7 +392,8 @@ def duplicate_exam(exam_id, owner) -> Exam:
                 Prefetch(
                     "questions",
                     queryset=Question.objects.order_by("order").prefetch_related(
-                        Prefetch("options", queryset=QuestionOption.objects.order_by("order"))
+                        Prefetch("options", queryset=QuestionOption.objects.order_by("order")),
+                        Prefetch("media"),
                     ),
                 )
             )
@@ -336,6 +405,7 @@ def duplicate_exam(exam_id, owner) -> Exam:
             subject=source.subject,
             grade=source.grade,
             class_name=source.class_name,
+            audience_mode=(source.audience_mode if source.teacher_id == owner.pk else Exam.AudienceMode.PROFILE),
             instructions=source.instructions,
             teacher=owner,
             status=Exam.Status.DRAFT,
@@ -344,6 +414,9 @@ def duplicate_exam(exam_id, owner) -> Exam:
             start_at=source.start_at,
             end_at=source.end_at,
         )
+        if source.teacher_id == owner.pk:
+            duplicate.student_groups.set(source.student_groups.all())
+            duplicate.students.set(source.students.all())
 
         source_settings = source.settings
         duplicate_settings, _ = ExamSettings.objects.get_or_create(exam=duplicate)
@@ -363,9 +436,12 @@ def duplicate_exam(exam_id, owner) -> Exam:
             "question_layout",
             "integrity_policy",
             "max_tab_switches",
+            "tab_switch_grace_seconds",
             "block_copy_paste",
             "require_fullscreen",
             "lock_to_one_device",
+            "record_access_info",
+            "block_screenshot_shortcuts",
         ):
             setattr(duplicate_settings, field, getattr(source_settings, field))
         duplicate_settings.full_clean()
@@ -391,6 +467,7 @@ def duplicate_exam(exam_id, owner) -> Exam:
                 )
                 for source_option in source_question.options.all()
             ])
+            _copy_question_media(source_question, duplicate_question)
         refresh_total_marks(duplicate)
         refresh_question_hashes(duplicate)
         return duplicate
@@ -443,7 +520,7 @@ def copy_questions_into_exam(exam: Exam, question_ids: list, teacher) -> tuple[l
             raise ValidationError({"exam": ["An archived exam cannot be changed."]})
         sources = list(
             Question.objects.select_related("exam")
-            .prefetch_related(Prefetch("options", queryset=QuestionOption.objects.order_by("order")), "tags")
+            .prefetch_related(Prefetch("options", queryset=QuestionOption.objects.order_by("order")), Prefetch("media"), "tags")
             .filter(pk__in=question_ids)
         )
         by_id = {str(question.pk): question for question in sources}
@@ -504,6 +581,7 @@ def copy_questions_into_exam(exam: Exam, question_ids: list, teacher) -> tuple[l
                     for index, option in enumerate(source.options.all(), start=1)
                 ]
             )
+            _copy_question_media(source, copy)
             for tag in source.tags.all():
                 target_tag, _ = QuestionTag.objects.get_or_create(
                     teacher_id=locked.teacher_id, name=tag.name, defaults={"name": tag.name}
@@ -565,9 +643,12 @@ IMPORTABLE_SETTINGS = (
     "passing_percentage",
     "integrity_policy",
     "max_tab_switches",
+    "tab_switch_grace_seconds",
     "block_copy_paste",
     "require_fullscreen",
     "lock_to_one_device",
+    "record_access_info",
+    "block_screenshot_shortcuts",
 )
 
 
@@ -580,10 +661,15 @@ def export_exam_bundle(exam: Exam) -> dict:
     """
     from .serializers import TeacherExamSerializer, TeacherQuestionSerializer
 
+    exam_payload = dict(TeacherExamSerializer(exam).data)
+    # Audience assignments are operational/private class data, not part of the reusable paper. An imported
+    # bundle starts with the safe default audience and the new teacher chooses recipients themselves.
+    for field in ("audience_mode", "student_groups", "students"):
+        exam_payload.pop(field, None)
     return {
         "kind": BUNDLE_KIND,
         "exported_at": timezone.now().isoformat(),
-        "exam": TeacherExamSerializer(exam).data,
+        "exam": exam_payload,
         "questions": [TeacherQuestionSerializer(question).data for question in exam.questions.prefetch_related("options", "tags").order_by("order")],
     }
 

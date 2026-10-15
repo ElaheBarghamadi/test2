@@ -271,7 +271,9 @@ class RequestSizeCeilingTests(TestCase):
     def test_the_ceilings_are_the_documented_values(self) -> None:
         from django.conf import settings
 
-        self.assertLessEqual(settings.DATA_UPLOAD_MAX_MEMORY_SIZE, 5 * 1024 * 1024)
+        # The API accepts audio files up to 15 MiB; the 20 MiB request limit leaves room for multipart overhead.
+        self.assertLessEqual(settings.DATA_UPLOAD_MAX_MEMORY_SIZE, 20 * 1024 * 1024)
+        self.assertGreaterEqual(settings.DATA_UPLOAD_MAX_MEMORY_SIZE, 16 * 1024 * 1024)
         self.assertLessEqual(settings.FILE_UPLOAD_MAX_MEMORY_SIZE, settings.DATA_UPLOAD_MAX_MEMORY_SIZE)
         self.assertLessEqual(settings.DATA_UPLOAD_MAX_NUMBER_FIELDS, 1000)
         self.assertEqual(settings.FILE_UPLOAD_PERMISSIONS, 0o640)

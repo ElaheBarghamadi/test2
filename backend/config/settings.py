@@ -41,6 +41,11 @@ if not _secret_key and not DEBUG:
 SECRET_KEY = _secret_key or "unsafe-development-key-change-before-deployment"
 # .e2b.app enables the isolated development preview host; production must set explicit hosts via env.
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,.e2b.app")
+# Client IPs are taken from REMOTE_ADDR by default. Forwarded addresses are trusted only when the immediate
+# peer belongs to one of these explicitly configured proxy CIDRs.
+TRUSTED_PROXY_CIDRS = env_list("DJANGO_TRUSTED_PROXY_CIDRS")
+# IP/User-Agent/device-signature snapshots are automatically scrubbed this many days after finalization.
+EXAM_ACCESS_INFO_RETENTION_DAYS = max(1, int(os.getenv("EXAM_ACCESS_INFO_RETENTION_DAYS", "30")))
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -110,6 +115,8 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+# Private exam media is deliberately outside STATIC_ROOT and is served only by authenticated API views.
+PRIVATE_MEDIA_ROOT = Path(os.getenv("DJANGO_PRIVATE_MEDIA_ROOT", str(BASE_DIR / "private_media")))
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "users.User"
 
@@ -165,14 +172,15 @@ EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS")
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
-# Request-body ceilings, stated rather than inherited. The API is JSON-only, so the first value is the cap
-# on one parsed request body (the framework default is 2.5 MB - kept here so the limit is a decision);
-# the second bounds query-string and form key counts, which nothing in this API comes close to.
-DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DJANGO_DATA_UPLOAD_MAX_BYTES", str(int(2.5 * 1024 * 1024))))
+# Explicit request limits. The API accepts bounded multipart image/audio uploads as well as JSON;
+# the upload view applies stricter per-file and per-question limits after MIME sniffing.
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DJANGO_DATA_UPLOAD_MAX_BYTES", str(20 * 1024 * 1024)))
 DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.getenv("DJANGO_DATA_UPLOAD_MAX_FIELDS", "400"))
-FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DJANGO_FILE_UPLOAD_MAX_BYTES", str(int(2.5 * 1024 * 1024))))
-# If an upload surface is ever added, its files must not be world-readable on the host.
+# Files above 1 MiB are streamed to Django's temporary upload handler instead of staying in process memory.
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DJANGO_FILE_UPLOAD_MEMORY_THRESHOLD_BYTES", str(1 * 1024 * 1024)))
+# Private media is not executable or world-readable on the host.
 FILE_UPLOAD_PERMISSIONS = 0o640
+FILE_UPLOAD_DIRECTORY_PERMISSIONS = 0o750
 
 # API auth is a bearer header, so cookies never need to cross the wire with the session; disabling
 # credentialed CORS removes a whole class of ambient-credential abuse for no functional cost.

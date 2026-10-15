@@ -84,6 +84,7 @@ export function useExamAutosave(
     // The dependency list is the whole rule: the record is built from the newest `attempt` at the moment the
     // effect runs, and `answerRevision` moves on every edit, so each run already holds the current values.
     // Depending on `attempt` itself would only add runs that produce the same record.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- answerRevision and state fields cover every journal change.
   }, [attemptId, attempt?.status, attempt?.connectionStatus, attempt?.answerRevision, attempt?.saveStatus, attempt?.serverRevision, pendingAnswerQuestionIds, pendingFlagQuestionIds]);
 
   useEffect(() => {
@@ -134,5 +135,6 @@ export function useExamAutosave(
     };
     // `attempt.saveStatus === "error"` is deliberately in the dependency set: it is what re-arms the
     // timer after a failure without waiting for the student to type something else.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the attempt object is decomposed into tracked state fields.
   }, [attempt?.answerRevision, attempt?.connectionStatus, attempt?.saveStatus, attempt?.status, attempt?.id, attempt?.answers, attempt?.pendingAnswerQuestionIds, attempt?.pendingFlagQuestionIds, exam, examSession, markSaved, markSaveFailed, onConflict, onQuestionsLocked, retry]);
 }

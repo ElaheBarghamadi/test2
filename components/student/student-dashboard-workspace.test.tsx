@@ -62,34 +62,30 @@ describe("humanRemaining", () => {
 describe("StudentDashboardWorkspace", () => {
   it("counts each category in the filter rail instead of stacking five sections", async () => {
     await renderDesk();
-    const rail = screen.getByRole("group", { name: "نمایش آزمون‌ها" });
+    const rail = screen.getByRole("group", { name: "فیلتر آزمون‌ها" });
     expect(rail.textContent).toContain("همه");
     expect((rail.textContent ?? "").replace(/\s/g, "")).toContain("۵");
     fireEvent.click(screen.getByRole("button", { name: /نتایج/ }));
     expect(await screen.findByText("آزمون تصحیح‌شده")).toBeTruthy();
-    // The month calendar keeps showing the whole month whatever the list filter says, so the check is on
-    // the list's own card (a paragraph) rather than on any element with that title.
-    expect(screen.queryByText("آزمون آماده", { selector: "p" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "آزمون آماده" })).toBeNull();
   });
 
-  it("puts the attempt that is running in progress in front, with the server's countdown", async () => {
+  it("keeps the running attempt first and gives it one clear resume action", async () => {
     await renderDesk();
-    const hero = screen.getByRole("heading", { name: "آزمون در جریان" }).closest("div.rounded-2xl") as HTMLElement;
-    expect(hero).toBeTruthy();
-    expect(hero.textContent).toContain("آزمون در حال انجام");
+    const running = screen.getByRole("heading", { name: "آزمون در جریان" }).closest("div.rounded-2xl") as HTMLElement;
+    expect(running).toBeTruthy();
+    expect(running.textContent).toContain("در حال انجام");
+    expect(running.textContent).toContain("۲۰:۰۰");
     const link = screen.getByRole("link", { name: /ادامهٔ آزمون/ });
     expect(link.getAttribute("href")).toBe("/student/exam/running");
   });
 
-  it("counts down to the next exam and prints its date in Persian calendar and digits", async () => {
+  it("keeps the start time and countdown on the upcoming exam's own card", async () => {
     await renderDesk();
-    const band = screen.getByText("تا شروع").closest("div.rounded-2xl") as HTMLElement;
-    expect(band.textContent).toContain("آزمون هفتهٔ بعد");
-    // Two days minus the milliseconds the test took to run: the wording is "۱ روز و ۲۳ ساعت", which is
-    // what a coarse countdown should say rather than rounding up to a day that has not started.
-    expect(band.textContent).toMatch(/۱ روز و ۲۳ ساعت|۲ روز/);
-    // No Latin digit anywhere in the band means the date came out through the Persian formatter.
-    expect(/\d/.test(band.textContent ?? "")).toBe(false);
+    const upcoming = screen.getByRole("heading", { name: "آزمون هفتهٔ بعد" }).closest("div.rounded-2xl") as HTMLElement;
+    expect(upcoming.textContent).toContain("پیش‌رو");
+    expect(upcoming.textContent).toMatch(/۱ روز و ۲۳ ساعت|۲ روز/);
+    expect(/\d/.test(upcoming.textContent ?? "")).toBe(false);
   });
 
   it("shows a published result as a ring with the verdict next to it", async () => {
@@ -105,28 +101,24 @@ describe("StudentDashboardWorkspace", () => {
   it("keeps an ungraded paper separate from a published result", async () => {
     await renderDesk();
     fireEvent.click(screen.getByRole("button", { name: /نتایج/ }));
-    expect(await screen.findByText("در انتظار بررسی آموزگار")).toBeTruthy();
+    expect(await screen.findByText("در انتظار تصحیح")).toBeTruthy();
   });
 
-  it("summarises the report card in the sidebar", async () => {
+  it("keeps the dashboard focused on the exam list instead of repeating side summaries", async () => {
     await renderDesk();
-    const summary = await screen.findByText("کارنامهٔ شما");
-    const card = summary.closest("div.rounded-2xl") as HTMLElement;
-    expect(card.textContent).toContain("۸۰٪");
-    expect(card.textContent).toContain("۱/۱");
+    const rail = screen.getByRole("group", { name: "فیلتر آزمون‌ها" });
+    expect(rail.querySelectorAll("button")).toHaveLength(4);
+    expect(screen.queryByText("کارنامهٔ شما")).toBeNull();
+    expect(screen.queryByText("پاسخ‌ها خودکار ذخیره می‌شوند")).toBeNull();
+    expect(screen.queryByText("دسترسی امن آزمون")).toBeNull();
   });
 
-  it("explains the room rules the student will meet inside the exam", async () => {
-    await renderDesk();
-    expect(await screen.findByText("پاسخ‌ها خودکار ذخیره می‌شوند")).toBeTruthy();
-    expect(screen.getByText("زمان در سرور شمرده می‌شود")).toBeTruthy();
-  });
-
-  it("greets an empty account with what happens next rather than a blank page", async () => {
+  it("greets an empty account with one useful next step", async () => {
     listAvailable.mockResolvedValue([]);
     render(<StudentDashboardWorkspace/>);
-    expect(await screen.findByText("هنوز آزمون فعالی برای شما منتشر نشده است")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /همه/ }).textContent).toContain("۰");
+    expect(await screen.findByText("فعلاً آزمونی ندارید")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: /تازه‌سازی/ })).toHaveLength(2);
+    expect(screen.queryByRole("group", { name: "فیلتر آزمون‌ها" })).toBeNull();
   });
 
   it("keeps a failed load recoverable", async () => {

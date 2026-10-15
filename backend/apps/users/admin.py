@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.utils.translation import gettext_lazy as _
 
-from .models import StudentProfile, TeacherProfile, User
+from .models import StudentGroup, StudentGroupMember, StudentProfile, TeacherProfile, User
 
 
 @admin.register(User)
@@ -30,6 +30,25 @@ class StudentProfileAdmin(admin.ModelAdmin):
     search_fields = ("student_identifier", "user__email", "user__first_name", "user__last_name")
     autocomplete_fields = ("user",)
     readonly_fields = ("id", "created_at", "updated_at")
+
+
+class StudentGroupMemberInline(admin.TabularInline):
+    model = StudentGroupMember
+    extra = 0
+    autocomplete_fields = ("student",)
+
+
+@admin.register(StudentGroup)
+class StudentGroupAdmin(admin.ModelAdmin):
+    list_display = ("name", "teacher", "student_count", "updated_at")
+    search_fields = ("name", "teacher__email", "students__email", "students__first_name", "students__last_name")
+    autocomplete_fields = ("teacher",)
+    readonly_fields = ("id", "created_at", "updated_at")
+    inlines = (StudentGroupMemberInline,)
+
+    @admin.display(description="Students")
+    def student_count(self, obj):  # type: ignore[no-untyped-def]
+        return obj.students.count()
 
 
 @admin.register(TeacherProfile)

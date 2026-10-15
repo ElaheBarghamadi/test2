@@ -5,7 +5,8 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from apps.attempts.grading import grade_answer, requires_manual_grading
-from apps.attempts.models import AttemptEvent, ExamAttempt, StudentAnswer
+from apps.attempts.models import AttemptEvent, ExamAttempt, StudentAnswer, StudentAnswerAttachment
+from apps.exams.models import QuestionMedia
 
 from .models import ExamResult
 
@@ -80,11 +81,18 @@ class StudentResultSerializer(serializers.ModelSerializer):
             return []
         answers = {
             str(answer.question_id): answer
-            for answer in result.attempt.answers.select_related("question").prefetch_related("selected_options")
+            for answer in result.attempt.answers.select_related("question").prefetch_related("selected_options", "attachments")
         }
         rows: list[dict] = []
-        for question in result.attempt.exam.questions.select_related(None).prefetch_related("options").order_by("order"):
+        for question in result.attempt.exam.questions.select_related(None).prefetch_related("options", "media").order_by("order"):
             answer = answers.get(str(question.id))
+            raw_matches = (answer.answer_data or {}).get("matches", {}) if answer else {}
+            option_text_by_id = {str(option.id): option.text for option in question.options.all()}
+            pairs = (question.configuration or {}).get("matching_pairs", []) if isinstance(question.configuration, dict) else []
+            matching_answers = [
+                {"prompt": str(pair.get("prompt", "")), "your_answer": option_text_by_id.get(str(raw_matches.get(str(pair.get("id")), "")), "")}
+                for pair in pairs if isinstance(pair, dict) and pair.get("id")
+            ]
             row: dict = {  # type: ignore[type-arg]
                 "question_id": str(question.id),
                 "question_order": question.order,
@@ -93,6 +101,25 @@ class StudentResultSerializer(serializers.ModelSerializer):
                 "marks": f"{question.marks:.2f}",
                 "your_answer": (answer.answer_data or {}).get("text") if answer else None,
                 "selected_option_texts": [option.text for option in answer.selected_options.all()] if answer else [],
+                "matching_answers": matching_answers,
+                "question_media": [
+                    {
+                        "id": str(media.id), "kind": media.kind,
+                        "url": f"/api/v1/questions/{media.question_id}/media/{media.id}/file/",
+                        "content_type": media.content_type, "size_bytes": media.size_bytes,
+                        "alt_text": media.alt_text, "order": media.order,
+                    }
+                    for media in question.media.all()
+                ],
+                "attachments": [
+                    {
+                        "id": str(attachment.id), "kind": attachment.kind,
+                        "url": f"/api/v1/student/media/answers/{attachment.id}/",
+                        "content_type": attachment.content_type, "size_bytes": attachment.size_bytes,
+                        "original_name": attachment.original_name,
+                    }
+                    for attachment in (answer.attachments.all() if answer else [])
+                ],
             }
             if level == detail.OWN_ANSWERS:
                 rows.append(row)
@@ -266,6 +293,30 @@ class TeacherAttemptEventSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class TeacherAnswerAttachmentSerializer(serializers.ModelSerializer):
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StudentAnswerAttachment
+        fields = ("id", "kind", "url", "content_type", "size_bytes", "original_name")
+        read_only_fields = fields
+
+    def get_url(self, attachment: StudentAnswerAttachment) -> str:
+        return f"/api/v1/student/media/answers/{attachment.id}/"
+
+
+class TeacherQuestionMediaSerializer(serializers.ModelSerializer):
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuestionMedia
+        fields = ("id", "kind", "url", "content_type", "size_bytes", "alt_text", "order")
+        read_only_fields = fields
+
+    def get_url(self, media: QuestionMedia) -> str:
+        return f"/api/v1/questions/{media.question_id}/media/{media.id}/file/"
+
+
 class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
     question_id = serializers.UUIDField(read_only=True)
     question_text = serializers.CharField(source="question.text", read_only=True)
@@ -275,6 +326,10 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
     selected_option_ids = serializers.SerializerMethodField()
     selected_option_texts = serializers.SerializerMethodField()
     text = serializers.SerializerMethodField()
+    matches = serializers.SerializerMethodField()
+    matching_pairs = serializers.SerializerMethodField()
+    attachments = TeacherAnswerAttachmentSerializer(many=True, read_only=True)
+    question_media = TeacherQuestionMediaSerializer(source="question.media", many=True, read_only=True)
     manual_grading_required = serializers.SerializerMethodField()
     # What the answer is worth, and how that was decided. `manual_grading_required` alone made the marking
     # screen a to-do list: the auto-graded half of the sheet carried no number at all, so a teacher could
@@ -299,6 +354,10 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
             "selected_option_ids",
             "selected_option_texts",
             "text",
+            "matches",
+            "matching_pairs",
+            "attachments",
+            "question_media",
             "manual_grading_required",
             "awarded_score",
             "verdict",
@@ -320,6 +379,25 @@ class TeacherAttemptAnswerSerializer(serializers.ModelSerializer):
     def get_text(self, answer: StudentAnswer) -> str | None:
         value = answer.answer_data.get("text") if isinstance(answer.answer_data, dict) else None
         return value if isinstance(value, str) and value else None
+
+    def get_matches(self, answer: StudentAnswer) -> dict[str, str]:
+        value = answer.answer_data.get("matches") if isinstance(answer.answer_data, dict) else None
+        return {str(key): str(option_id) for key, option_id in value.items()} if isinstance(value, dict) else {}
+
+    def get_matching_pairs(self, answer: StudentAnswer) -> list[dict[str, str]]:
+        configuration = answer.question.configuration if isinstance(answer.question.configuration, dict) else {}
+        matches = self.get_matches(answer)
+        options_by_id = {str(option.id): option.text for option in answer.question.options.all()}
+        return [
+            {
+                "id": str(pair["id"]),
+                "prompt": str(pair.get("prompt", "")),
+                "correct_answer": str(pair.get("answer", "")),
+                "selected_answer": options_by_id.get(matches.get(str(pair["id"]), ""), ""),
+            }
+            for pair in configuration.get("matching_pairs", [])
+            if isinstance(pair, dict) and pair.get("id")
+        ]
 
     def _mark(self, answer: StudentAnswer):
         # One `grade_answer` call per row, shared by both fields: a `many=True` list reuses this instance,

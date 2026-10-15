@@ -3,14 +3,39 @@ from __future__ import annotations
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import F, Max
+from django.db.models import F, Max, Q
 from rest_framework import serializers
 
-from apps.users.models import User
+from apps.organizations.models import SchoolMembership
+from apps.users.models import StudentGroup, User
 
-from .models import Exam, ExamSettings, Question, QuestionOption, QuestionTag
+from .models import Exam, ExamSettings, Question, QuestionMedia, QuestionOption, QuestionTag
 from .content_identity import content_identity, question_content_hash
 from .services import question_definition_errors, refresh_total_marks
+
+
+class QuestionMediaSerializer(serializers.ModelSerializer):
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuestionMedia
+        fields = ("id", "kind", "url", "content_type", "size_bytes", "alt_text", "order", "sha256")
+        read_only_fields = fields
+
+    def get_url(self, media: QuestionMedia) -> str:
+        return f"/api/v1/questions/{media.question_id}/media/{media.id}/file/"
+
+
+class StudentQuestionMediaSerializer(serializers.ModelSerializer):
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuestionMedia
+        fields = ("id", "kind", "url", "content_type", "size_bytes", "alt_text", "order")
+        read_only_fields = fields
+
+    def get_url(self, media: QuestionMedia) -> str:
+        return f"/api/v1/questions/{media.question_id}/media/{media.id}/file/"
 
 
 class StudentQuestionOptionSerializer(serializers.ModelSerializer):
@@ -21,11 +46,12 @@ class StudentQuestionOptionSerializer(serializers.ModelSerializer):
 
 class StudentQuestionSerializer(serializers.ModelSerializer):
     options = StudentQuestionOptionSerializer(many=True, read_only=True)
+    media = StudentQuestionMediaSerializer(many=True, read_only=True)
 
     class Meta:
         model = Question
         # Student-facing routes are intentionally deferred and must continue to omit answer keys.
-        fields = ("id", "type", "text", "instructions", "order", "marks", "options")
+        fields = ("id", "type", "text", "instructions", "order", "marks", "options", "media")
 
 
 class TeacherQuestionOptionSerializer(serializers.ModelSerializer):
@@ -43,6 +69,7 @@ class QuestionTagSerializer(serializers.ModelSerializer):
 
 class TeacherQuestionSerializer(serializers.ModelSerializer):
     options = TeacherQuestionOptionSerializer(many=True, read_only=True)
+    media = QuestionMediaSerializer(many=True, read_only=True)
     tags = QuestionTagSerializer(many=True, read_only=True)
     usage_count = serializers.IntegerField(read_only=True)
     answered_count = serializers.IntegerField(read_only=True)
@@ -66,6 +93,7 @@ class TeacherQuestionSerializer(serializers.ModelSerializer):
             "configuration",
             "explanation",
             "options",
+            "media",
             "difficulty",
             "tags",
             "is_archived",
@@ -142,14 +170,22 @@ class ExamSettingsSerializer(serializers.ModelSerializer):
             # other answer to "how should this exam behave".
             "integrity_policy",
             "max_tab_switches",
+            "tab_switch_grace_seconds",
             "block_copy_paste",
             "require_fullscreen",
             "lock_to_one_device",
+            "record_access_info",
+            "block_screenshot_shortcuts",
         )
 
     def validate_max_tab_switches(self, value: int) -> int:
         if value > 100:
-            raise serializers.ValidationError("A tab-switch limit above 100 does not describe an exam.")
+            raise serializers.ValidationError("A warning limit above 100 does not describe an exam.")
+        return value
+
+    def validate_tab_switch_grace_seconds(self, value: int) -> int:
+        if value > 120:
+            raise serializers.ValidationError("The tab-switch grace period cannot exceed 120 seconds.")
         return value
 
     def validate_max_attempts(self, value: int) -> int:
@@ -189,6 +225,7 @@ class TeacherExamListSerializer(serializers.ModelSerializer):
             "subject",
             "grade",
             "class_name",
+            "audience_mode",
             "teacher",
             "teacher_name",
             "status",
@@ -209,6 +246,8 @@ class TeacherExamListSerializer(serializers.ModelSerializer):
 class TeacherExamSerializer(serializers.ModelSerializer):
     settings = ExamSettingsSerializer(read_only=True)
     questions = TeacherQuestionSerializer(many=True, read_only=True)
+    student_groups = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    students = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
     question_count = serializers.IntegerField(read_only=True)
     attempt_count = serializers.IntegerField(read_only=True)
     participant_count = serializers.IntegerField(read_only=True)
@@ -223,6 +262,9 @@ class TeacherExamSerializer(serializers.ModelSerializer):
             "subject",
             "grade",
             "class_name",
+            "audience_mode",
+            "student_groups",
+            "students",
             "instructions",
             "teacher",
             "status",
@@ -242,10 +284,25 @@ class TeacherExamSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+def _students_visible_to_exam_owner(owner: User):
+    students = User.objects.filter(role=User.Role.STUDENT, is_active=True)
+    if owner.role == User.Role.ADMIN:
+        return students
+    school_id = SchoolMembership.objects.filter(user=owner).values_list("school_id", flat=True).first()
+    if school_id:
+        return students.filter(school_membership__school_id=school_id)
+    return students.filter(Q(exam_attempts__exam__teacher=owner) | Q(group_memberships__group__teacher=owner)).distinct()
+
+
 class ExamWriteSerializer(serializers.ModelSerializer):
     """Teacher input shape. Ownership and state stay under server control."""
 
     settings = ExamSettingsSerializer(required=False)
+    audience_mode = serializers.ChoiceField(choices=Exam.AudienceMode.choices, required=False)
+    student_groups = serializers.PrimaryKeyRelatedField(queryset=StudentGroup.objects.all(), many=True, required=False)
+    students = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(role=User.Role.STUDENT, is_active=True), many=True, required=False
+    )
     protected_fields = {"teacher", "status", "total_marks", "status_before_archive"}
 
     class Meta:
@@ -256,6 +313,9 @@ class ExamWriteSerializer(serializers.ModelSerializer):
             "subject",
             "grade",
             "class_name",
+            "audience_mode",
+            "student_groups",
+            "students",
             "instructions",
             "duration_minutes",
             "start_at",
@@ -295,6 +355,32 @@ class ExamWriteSerializer(serializers.ModelSerializer):
             errors["start_at"] = "A start time is required when an end time is set."
         if start_at and end_at and end_at <= start_at:
             errors["end_at"] = "End time must be after start time."
+
+        owner = self.context.get("teacher") or getattr(self.context.get("request"), "user", None)
+        owner = owner or (instance.teacher if instance is not None else None)
+        groups = attrs.get("student_groups", list(instance.student_groups.all()) if instance is not None else [])
+        students = attrs.get("students", list(instance.students.all()) if instance is not None else [])
+        mode = attrs.get("audience_mode", instance.audience_mode if instance is not None else Exam.AudienceMode.PROFILE)
+        if owner is not None:
+            if any(group.teacher_id != owner.id for group in groups):
+                errors["student_groups"] = "می‌توانید فقط از گروه‌های خودتان استفاده کنید."
+            visible_ids = set(_students_visible_to_exam_owner(owner).values_list("id", flat=True))
+            if any(student.id not in visible_ids for student in students):
+                errors["students"] = "یک یا چند دانش‌آموز در فهرست مجاز شما نیستند."
+        if "student_groups" in attrs and len(groups) != len({group.id for group in groups}):
+            errors["student_groups"] = "گروه تکراری انتخاب شده است."
+        if "students" in attrs and len(students) != len({student.id for student in students}):
+            errors["students"] = "دانش‌آموز تکراری انتخاب شده است."
+        if instance is not None and instance.attempts.exists():
+            current_group_ids = set(instance.student_groups.values_list("id", flat=True))
+            current_student_ids = set(instance.students.values_list("id", flat=True))
+            changed = (
+                mode != instance.audience_mode
+                or {group.id for group in groups} != current_group_ids
+                or {student.id for student in students} != current_student_ids
+            )
+            if changed:
+                errors["audience_mode"] = "پس از آغاز تلاش دانش‌آموزان، مخاطبان آزمون قابل تغییر نیستند."
         if errors:
             raise serializers.ValidationError(errors)
         return attrs
@@ -309,22 +395,32 @@ class ExamWriteSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data: dict) -> Exam:
         settings_data = validated_data.pop("settings", None)
+        groups = validated_data.pop("student_groups", [])
+        students = validated_data.pop("students", [])
         teacher = self.context["teacher"]
         with transaction.atomic():
             exam = Exam(teacher=teacher, **validated_data)
             exam.full_clean()
             exam.save()
+            exam.student_groups.set(groups)
+            exam.students.set(students)
             if settings_data is not None:
                 self._update_settings(exam, settings_data)
             return exam
 
     def update(self, instance: Exam, validated_data: dict) -> Exam:
         settings_data = validated_data.pop("settings", None)
+        groups = validated_data.pop("student_groups", None)
+        students = validated_data.pop("students", None)
         with transaction.atomic():
             for field, value in validated_data.items():
                 setattr(instance, field, value)
             instance.full_clean()
             instance.save()
+            if groups is not None:
+                instance.student_groups.set(groups)
+            if students is not None:
+                instance.students.set(students)
             if settings_data is not None:
                 self._update_settings(instance, settings_data)
             return instance
@@ -333,6 +429,7 @@ class ExamWriteSerializer(serializers.ModelSerializer):
 class QuestionWriteSerializer(serializers.ModelSerializer):
     """Write-only nested option input; teacher responses use TeacherQuestionSerializer."""
 
+    text = serializers.CharField(required=False, allow_blank=True, trim_whitespace=True)
     options = QuestionOptionWriteSerializer(many=True, required=False)
     # Blanks are tolerated and dropped rather than rejected: the builder's tag input keeps an empty
     # field while the teacher is typing a new label.
@@ -370,10 +467,7 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
         return (value or "").strip()[:80]
 
     def validate_text(self, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise serializers.ValidationError("Question text cannot be blank.")
-        return value
+        return value.strip()
 
     def validate_marks(self, value):
         if value < 0:
@@ -399,6 +493,9 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
                 })
         question_type = attrs.get("type", instance.type if instance else None)
         configuration = attrs.get("configuration", instance.configuration if instance else {})
+        effective_text = attrs.get("text", instance.text if instance else "").strip()
+        if not effective_text and not (isinstance(configuration, dict) and configuration.get("image_only") is True):
+            raise serializers.ValidationError({"text": "متن سؤال را وارد کنید یا صورت سؤال را به‌صورت تصویر ثبت کنید."})
         status_value = attrs.get("status", instance.status if instance is not None else Question.Status.READY)
         # A draft in the bank is work in progress: its author may save a half-written question and come back
         # to it, so the structural rules it will have to satisfy are deferred to the moment it is marked
@@ -432,6 +529,10 @@ class QuestionWriteSerializer(serializers.ModelSerializer):
                 {"text": option.get("text"), "is_correct": option.get("is_correct")}
                 for option in effective_options
             ],
+            media_hashes=(
+                instance.media.order_by("id").values_list("sha256", flat=True)
+                if instance is not None else ()
+            ),
         )
         if instance is not None:
             # "Another copy of this exact question" means the same exam for exam content, and the same

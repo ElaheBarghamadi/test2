@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.conf import settings
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.functions import Lower
 
@@ -106,6 +108,54 @@ class StudentProfile(TimeStampedUUIDModel):
 
     def __str__(self) -> str:
         return f"Student profile: {self.user.get_full_name()}"
+
+
+class StudentGroup(TimeStampedUUIDModel):
+    """A reusable, teacher-owned roster. Membership is evaluated when an exam is started."""
+
+    teacher = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="owned_student_groups")
+    name = models.CharField(max_length=120)
+    description = models.CharField(max_length=300, blank=True)
+    students = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        through="StudentGroupMember",
+        related_name="student_groups",
+        blank=True,
+    )
+
+    class Meta:
+        ordering = ("name",)
+        constraints = [
+            models.UniqueConstraint(Lower("name"), models.F("teacher"), name="unique_student_group_name_per_teacher"),
+        ]
+        indexes = [models.Index(fields=("teacher", "name"))]
+
+    def __str__(self) -> str:
+        return f"{self.name} · {self.teacher}"
+
+    def clean(self) -> None:
+        if self.teacher_id and getattr(self.teacher, "role", None) not in {User.Role.TEACHER, User.Role.ADMIN}:
+            raise ValidationError({"teacher": "Only a teacher or administrator can own student groups."})
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValidationError({"name": "Group name cannot be blank."})
+
+
+class StudentGroupMember(TimeStampedUUIDModel):
+    group = models.ForeignKey(StudentGroup, on_delete=models.CASCADE, related_name="memberships")
+    student = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="group_memberships")
+
+    class Meta:
+        ordering = ("student__last_name", "student__first_name", "student__email")
+        constraints = [models.UniqueConstraint(fields=("group", "student"), name="unique_student_group_member")]
+        indexes = [models.Index(fields=("student", "group"))]
+
+    def __str__(self) -> str:
+        return f"{self.student} · {self.group.name}"
+
+    def clean(self) -> None:
+        if self.student_id and getattr(self.student, "role", None) != User.Role.STUDENT:
+            raise ValidationError({"student": "Only student accounts can join a student group."})
 
 
 class TeacherProfile(TimeStampedUUIDModel):

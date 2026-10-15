@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 /**
@@ -23,10 +23,25 @@ beforeEach(() => {
   Object.values(api).forEach((fn) => fn.mockReset());
   downloads.file.mockReset();
   toast.mockReset();
-  api.exportExam.mockResolvedValue({ kind: "examora.exam.v1", exported_at: "2026-09-13T09:00:00Z", exam: { id: "exam-1" }, questions: [{ id: "q1" }, { id: "q2" }] });
+  api.exportExam.mockResolvedValue({
+    kind: "examora.exam.v1", exported_at: "2026-09-13T09:00:00Z",
+    exam: {
+      id: "exam-1", title: "آزمون فیزیک", subject: "فیزیک", grade: "دوازدهم", class_name: "تجربی ۱",
+      teacher: "teacher-1", teacher_name: "دبیر فیزیک", status: "draft", duration_minutes: 40,
+      total_marks: 4, start_at: null, end_at: null, settings: {}, question_count: 2, attempt_count: 0,
+      participant_count: 0, created_at: "2026-09-13T09:00:00Z", updated_at: "2026-09-13T09:00:00Z",
+      description: "", instructions: "پاسخ‌ها را با دقت بخوانید.", questions: [],
+    },
+    questions: [
+      { id: "q1", exam: "exam-1", type: "multiple_choice", text: "جرم چیست؟", instructions: "یک گزینه را انتخاب کنید.", marks: 2, order: 1, options: [{ id: "o1", text: "مقدار ماده", order: 1, is_correct: true }, { id: "o2", text: "نیرو", order: 2, is_correct: false }] },
+      { id: "q2", exam: "exam-1", type: "short_answer", text: "یکای نیرو؟", instructions: "", marks: 2, order: 2, options: [], configuration: { expected_answers: ["نیوتون"] } },
+    ],
+  });
   api.exportCsv.mockResolvedValue("دانش‌آموز,نمره\nسارا,2.00\n");
   api.importExam.mockResolvedValue({ id: "exam-new", imported: { questions: 2, settings_imported: true } });
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("the export", () => {
   it("hands the teacher a file of the paper, and says what is in it", async () => {
@@ -35,6 +50,41 @@ describe("the export", () => {
     await waitFor(() => expect(downloads.file).toHaveBeenCalledWith("exam-2026-09-13.json", expect.stringContaining("examora.exam.v1")));
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "فایل آزمون دانلود شد" }));
     expect((toast.mock.calls.at(-1)?.[0] as { description?: string }).description).toContain("پاسخ هیچ دانش‌آموزی");
+  });
+
+  it("opens a print-ready student paper without the separate answer-key pages", async () => {
+    const popupDocument = { open: vi.fn(), write: vi.fn(), close: vi.fn() };
+    const popup = { document: popupDocument, closed: false, focus: vi.fn(), print: vi.fn() };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    render(<ExamDataPanel examId="exam-1" examTitle="آزمون فیزیک" questionCount={2}/>);
+
+    fireEvent.click(screen.getByRole("button", { name: /چاپ \/ ذخیره/ }));
+    fireEvent.click(screen.getByRole("button", { name: "آماده‌سازی برگه" }));
+    await waitFor(() => expect(popupDocument.write).toHaveBeenCalledTimes(2));
+
+    const html = popupDocument.write.mock.calls.at(-1)?.[0] as string;
+    expect(html).toContain("برگهٔ دانش‌آموز");
+    expect(html).toContain("جرم چیست؟");
+    expect(html).toContain("نام و نام خانوادگی:");
+    expect(html).not.toContain("کلید پاسخ دبیر");
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: "برگهٔ چاپ آماده است" }));
+  });
+
+  it("can include a teacher-only key on a separate printable page", async () => {
+    const popupDocument = { open: vi.fn(), write: vi.fn(), close: vi.fn() };
+    const popup = { document: popupDocument, closed: false, focus: vi.fn(), print: vi.fn() };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    render(<ExamDataPanel examId="exam-1" examTitle="آزمون فیزیک" questionCount={2}/>);
+
+    fireEvent.click(screen.getByRole("button", { name: /چاپ \/ ذخیره/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /نسخهٔ دبیر/ }));
+    fireEvent.click(screen.getByRole("button", { name: "آماده‌سازی برگه" }));
+    await waitFor(() => expect(popupDocument.write).toHaveBeenCalledTimes(2));
+
+    const html = popupDocument.write.mock.calls.at(-1)?.[0] as string;
+    expect(html).toContain("کلید پاسخ دبیر");
+    expect(html).toContain("page-break-before: always");
+    expect(html).toContain("نیوتون");
   });
 
   it("sends the marks as a csv the school can open", async () => {

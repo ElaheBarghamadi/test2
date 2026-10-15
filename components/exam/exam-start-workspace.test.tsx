@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { ExamStartWorkspace } from "@/components/exam/exam-start-workspace";
 import { useExamAttemptStore } from "@/lib/state/exam-attempt-store";
 import type { Exam } from "@/lib/types/domain";
@@ -25,20 +25,21 @@ describe("ExamStartWorkspace gating", () => {
     useExamAttemptStore.setState({ attempt: null });
     render(<ExamStartWorkspace exam={previewExam()} remote/>);
     expect(startButton().disabled).toBe(false);
-    expect(screen.getByText(/۵ سؤال/)).toBeTruthy();
+    expect(screen.getByText("۵")).toBeTruthy();
     expect(screen.getByText(/به‌صورت خودکار در طول آزمون ذخیره می‌شوند/)).toBeTruthy();
   });
 
   it("shows the marks, pass mark and attempt budget the server reported", () => {
     useExamAttemptStore.setState({ attempt: null });
     render(<ExamStartWorkspace exam={previewExam()} remote/>);
+    fireEvent.click(screen.getByText("زمان، نمره و قوانین"));
     expect(screen.getByText("کل نمره")).toBeTruthy();
     expect(screen.getByText("۱۰ نمره")).toBeTruthy();
-    expect(screen.getByText("حداقل نمرهٔ قبولی")).toBeTruthy();
+    expect(screen.getByText("حداقل قبولی")).toBeTruthy();
     expect(screen.getByText("۵۰٪")).toBeTruthy();
     expect(screen.getByText("تلاش باقی‌مانده")).toBeTruthy();
     expect(screen.getByText("۲ از ۲")).toBeTruthy();
-    expect(screen.getByText(/۲ تلاش مجاز دارید/)).toBeTruthy();
+    expect(screen.getByText(/تلاش مجاز: ۲/)).toBeTruthy();
     expect(screen.getByText(/نتیجه پس از بررسی و انتشار معلم/)).toBeTruthy();
   });
 
@@ -46,7 +47,7 @@ describe("ExamStartWorkspace gating", () => {
     useExamAttemptStore.setState({ attempt: null });
     render(<ExamStartWorkspace exam={previewExam({ attemptsUsed: 2, availability: "completed" })} remote/>);
     expect(startButton().disabled).toBe(true);
-    expect(screen.getAllByText(/تعداد تلاش‌های مجاز شما به پایان رسیده است/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("alert").textContent).toContain("تعداد تلاش‌های مجاز شما به پایان رسیده است");
     expect(screen.getByText("۰ از ۲")).toBeTruthy();
   });
 
@@ -69,6 +70,7 @@ describe("ExamStartWorkspace gating", () => {
     useExamAttemptStore.setState({ attempt: null });
     render(<ExamStartWorkspace exam={previewExam({ settings: { ...previewExam().settings, allowBackNavigation: false, questionLayout: "paged" } })} remote/>);
     expect(screen.getByText(/بازگشت به سؤال‌های قبل ممکن نیست و سؤالِ ردشده قفل می‌شود/)).toBeTruthy();
+    fireEvent.click(screen.getByText("زمان، نمره و قوانین"));
     expect(screen.getByText(/حتی با رفرش صفحه بازنمی‌گردد/)).toBeTruthy();
   });
 
@@ -85,8 +87,9 @@ describe("ExamStartWorkspace gating", () => {
     expect(screen.queryByText(/جابه‌جا می‌شود/)).toBeNull();
     unmount();
     render(<ExamStartWorkspace exam={previewExam({ settings: { ...previewExam().settings, randomizeQuestions: true, randomizeOptions: true } })} remote/>);
+    fireEvent.click(screen.getByText("زمان، نمره و قوانین"));
     expect(screen.getByText(/ترتیب سؤال‌ها برای هر دانش‌آموز به‌صورت تصادفی است/)).toBeTruthy();
-    expect(screen.getByText(/گزینه‌های سؤال‌های چندگزینه‌ای هم برای هر دانش‌آموز جابه‌جا می‌شود/)).toBeTruthy();
+    expect(screen.getByText(/گزینه‌های چندگزینه‌ای برای هر دانش‌آموز جابه‌جا می‌شود/)).toBeTruthy();
   });
 
   it("does not offer an empty exam as startable", () => {

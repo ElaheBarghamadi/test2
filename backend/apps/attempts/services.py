@@ -8,6 +8,7 @@ from math import ceil
 from random import SystemRandom
 from typing import TYPE_CHECKING, Any
 
+from django.conf import settings as django_settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
@@ -16,7 +17,7 @@ from apps.exams.models import Exam, ExamSettings, Question, QuestionOption
 from apps.organizations.models import SchoolMembership
 from apps.users.models import StudentProfile, User
 
-from .models import AttemptEvent, ExamAttempt, StudentAnswer
+from .models import AttemptEvent, ExamAttempt, StudentAnswer, StudentAnswerAttachment
 
 if TYPE_CHECKING:  # Import cycles are avoided at runtime by the deferred imports in the functions below.
     from apps.results.models import ExamResult
@@ -24,6 +25,7 @@ if TYPE_CHECKING:  # Import cycles are avoided at runtime by the deferred import
 from .grading import (
     VERDICT_CORRECT,
     VERDICT_MANUAL,
+    VERDICT_PARTIAL,
     VERDICT_PENDING,
     VERDICT_UNANSWERED,
     answer_has_value,
@@ -38,15 +40,23 @@ class AudienceContext:
     student; with a dashboard of several exams that was the dominant cost of the busiest student route.
     """
 
-    __slots__ = ("student_school_id", "grade", "class_name")
+    __slots__ = ("student_school_id", "grade", "class_name", "selected_exam_ids")
 
     def __init__(self, student: User) -> None:
+        from django.db.models import Q
+
         self.student_school_id = (
             SchoolMembership.objects.filter(user=student).values_list("school_id", flat=True).first()
         )
         profile = StudentProfile.objects.filter(user=student).only("grade", "class_name").first()
         self.grade = profile.grade if profile else None
         self.class_name = profile.class_name if profile else None
+        # One query for all explicit recipients, rather than a membership lookup per candidate exam.
+        self.selected_exam_ids = set(
+            Exam.objects.filter(Q(students=student) | Q(student_groups__students=student))
+            .values_list("id", flat=True)
+            .distinct()
+        )
 
     def matches(self, exam: Exam) -> bool:
         teacher_school_id = getattr(exam.teacher, "_school_id_cache", _MISSING)
@@ -56,6 +66,8 @@ class AudienceContext:
             setattr(exam.teacher, "_school_id_cache", teacher_school_id)
         if teacher_school_id and teacher_school_id != self.student_school_id:
             return False
+        if exam.audience_mode == Exam.AudienceMode.SELECTED:
+            return exam.pk in self.selected_exam_ids
         if not exam.grade and not exam.class_name:
             return True
         if self.grade is None and self.class_name is None:
@@ -244,16 +256,16 @@ def _validate_start_access(exam: Exam, student: User, now: datetime) -> None:
 def device_fingerprint(user_agent: str) -> str:
     """A stable, non-reversible label for the browser an attempt was started in.
 
-    It is deliberately weak in one direction and strong in the other: two tabs of the same browser share a
-    signature (so a refresh, a crash or a re-login never costs a student their exam), while a different
-    machine or a different browser family does not. That is the distinction a one-device lock is actually
-    able to make from a server; pretending it could identify a person would be a lie with consequences.
+    Two tabs with the same User-Agent share a signature (so a refresh never costs a student their exam),
+    while a different User-Agent may be refused. Different physical devices can send the same value, and it
+    can be spoofed: this is not a hardware identifier or proof of identity.
     """
     raw = (user_agent or "").strip()[:512]
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
 def _tab_switch_count(attempt: ExamAttempt) -> int:
+    """Count only confirmed departures; short returns never become AttemptEvent rows."""
     return attempt.events.filter(kind=AttemptEvent.Kind.TAB_HIDDEN).count()
 
 
@@ -274,7 +286,14 @@ def integrity_summary(attempt: ExamAttempt) -> dict[str, Any]:
     }
 
 
-def start_attempt(exam_id: Any, student: User, *, client_session: str = "", user_agent: str = "") -> tuple[ExamAttempt, bool]:
+def start_attempt(
+    exam_id: Any,
+    student: User,
+    *,
+    client_session: str = "",
+    user_agent: str = "",
+    client_ip_address: str | None = None,
+) -> tuple[ExamAttempt, bool]:
     """Start one active attempt, reusing an existing valid one for duplicate start requests."""
     with transaction.atomic():
         exam = Exam.objects.select_for_update().select_related("settings").get(pk=exam_id)
@@ -290,11 +309,9 @@ def start_attempt(exam_id: Any, student: User, *, client_session: str = "", user
         if active_attempt is not None:
             active_attempt = finalize_expired_attempt(active_attempt, now=now)
             if active_attempt.status == ExamAttempt.Status.IN_PROGRESS:
-                # A refresh or a second tab reuses the attempt; claiming it is an explicit action so an
-                # accidental duplicate cannot quietly take ownership away.
+                # Reusing a live attempt is not a takeover, so a refused device never blocks a refresh;
+                # the lock is applied where work is actually written.
                 if client_session and active_attempt.client_session != client_session:
-                    # Reusing a live attempt is not a takeover, so a refused device never blocks a refresh;
-                    # the lock is applied where work is actually written.
                     adopt_client_session(active_attempt, client_session, reason="start", user_agent=user_agent, enforce=False)
                 return active_attempt, False
 
@@ -305,6 +322,7 @@ def start_attempt(exam_id: Any, student: User, *, client_session: str = "", user
         question_ids = list(exam.questions.order_by("order").values_list("id", flat=True))
         if exam.settings.randomize_questions:
             SystemRandom().shuffle(question_ids)
+        collect_access_info = exam.settings.integrity_records and exam.settings.record_access_info
         attempt = ExamAttempt(
             exam=exam,
             student=student,
@@ -317,7 +335,14 @@ def start_attempt(exam_id: Any, student: User, *, client_session: str = "", user
             question_order=[str(question_id) for question_id in question_ids],
             option_order=build_option_order(exam),
             client_session=client_session[:64],
-            device_signature=device_fingerprint(user_agent),
+            # Only retain a derived UA signature when the teacher explicitly enabled an enforced device lock.
+            device_signature=(
+                device_fingerprint(user_agent)
+                if exam.settings.integrity_enforced and exam.settings.lock_to_one_device and user_agent.strip()
+                else ""
+            ),
+            client_ip_address=client_ip_address if collect_access_info else None,
+            client_user_agent=user_agent[:512] if collect_access_info else "",
         )
         attempt.full_clean()
         attempt.save()
@@ -360,11 +385,7 @@ def adopt_client_session(
     user_agent: str = "",
     enforce: bool = True,
 ) -> str:
-    """Move attempt ownership to `client_session`. Answers "adopted", "unchanged" or "refused".
-
-    The three-way result exists because the callers want different things: a heartbeat reports a refusal, an
-    explicit claim raises it, and a start reusing a live attempt ignores it. `enforce=False` is the last one.
-    """
+    """Move attempt ownership to `client_session`. Answers "adopted", "unchanged" or "refused"."""
     client_session = (client_session or "")[:64]
     settings = attempt.exam.settings
     if enforce and settings.integrity_enforced and settings.lock_to_one_device and attempt.device_signature:
@@ -413,13 +434,8 @@ def heartbeat(attempt_id: Any, student: User, *, client_session: str = "", user_
             **timing,
             "status": attempt.status,
             "answer_revision": attempt.answer_revision,
-            # The heartbeat is the only other place the client learns about the attempt while it writes, so
-            # the navigation frontier rides along: the runner can lock a passed question within one poll
-            # instead of waiting for a full detail read.
             "answer_frontier": int(attempt.answer_frontier or 0),
             "session_locked_by_other": other_session,
-            # A refused device lock has to reach the student while they are still writing, not only when the
-            # teacher opens the report afterwards: this is the one call the runner makes on a timer.
             "device_locked": device_locked,
             "integrity": integrity_summary(attempt),
             "question_count": len(attempt_question_ids(attempt)),
@@ -436,8 +452,7 @@ def claim_session(attempt_id: Any, student: User, *, client_session: str, user_a
         if attempt.status != ExamAttempt.Status.IN_PROGRESS:
             raise ValidationError({"attempt": ["This exam session can no longer be changed."]})
         # A refusal is committed, then raised outside the transaction. Raising from inside would roll the
-        # whole block back — including the event that tells the teacher somebody tried to continue the exam
-        # from another machine, which is the one piece of this exchange worth keeping.
+        # whole block back — including the event that tells the teacher somebody tried to continue the exam.
         refused = adopt_client_session(attempt, client_session, reason="claimed", user_agent=user_agent) == "refused"
         if not refused:
             attempt.last_activity_at = timezone.now()
@@ -445,36 +460,124 @@ def claim_session(attempt_id: Any, student: User, *, client_session: str, user_a
         payload = {**attempt_timing(attempt), "status": attempt.status, "answer_revision": attempt.answer_revision}
     if refused:
         raise AttemptConflict(
-            "این آزمون روی دستگاهی که با آن شروع شده قفل است. برای ادامه دادن به معلم بگویید.",
+            "این آزمون روی مرورگری که با آن شروع شده قفل است. برای ادامه دادن به معلم بگویید.",
             code="device_locked",
         )
     return payload
 
 
-# Signals the runner has always reported, and which say as much about a flaky network as about a student.
+def _confirm_tab_departure(attempt: ExamAttempt, settings, now) -> tuple[bool, bool]:  # type: ignore[no-untyped-def]
+    """Confirm a pending departure after server time has passed the teacher's grace period.
+
+    Returns `(new_warning_recorded, should_close)`. The warning budget is N warnings; the next confirmed
+    departure is the one that closes the attempt. No browser-provided duration or timestamp is trusted.
+    """
+    started = attempt.visibility_hidden_at
+    if started is None or attempt.visibility_violation_recorded:
+        return False, False
+    elapsed = max(0.0, (now - started).total_seconds())
+    grace = int(settings.tab_switch_grace_seconds)
+    if elapsed < grace:
+        return False, False
+
+    prior_count = _tab_switch_count(attempt)
+    limit = int(settings.max_tab_switches) if settings.integrity_enforced else 0
+    should_close = bool(limit and prior_count >= limit)
+    if should_close:
+        # The over-budget departure is the stop event, not an extra warning. Keeping it out of TAB_HIDDEN
+        # means the teacher sees exactly N warnings and this separate next-event closure.
+        record_attempt_event(
+            attempt,
+            AttemptEvent.Kind.TAB_LIMIT_REACHED,
+            detail={
+                "warning_limit": limit,
+                "warning_count_before_close": prior_count,
+                "duration_seconds": int(elapsed),
+                "grace_seconds": grace,
+            },
+        )
+    else:
+        record_attempt_event(
+            attempt,
+            AttemptEvent.Kind.TAB_HIDDEN,
+            detail={"duration_seconds": int(elapsed), "grace_seconds": grace},
+        )
+    attempt.visibility_violation_recorded = True
+    attempt.save(update_fields=("visibility_violation_recorded", "updated_at"))
+    return True, should_close
+
+
+def _record_visibility_signal(attempt: ExamAttempt, settings, *, kind: str) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    """Handle the two-phase browser visibility lifecycle using the server's clock."""
+    now = timezone.now()
+    violation_recorded = False
+    should_close = False
+
+    if kind == AttemptEvent.Kind.TAB_HIDDEN:
+        if attempt.visibility_hidden_at is None:
+            attempt.visibility_hidden_at = now
+            attempt.visibility_violation_recorded = False
+            attempt.save(update_fields=("visibility_hidden_at", "visibility_violation_recorded", "updated_at"))
+        violation_recorded, should_close = _confirm_tab_departure(attempt, settings, now)
+    elif kind == "tab_hidden_timeout":
+        # This timer is only a prompt to re-check server time; it cannot assert a duration or verdict.
+        violation_recorded, should_close = _confirm_tab_departure(attempt, settings, now)
+    elif kind == AttemptEvent.Kind.TAB_VISIBLE:
+        started = attempt.visibility_hidden_at
+        if started is not None:
+            elapsed = max(0.0, (now - started).total_seconds())
+            violation_recorded, should_close = _confirm_tab_departure(attempt, settings, now)
+            if attempt.visibility_violation_recorded and not should_close:
+                record_attempt_event(
+                    attempt,
+                    AttemptEvent.Kind.TAB_VISIBLE,
+                    detail={
+                        "duration_seconds": int(elapsed),
+                        "grace_seconds": int(settings.tab_switch_grace_seconds),
+                    },
+                )
+            attempt.visibility_hidden_at = None
+            attempt.visibility_violation_recorded = False
+            attempt.save(update_fields=("visibility_hidden_at", "visibility_violation_recorded", "updated_at"))
+
+    if should_close:
+        finalize_attempt_for_integrity(attempt)
+    summary = {**integrity_summary(attempt), "status": attempt.status}
+    if violation_recorded:
+        summary["violation_recorded"] = True
+    if should_close:
+        # The runner learns from this very response that there is nothing left to answer, so it can stop its
+        # timer and move on instead of finding out on the next autosave.
+        summary["auto_submitted"] = True
+        summary["reason"] = "tab_switch_limit"
+    return summary
+
+
+# Signals that represent browser observations or connectivity, all gated by the teacher's monitoring switch.
 BASELINE_SIGNALS = {
     AttemptEvent.Kind.TAB_HIDDEN,
     AttemptEvent.Kind.TAB_VISIBLE,
     AttemptEvent.Kind.DISCONNECTED,
     AttemptEvent.Kind.RECONNECTED,
 }
-# Signals that only exist because a teacher asked for clipboard and fullscreen watching.
 INTEGRITY_SIGNALS = {
     AttemptEvent.Kind.COPY,
     AttemptEvent.Kind.CUT,
     AttemptEvent.Kind.PASTE,
     AttemptEvent.Kind.FULLSCREEN_ENTER,
     AttemptEvent.Kind.FULLSCREEN_EXIT,
+    AttemptEvent.Kind.SCREENSHOT_SHORTCUT,
 }
+VISIBILITY_SIGNALS = {AttemptEvent.Kind.TAB_HIDDEN, AttemptEvent.Kind.TAB_VISIBLE, "tab_hidden_timeout"}
 
 
 def record_client_signal(
     attempt_id: Any, student: User, *, kind: str, detail: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Store a browser-reported signal, and apply the exam's integrity rules to it.
+    """Store a browser-reported observation and apply the teacher's settings on the server.
 
-    The client supplies no timestamps and no verdicts. What it does supply is the *observation*; the decision
-    about whether an observation costs anything lives here, in `integrity_policy`, which the teacher set.
+    Browser reports are untrusted. The client can announce a visibility transition, but only server timestamps
+    decide whether it exceeded the grace period; no browser-supplied duration or violation verdict is stored.
     """
     with transaction.atomic():
         attempt = _locked_attempt(attempt_id)
@@ -483,27 +586,47 @@ def record_client_signal(
         if attempt.status != ExamAttempt.Status.IN_PROGRESS:
             return {**integrity_summary(attempt), "status": attempt.status}
         settings = attempt.exam.settings
-        allowed = set(BASELINE_SIGNALS)
-        if settings.integrity_records:
-            allowed |= INTEGRITY_SIGNALS
+
+        if not settings.integrity_records:
+            # A teacher can turn monitoring off while a tab is hidden. Drop the provisional state and return
+            # the now-off rules without retaining an event; raising inside this atomic block would roll back
+            # the cleanup and leave a stale hidden timer to be counted if monitoring is later re-enabled.
+            if kind in VISIBILITY_SIGNALS and attempt.visibility_hidden_at is not None:
+                attempt.visibility_hidden_at = None
+                attempt.visibility_violation_recorded = False
+                attempt.save(update_fields=("visibility_hidden_at", "visibility_violation_recorded", "updated_at"))
+                return {**integrity_summary(attempt), "status": attempt.status}
+            raise ValidationError({"kind": ["This signal is not recorded while monitoring is off."]})
+
+        if kind in VISIBILITY_SIGNALS:
+            return _record_visibility_signal(attempt, settings, kind=kind)
+
+        allowed = (BASELINE_SIGNALS - {AttemptEvent.Kind.TAB_HIDDEN, AttemptEvent.Kind.TAB_VISIBLE}) | INTEGRITY_SIGNALS
         if kind not in allowed:
             raise ValidationError({"kind": ["This signal is not recorded."]})
-        record_attempt_event(attempt, kind, detail=(detail or {}) if isinstance(detail, dict) else {})
-        # The only automatic penalty in this system: a teacher-chosen budget of tab switches, counted by the
-        # server, spent means the writing window closes with the answers that are already saved.
-        limit = settings.max_tab_switches if settings.integrity_enforced else 0
-        closed = False
-        if limit and kind == AttemptEvent.Kind.TAB_HIDDEN and _tab_switch_count(attempt) >= int(limit):
-            record_attempt_event(attempt, AttemptEvent.Kind.TAB_LIMIT_REACHED, detail={"limit": int(limit)})
-            finalize_attempt_for_integrity(attempt)
-            closed = True
-        summary = {**integrity_summary(attempt), "status": attempt.status}
-        if closed:
-            # The runner has to learn from this very response that there is nothing left to answer, so it can
-            # stop the timer and move on instead of finding out on the next autosave.
-            summary["auto_submitted"] = True
-            summary["reason"] = "tab_switch_limit"
-        return summary
+        if kind in {AttemptEvent.Kind.FULLSCREEN_ENTER, AttemptEvent.Kind.FULLSCREEN_EXIT} and not (
+            settings.integrity_enforced and settings.require_fullscreen
+        ):
+            raise ValidationError({"kind": ["Fullscreen signals are not enabled for this exam."]})
+        raw_detail = detail if isinstance(detail, dict) else {}
+        if kind in {AttemptEvent.Kind.COPY, AttemptEvent.Kind.CUT, AttemptEvent.Kind.PASTE}:
+            # Never accept copied/pasted answer text from the client. Only a short element label and a bounded
+            # character count are useful to the teacher; every other field is discarded.
+            field = raw_detail.get("field")
+            length = raw_detail.get("length")
+            safe_detail = {
+                "field": str(field).lower()[:24] if isinstance(field, str) else "unknown",
+                "length": min(1_000_000, max(0, length)) if isinstance(length, int) and not isinstance(length, bool) else 0,
+            }
+        elif kind == AttemptEvent.Kind.SCREENSHOT_SHORTCUT:
+            if not (settings.integrity_enforced and settings.block_screenshot_shortcuts):
+                raise ValidationError({"kind": ["Screenshot-shortcut signals are not enabled for this exam."]})
+            shortcut = raw_detail.get("shortcut")
+            safe_detail = {"shortcut": str(shortcut)[:32]} if isinstance(shortcut, str) else {}
+        else:
+            safe_detail = {}
+        record_attempt_event(attempt, kind, detail=safe_detail)
+        return {**integrity_summary(attempt), "status": attempt.status}
 
 
 def finalize_attempt_for_integrity(attempt: ExamAttempt) -> None:
@@ -516,6 +639,28 @@ def finalize_attempt_for_integrity(attempt: ExamAttempt) -> None:
     attempt.last_activity_at = now
     attempt.save(update_fields=("expires_at", "status", "submitted_at", "last_activity_at", "updated_at"))
     _grade_attempt(attempt, finalized_at=now)
+
+
+def purge_expired_access_info(*, now: datetime | None = None, retention_days: int | None = None) -> int:
+    """Scrub IP, User-Agent and the one-device signature after finalized attempts age out.
+
+    The default is deployment-configurable and the operation is idempotent. It intentionally never clears
+    an in-progress attempt; teachers get a defined review window after finalization.
+    """
+    days = int(retention_days if retention_days is not None else django_settings.EXAM_ACCESS_INFO_RETENTION_DAYS)
+    if days < 1:
+        raise ValueError("Access-info retention must be at least one day.")
+    cutoff = (now or timezone.now()) - timedelta(days=days)
+    expired = ExamAttempt.objects.filter(
+        status__in=(ExamAttempt.Status.SUBMITTED, ExamAttempt.Status.EXPIRED),
+        submitted_at__lt=cutoff,
+    )
+    changed = expired.exclude(
+        client_ip_address__isnull=True,
+        client_user_agent="",
+        device_signature="",
+    ).update(client_ip_address=None, client_user_agent="", device_signature="")
+    return int(changed)
 
 
 def close_exam_attempts(exam: Exam, *, reason: str = "exam_closed") -> int:
@@ -583,7 +728,7 @@ def _grade_attempt(attempt: ExamAttempt, *, finalized_at: datetime) -> "ExamResu
     answers = (
         StudentAnswer.objects.filter(attempt=attempt)
         .select_related("question")
-        .prefetch_related("selected_options")
+        .prefetch_related("selected_options", "attachments")
     )
     answers_by_question = {str(answer.question_id): answer for answer in answers}
     for answer in answers_by_question.values():
@@ -623,6 +768,9 @@ def _grade_attempt(attempt: ExamAttempt, *, finalized_at: datetime) -> "ExamResu
             continue
         if mark.verdict == VERDICT_CORRECT:
             correct_count += 1
+            score += mark.awarded
+        elif mark.verdict == VERDICT_PARTIAL:
+            incorrect_count += 1
             score += mark.awarded
         else:
             incorrect_count += 1
@@ -737,7 +885,11 @@ def _save_answer_for_locked_attempt(
         defaults={"answer_data": {}, "is_flagged": False},
     )
 
-    if "selected_option_ids" in answer_data:
+    if "matches" in answer_data:
+        answer.answer_data = {"matches": dict(answer_data["matches"])}
+        answer.save(update_fields=("answer_data", "updated_at"))
+        answer.selected_options.clear()
+    elif "selected_option_ids" in answer_data:
         option_ids = answer_data["selected_option_ids"]
         options = list(QuestionOption.objects.filter(question=question, id__in=option_ids))
         if len(options) != len(option_ids):
@@ -828,6 +980,106 @@ def save_answers_batch(
                 _advance_answer_frontier(attempt, index)
         _touch_attempt(attempt, client_session=client_session)
         return answers
+
+
+MAX_ANSWER_MEDIA_FILES = 5
+
+
+def add_answer_attachment(
+    attempt_id: Any,
+    student: User,
+    question: Question,
+    upload: Any,
+    metadata: dict[str, Any],
+    *,
+    client_session: str = "",
+    expected_revision: int | None = None,
+    question_index: int | None = None,
+) -> tuple[StudentAnswer, ExamAttempt]:
+    """Persist one validated private image/audio response under the same attempt-write guards as text."""
+    saved_file = None
+    try:
+        with transaction.atomic():
+            attempt = _ensure_active_locked_attempt(
+                attempt_id, student, client_session=client_session, expected_revision=expected_revision
+            )
+            _validate_attempt_question(attempt, question)
+            if question_index is not None:
+                _enforce_answer_window(attempt, {str(question.id): question_index})
+            config = question.configuration if isinstance(question.configuration, dict) else {}
+            kind = metadata.get("kind")
+            if kind not in {StudentAnswerAttachment.Kind.IMAGE, StudentAnswerAttachment.Kind.AUDIO}:
+                raise ValidationError({"kind": ["Only image and audio answers are supported."]})
+            if not config.get(f"allow_{kind}_answer", False):
+                raise ValidationError({"kind": ["This question does not allow this answer-file type."]})
+
+            answer, _ = StudentAnswer.objects.get_or_create(
+                attempt=attempt,
+                question=question,
+                defaults={"answer_data": {}, "is_flagged": False},
+            )
+            if answer.attachments.count() >= MAX_ANSWER_MEDIA_FILES:
+                raise ValidationError({"file": [f"At most {MAX_ANSWER_MEDIA_FILES} response files are allowed per question."]})
+            if answer.attachments.filter(sha256=metadata["sha256"]).exists():
+                raise ValidationError({"file": ["The same file is already attached to this answer."]})
+
+            attachment = StudentAnswerAttachment(
+                answer=answer,
+                kind=kind,
+                original_name=metadata["original_name"],
+                content_type=metadata["content_type"],
+                size_bytes=metadata["size_bytes"],
+                sha256=metadata["sha256"],
+            )
+            attachment.file.save(metadata["original_name"], upload, save=False)
+            saved_file = (attachment.file.storage, attachment.file.name)
+            attachment.save()
+            if question_index is not None:
+                _advance_answer_frontier(attempt, question_index)
+            _touch_attempt(attempt, client_session=client_session)
+            return answer, attempt
+    except Exception:
+        # File storage is external to the transaction; don't leave an orphan if a guard or DB write fails.
+        if saved_file is not None:
+            saved_file[0].delete(saved_file[1])
+        raise
+
+
+def delete_answer_attachment(
+    attempt_id: Any,
+    student: User,
+    question: Question,
+    attachment_id: Any,
+    *,
+    client_session: str = "",
+    expected_revision: int | None = None,
+    question_index: int | None = None,
+) -> tuple[StudentAnswer, ExamAttempt]:
+    """Delete one of this student's own attachment, atomically with the attempt revision."""
+    with transaction.atomic():
+        attempt = _ensure_active_locked_attempt(
+            attempt_id, student, client_session=client_session, expected_revision=expected_revision
+        )
+        _validate_attempt_question(attempt, question)
+        if question_index is not None:
+            _enforce_answer_window(attempt, {str(question.id): question_index})
+        answer = StudentAnswer.objects.select_for_update().filter(
+            attempt=attempt, question=question
+        ).first()
+        if answer is None:
+            raise ValidationError({"attachment": ["This response file was not found."]})
+        attachment = StudentAnswerAttachment.objects.select_for_update().filter(
+            pk=attachment_id, answer=answer
+        ).first()
+        if attachment is None:
+            raise ValidationError({"attachment": ["This response file was not found."]})
+        storage = attachment.file.storage
+        name = attachment.file.name
+        attachment.delete()
+        if name:
+            transaction.on_commit(lambda: storage.delete(name))
+        _touch_attempt(attempt, client_session=client_session)
+        return answer, attempt
 
 
 def _enforce_answer_window(attempt: ExamAttempt, index_by_question: dict[str, int]) -> None:

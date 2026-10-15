@@ -7,6 +7,9 @@ from .views import (
     QuestionBankTagsView,
     QuestionFolderDetailView,
     QuestionFolderListView,
+    QuestionPromptMediaCollectionView,
+    QuestionPromptMediaDetailView,
+    QuestionPromptMediaFileView,
     TeacherQuestionDetailView,
 )
 
@@ -20,6 +23,9 @@ urlpatterns = [
     # Folders are the bank's own furniture: a flat list the client assembles into a tree via `parent`.
     path("folders/", QuestionFolderListView.as_view(), name="question-folder-list"),
     path("folders/<uuid:folder_id>/", QuestionFolderDetailView.as_view(), name="question-folder-detail"),
+    path("<uuid:question_id>/media/", QuestionPromptMediaCollectionView.as_view(), name="question-media-collection"),
+    path("<uuid:question_id>/media/<uuid:media_id>/", QuestionPromptMediaDetailView.as_view(), name="question-media-detail"),
+    path("<uuid:question_id>/media/<uuid:media_id>/file/", QuestionPromptMediaFileView.as_view(), name="question-media-file"),
     path("<uuid:question_id>/", TeacherQuestionDetailView.as_view(), name="question-detail"),
     path("<uuid:question_id>/archive/", QuestionArchiveView.as_view(), name="question-archive"),
 ]

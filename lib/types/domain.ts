@@ -1,7 +1,47 @@
 export type Role = "student" | "teacher" | "admin" | "school_admin";
 export type ExamStatus = "draft" | "scheduled" | "active" | "completed" | "archived";
-export type QuestionType = "single_choice" | "multiple_choice" | "true_false" | "short_answer" | "essay";
-export type AnswerValue = string | string[] | boolean | null;
+export type QuestionType = "single_choice" | "multiple_choice" | "true_false" | "matching" | "short_answer" | "essay";
+export type AnswerValue = string | string[] | boolean | Record<string, string> | null;
+export type AudienceMode = "profile" | "selected";
+export type MediaKind = "image" | "audio";
+
+export interface QuestionMediaAsset {
+  id: string;
+  kind: MediaKind;
+  url?: string;
+  contentType?: string;
+  sizeBytes?: number;
+  altText?: string;
+  order: number;
+  sha256?: string;
+  /** A file not uploaded yet. It stays local to the draft until the teacher saves the question. */
+  file?: File;
+}
+
+export interface StudentAnswerMedia {
+  id: string;
+  kind: MediaKind;
+  url: string;
+  contentType: string;
+  sizeBytes: number;
+  originalName?: string;
+}
+
+export interface StudentAudienceItem {
+  id: string;
+  fullName: string;
+  email: string;
+  grade: string;
+  className: string;
+}
+
+export interface StudentGroup {
+  id: string;
+  name: string;
+  description: string;
+  studentIds: string[];
+  studentCount: number;
+}
 export type AttemptStatus = "not_started" | "in_progress" | "expired" | "submitting" | "submitted";
 export type SaveStatus = "idle" | "saving" | "saved" | "saved_locally" | "error";
 export type ResultVisibility = "immediate" | "pending" | "hidden";
@@ -41,6 +81,10 @@ interface BaseQuestion {
   examId?: string;
   examTitle?: string;
   examStatus?: string;
+  media?: QuestionMediaAsset[];
+  imageOnly?: boolean;
+  allowImageAnswer?: boolean;
+  allowAudioAnswer?: boolean;
 }
 
 export type QuestionDifficulty = "easy" | "medium" | "hard";
@@ -64,6 +108,20 @@ export interface TrueFalseQuestion extends BaseQuestion {
   optionIds?: { true: string; false: string };
 }
 
+export interface MatchingPair {
+  id: string;
+  prompt: string;
+  /** Present only in teacher authoring; student-safe payloads omit this answer key. */
+  answer?: string;
+  optionId?: string;
+}
+
+export interface MatchingQuestion extends BaseQuestion {
+  type: "matching";
+  pairs: MatchingPair[];
+  options: QuestionOption[];
+}
+
 export interface ShortAnswerQuestion extends BaseQuestion {
   type: "short_answer";
   placeholder?: string;
@@ -81,7 +139,7 @@ export interface WrittenQuestion extends BaseQuestion {
 }
 
 /** Discriminated question union used by the student renderer and teacher builder. */
-export type Question = MultipleChoiceQuestion | MultipleAnswerQuestion | TrueFalseQuestion | ShortAnswerQuestion | WrittenQuestion;
+export type Question = MultipleChoiceQuestion | MultipleAnswerQuestion | TrueFalseQuestion | MatchingQuestion | ShortAnswerQuestion | WrittenQuestion;
 
 export type QuestionLayout = "paged" | "single_page";
 
@@ -107,8 +165,14 @@ export interface ExamIntegrityRules {
   blockCopyPaste: boolean;
   requireFullscreen: boolean;
   lockToOneDevice: boolean;
-  /** 0 means "no budget set", which is not the same thing as a budget of zero. */
+  /** Number of confirmed warnings allowed before the next long departure stops the attempt; 0 disables stopping. */
   maxTabSwitches: number;
+  /** A shorter absence is discarded without a warning. */
+  tabSwitchGraceSeconds: number;
+  /** IP and browser/device metadata were explicitly enabled for this exam. */
+  recordAccessInfo: boolean;
+  /** Best-effort blocking of common print/screenshot shortcuts inside the page only. */
+  blockScreenshotShortcuts: boolean;
   tabSwitches: number;
   /** Null when there is no limit; the runner shows a number only when there is one. */
   tabSwitchesRemaining: number | null;
@@ -133,6 +197,9 @@ export interface ExamSettings {
   /** Anti-cheating, off unless the teacher turns it on. Optional so a draft predating it stays valid. */
   integrityPolicy?: IntegrityPolicy;
   integrityTabLimit?: number;
+  integrityTabGraceSeconds?: number;
+  integrityRecordAccessInfo?: boolean;
+  integrityBlockScreenshotShortcuts?: boolean;
   integrityBlockCopyPaste?: boolean;
   integrityRequireFullscreen?: boolean;
   integrityLockToOneDevice?: boolean;
@@ -173,6 +240,9 @@ export interface Exam {
   attemptCount?: number;
   settings: ExamSettings;
   questions: Question[];
+  audienceMode?: AudienceMode;
+  studentGroupIds?: string[];
+  studentIds?: string[];
   teacherName: string;
   accent: "indigo" | "violet" | "teal" | "amber";
   createdAt: string;
@@ -197,6 +267,9 @@ export interface ExamDraft {
   instructions: string;
   settings: ExamSettings;
   schedule: ExamSchedule;
+  audienceMode?: AudienceMode;
+  studentGroupIds?: string[];
+  studentIds?: string[];
   questions: Question[];
 }
 
@@ -205,6 +278,7 @@ export interface ExamAnswer {
   value: AnswerValue;
   flagged: boolean;
   updatedAt: string;
+  attachments?: StudentAnswerMedia[];
 }
 
 /**
@@ -249,7 +323,7 @@ export interface ExamAttempt {
 /** One server-recorded session/activity signal. An observation for the teacher, never a verdict. */
 export interface AttemptSignal {
   id: string;
-  kind: "session_switch" | "tab_hidden" | "tab_visible" | "disconnected" | "reconnected" | "auto_submitted" | "exam_closed" | "stale_write_rejected" | "question_locked";
+  kind: "session_switch" | "tab_hidden" | "tab_visible" | "disconnected" | "reconnected" | "auto_submitted" | "exam_closed" | "stale_write_rejected" | "question_locked" | "copy" | "cut" | "paste" | "fullscreen_enter" | "fullscreen_exit" | "screenshot_shortcut" | "session_lock_refused" | "tab_limit_reached";
   at: string;
   detail?: Record<string, unknown>;
 }
@@ -298,6 +372,9 @@ export interface ResultAnswerRow {
   correctOptions: string[];
   expectedAnswers: string[];
   explanation: string;
+  matchingAnswers?: Array<{ prompt: string; yourAnswer: string }>;
+  questionMedia?: QuestionMediaAsset[];
+  attachments?: StudentAnswerMedia[];
 }
 
 export interface ExamResult {

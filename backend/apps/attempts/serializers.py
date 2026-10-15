@@ -4,9 +4,9 @@ from typing import Any
 
 from rest_framework import serializers
 
-from apps.exams.models import Exam, ExamSettings, Question, QuestionOption
+from apps.exams.models import Exam, ExamSettings, Question, QuestionMedia, QuestionOption
 
-from .models import ExamAttempt, StudentAnswer
+from .models import ExamAttempt, StudentAnswer, StudentAnswerAttachment
 from .services import apply_option_order
 
 
@@ -64,6 +64,7 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
     question_layout = serializers.SerializerMethodField()
     teacher_name = serializers.SerializerMethodField()
     question_count = serializers.IntegerField(read_only=True)
+    integrity = serializers.SerializerMethodField()
 
     class Meta:
         model = Exam
@@ -90,6 +91,7 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
             "randomize_options",
             "question_layout",
             "teacher_name",
+            "integrity",
             "attempt",
         )
         read_only_fields = fields
@@ -134,6 +136,52 @@ class StudentAvailableExamSerializer(serializers.ModelSerializer):
         # does not re-flow the whole answer sheet a second after the student presses start.
         return exam.settings.question_layout
 
+    def get_integrity(self, exam: Exam) -> dict:
+        # The student sees the monitoring rules before starting; no answer-key or identifying data is here.
+        rules = exam.settings.integrity_rules()
+        limit = int(rules["max_tab_switches"] or 0)
+        return {
+            **rules,
+            "tab_switches": 0,
+            "tab_switches_remaining": limit if limit else None,
+            "copy_events": 0,
+        }
+
+
+class StudentPromptMediaSerializer(serializers.ModelSerializer):
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuestionMedia
+        fields = ("id", "kind", "url", "content_type", "size_bytes", "alt_text", "order")
+        read_only_fields = fields
+
+    def get_url(self, media: QuestionMedia) -> str:
+        return f"/api/v1/questions/{media.question_id}/media/{media.id}/file/"
+
+
+class StudentAnswerAttachmentSerializer(serializers.ModelSerializer):
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = StudentAnswerAttachment
+        fields = ("id", "kind", "url", "content_type", "size_bytes", "original_name")
+        read_only_fields = fields
+
+    def get_url(self, attachment: StudentAnswerAttachment) -> str:
+        return f"/api/v1/student/media/answers/{attachment.id}/"
+
+
+class StudentAnswerAttachmentUploadSerializer(serializers.Serializer):
+    file = serializers.FileField()
+    kind = serializers.ChoiceField(choices=StudentAnswerAttachment.Kind.choices)
+
+    def to_internal_value(self, data):  # type: ignore[no-untyped-def]
+        unexpected = set(data).difference(self.fields)
+        if unexpected:
+            raise serializers.ValidationError({field: "This is not a supported upload field." for field in unexpected})
+        return super().to_internal_value(data)
+
 
 class StudentAttemptOptionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -144,23 +192,36 @@ class StudentAttemptOptionSerializer(serializers.ModelSerializer):
 
 class StudentAttemptQuestionSerializer(serializers.ModelSerializer):
     options = StudentAttemptOptionSerializer(many=True, read_only=True)
+    media = StudentPromptMediaSerializer(many=True, read_only=True)
+    matching_prompts = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
         # Deliberately excludes configuration, explanation, and QuestionOption.is_correct.
-        fields = ("id", "type", "text", "instructions", "order", "marks", "options")
+        fields = ("id", "type", "text", "instructions", "order", "marks", "options", "media", "matching_prompts")
         read_only_fields = fields
+
+    def get_matching_prompts(self, question: Question) -> list[dict[str, str]]:
+        if question.type != Question.Type.MATCHING or not isinstance(question.configuration, dict):
+            return []
+        return [
+            {"id": str(pair["id"]), "text": str(pair["prompt"])}
+            for pair in question.configuration.get("matching_pairs", [])
+            if isinstance(pair, dict) and pair.get("id") and isinstance(pair.get("prompt"), str)
+        ]
 
 
 class StudentAttemptAnswerSerializer(serializers.ModelSerializer):
     question_id = serializers.UUIDField(read_only=True)
     selected_option_ids = serializers.SerializerMethodField()
     text = serializers.SerializerMethodField()
+    matches = serializers.SerializerMethodField()
+    attachments = StudentAnswerAttachmentSerializer(many=True, read_only=True)
     answered = serializers.SerializerMethodField()
 
     class Meta:
         model = StudentAnswer
-        fields = ("id", "question_id", "selected_option_ids", "text", "answered", "is_flagged", "updated_at")
+        fields = ("id", "question_id", "selected_option_ids", "text", "matches", "attachments", "answered", "is_flagged", "updated_at")
         read_only_fields = fields
 
     def get_selected_option_ids(self, answer: StudentAnswer) -> list[str]:
@@ -170,8 +231,12 @@ class StudentAttemptAnswerSerializer(serializers.ModelSerializer):
         value = answer.answer_data.get("text") if isinstance(answer.answer_data, dict) else None
         return value if isinstance(value, str) and value else None
 
+    def get_matches(self, answer: StudentAnswer) -> dict[str, str]:
+        value = answer.answer_data.get("matches") if isinstance(answer.answer_data, dict) else None
+        return {str(key): str(option_id) for key, option_id in value.items()} if isinstance(value, dict) else {}
+
     def get_answered(self, answer: StudentAnswer) -> bool:
-        return bool(self.get_selected_option_ids(answer) or self.get_text(answer))
+        return bool(self.get_selected_option_ids(answer) or self.get_text(answer) or self.get_matches(answer) or answer.attachments.all())
 
 
 class StudentNavigationSettingsSerializer(serializers.ModelSerializer):
@@ -303,6 +368,7 @@ class StudentAnswerInputSerializer(serializers.Serializer):
     """Canonical, type-aware input. Clients never write the model's raw answer_data JSON."""
 
     selected_option_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
+    matches = serializers.DictField(child=serializers.UUIDField(), required=False)
     text = serializers.CharField(required=False, allow_blank=True, trim_whitespace=False)
 
     def validate(self, attrs: dict) -> dict:
@@ -318,7 +384,7 @@ class StudentAnswerInputSerializer(serializers.Serializer):
             Question.Type.TRUE_FALSE,
         }
         if question.type in choice_types:
-            if "text" in attrs or "selected_option_ids" not in attrs:
+            if "text" in attrs or "matches" in attrs or "selected_option_ids" not in attrs:
                 raise serializers.ValidationError({"selected_option_ids": "Select options for this question type."})
             option_ids = attrs["selected_option_ids"]
             if len(option_ids) != len(set(option_ids)):
@@ -337,7 +403,29 @@ class StudentAnswerInputSerializer(serializers.Serializer):
                 raise serializers.ValidationError({"selected_option_ids": "Every option must belong to this question."})
             return attrs
 
-        if "selected_option_ids" in attrs or "text" not in attrs:
+        if question.type == Question.Type.MATCHING:
+            if "matches" not in attrs or "text" in attrs or "selected_option_ids" in attrs:
+                raise serializers.ValidationError({"matches": "Provide the chosen right-side option for each matching prompt."})
+            configuration = question.configuration if isinstance(question.configuration, dict) else {}
+            pairs = configuration.get("matching_pairs", [])
+            allowed_prompts = {
+                str(pair.get("id")) for pair in pairs
+                if isinstance(pair, dict) and pair.get("id")
+            }
+            matches = attrs["matches"]
+            if set(matches).difference(allowed_prompts):
+                raise serializers.ValidationError({"matches": "Every prompt must belong to this question."})
+            option_ids = list(matches.values())
+            if len(option_ids) != len(set(option_ids)):
+                raise serializers.ValidationError({"matches": "Each right-side item can be used only once."})
+            existing_option_ids = set(
+                QuestionOption.objects.filter(question=question, id__in=option_ids).values_list("id", flat=True)
+            )
+            if existing_option_ids != set(option_ids):
+                raise serializers.ValidationError({"matches": "Every selected item must belong to this question."})
+            return attrs
+
+        if "selected_option_ids" in attrs or "matches" in attrs or "text" not in attrs:
             raise serializers.ValidationError({"text": "Provide text for this question type."})
         text = attrs["text"]
         max_length = question.configuration.get("max_length") if isinstance(question.configuration, dict) else None

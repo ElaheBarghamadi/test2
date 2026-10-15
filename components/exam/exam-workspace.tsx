@@ -41,6 +41,7 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
   const [navigatorOpen, setNavigatorOpen] = useState(false);
   const attempt = useExamAttemptStore((state) => state.attempt);
   const setAnswer = useExamAttemptStore((state) => state.setAnswer);
+  const setAnswerAttachments = useExamAttemptStore((state) => state.setAnswerAttachments);
   const setCurrentQuestion = useExamAttemptStore((state) => state.setCurrentQuestion);
   const toggleFlag = useExamAttemptStore((state) => state.toggleFlag);
   const markSaved = useExamAttemptStore((state) => state.markSaved);
@@ -73,7 +74,7 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
       reconcileAnswers(live.answers, questionIds);
     }
     toast({ title: "این سؤال قفل شده است", description: "پاسخی که سرور نگه داشته همان است که نمایش داده می‌شود؛ ویرایش تازه‌ای ثبت نشد." });
-  }, [attempt?.answers, examSession, live, reconcileAnswers, setAnswerFrontier, toast]);
+  }, [examSession, live, reconcileAnswers, setAnswerFrontier, toast]);
 
   useExamAutosave(live, exam, markSaved, markSaveFailed, {
     examSession,
@@ -105,7 +106,7 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
         title: "آزمون بسته شد",
         description:
           reason === "tab_switch_limit"
-            ? "سقف بیرون‌رفتن از تب این آزمون پر شد. پاسخ‌های ذخیره‌شده‌تان ثبت و تصحیح می‌شود."
+            ? "پس از اخطارهای پیشین، خروج طولانیِ بعدی پنجرهٔ آزمون را بست. پاسخ‌های ذخیره‌شده‌تان باقی مانده‌اند."
             : "سرور پنجرهٔ پاسخ‌دادن را بست؛ پاسخ‌های ذخیره‌شده باقی می‌مانند.",
       });
     },
@@ -127,7 +128,7 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
       if (error instanceof ApiError && error.code === "device_locked") {
         toast({
           title: "این آزمون روی همین دستگاه باز نمی‌شود",
-          description: "آزمون روی دستگاهی که با آن شروع شده قفل است. برای ادامه، معلم باید قفل را باز کند.",
+          description: "این آزمون روی مرورگری که با آن شروع شده قفل است. برای ادامه، معلم باید قفل را باز کند.",
         });
       } else {
         toast({ title: "گرفتن نشست ممکن نشد", description: apiErrorMessage(error, "اتصال را بررسی کنید و دوباره تلاش کنید.") });
@@ -208,12 +209,12 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
 
   if (!attempt || attempt.examId !== exam.id) return <ExamSkeleton/>;
   const saveLine = <AutosaveIndicator status={attempt.saveStatus} className="hidden xl:inline-flex"/>;
-  const rulesNote = (
+  const rulesNote = noReturn ? (
     <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground sm:flex-nowrap">
       <ShieldCheck className="h-4 w-4 shrink-0 text-success"/>
-      <span>{noReturn ? "پاسخ هر سؤالی که رد می‌کنید ذخیره و قفل می‌شود؛ تا پایان آزمون می‌توانید سؤال‌های بعدی را کامل کنید." : "پاسخ‌ها به‌صورت خودکار ذخیره می‌شوند و پیش از ارسال نهایی قابل ویرایش‌اند."}</span>
+      <span>پاسخ هر سؤالی که رد می‌کنید ذخیره و قفل می‌شود؛ تا پایان آزمون می‌توانید سؤال‌های بعدی را کامل کنید.</span>
     </div>
-  );
+  ) : null;
   return (
     <div className="min-h-dvh bg-surface">
       <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur-xl sm:border-b sm:bg-background/92">
@@ -292,12 +293,30 @@ export function ExamWorkspace({ exam }: { exam: Exam }) {
                     onAnswer={(value) => setAnswer(item.id, value)}
                     onToggleFlag={() => toggleFlag(item.id)}
                     disabled={isLocked}
+                    attemptId={live?.id}
+                    examSession={examSession}
+                    serverRevision={live?.serverRevision}
+                    onAttachmentsChange={setAnswerAttachments}
                   />
                 </div>
               ))}
             </div>
           ) : (
-            <QuestionCard question={question} position={currentIndex + 1} answer={attempt.answers[question.id]} flagged={attempt.answers[question.id]?.flagged ?? false} onAnswer={updateAnswer} onToggleFlag={() => toggleFlag(question.id)} disabled={isLocked} locked={isQuestionLocked(question.id)} onLeaveLock={isLast ? () => router.push(`/student/exam/${exam.id}/review`) : () => move("next")}/>
+            <QuestionCard
+              question={question}
+              position={currentIndex + 1}
+              answer={attempt.answers[question.id]}
+              flagged={attempt.answers[question.id]?.flagged ?? false}
+              onAnswer={updateAnswer}
+              onToggleFlag={() => toggleFlag(question.id)}
+              disabled={isLocked}
+              locked={isQuestionLocked(question.id)}
+              onLeaveLock={isLast ? () => router.push(`/student/exam/${exam.id}/review`) : () => move("next")}
+              attemptId={live?.id}
+              examSession={examSession}
+              serverRevision={live?.serverRevision}
+              onAttachmentsChange={setAnswerAttachments}
+            />
           )}
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-card p-3 shadow-soft sm:flex-nowrap sm:p-4">
             {singlePage ? (

@@ -5,9 +5,10 @@ import type {
   ApiExamSettingsDto,
   ApiExamWritePayload,
   ApiQuestionDto,
+  ApiQuestionMediaDto,
+  ApiStudentAnswerAttachmentDto,
   ApiStudentQuestionDto,
   ApiQuestionWritePayload,
-  ApiRole,
   ApiNotificationPageDto,
   ApiOptionDto,
   ApiStudentResultDto,
@@ -15,7 +16,7 @@ import type {
   ApiTeacherExamListDto,
   ApiUserDto,
 } from "@/lib/api/dtos";
-import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamIntegrityRules, ExamDraft, ExamResult, NotificationItem, Question, Role, User } from "@/lib/types/domain";
+import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamIntegrityRules, ExamDraft, ExamResult, NotificationItem, Question, QuestionMediaAsset, Role, StudentAnswerMedia, User } from "@/lib/types/domain";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Only a real server UUID may be echoed back as an option id; rows the builder has not saved yet must be created. */
@@ -44,13 +45,28 @@ function apiVisibility(value: Exam["settings"]["resultVisibility"]): ApiExamSett
   return value;
 }
 
+function toQuestionMedia(dto: ApiQuestionMediaDto): QuestionMediaAsset {
+  return {
+    id: dto.id, kind: dto.kind, url: dto.url, contentType: dto.content_type,
+    sizeBytes: dto.size_bytes, altText: dto.alt_text ?? "", order: dto.order, sha256: dto.sha256,
+  };
+}
+
+export function toAnswerMedia(dto: ApiStudentAnswerAttachmentDto): StudentAnswerMedia {
+  return { id: dto.id, kind: dto.kind, url: dto.url, contentType: dto.content_type, sizeBytes: dto.size_bytes, originalName: dto.original_name };
+}
+
 /** Teacher mapper may include correct answers because it is used only in teacher-owned views. */
 export function toTeacherQuestion(dto: ApiQuestionDto): Question {
   const base = {
     id: dto.id, order: dto.order, stem: dto.text, helpText: dto.instructions || undefined, points: number(dto.marks), explanation: dto.explanation || undefined,
     difficulty: dto.difficulty ?? "medium", tags: (dto.tags ?? []).map((tag) => tag.name), isArchived: dto.is_archived === true,
     usageCount: dto.usage_count ?? 0, answeredCount: dto.answered_count ?? 0, copiedFromId: dto.copied_from ?? null,
-    examId: dto.exam, examTitle: dto.exam_title, examStatus: dto.exam_status,
+    examId: dto.exam ?? undefined, examTitle: dto.exam_title, examStatus: dto.exam_status,
+    media: (dto.media ?? []).map(toQuestionMedia),
+    imageOnly: configBoolean(dto.configuration, "image_only"),
+    allowImageAnswer: configBoolean(dto.configuration, "allow_image_answer"),
+    allowAudioAnswer: configBoolean(dto.configuration, "allow_audio_answer"),
   };
   const options = (dto.options || []).map((option) => ({ id: option.id, label: option.text, value: option.id, isCorrect: option.is_correct }));
   const config = dto.configuration || {};
@@ -61,6 +77,15 @@ export function toTeacherQuestion(dto: ApiQuestionDto): Question {
       return { ...base, type: "multiple_choice", options, correctOptionIds: options.filter((option) => option.isCorrect).map((option) => option.id) };
     case "true_false":
       return { ...base, type: "true_false", correctAnswer: orderedByPosition(dto)[0]?.is_correct === true, optionIds: trueFalseOptionIds(dto) };
+    case "matching": {
+      const matchingOptions = (dto.options || []).map((option) => ({ id: option.id, label: option.text, value: option.id, isCorrect: option.is_correct }));
+      const optionIdByText = new Map(matchingOptions.map((option) => [option.label.trim().toLocaleLowerCase("fa"), option.id]));
+      const pairs = arrayObjectConfig(config, "matching_pairs").flatMap((pair) => {
+        if (typeof pair.id !== "string" || typeof pair.prompt !== "string" || typeof pair.answer !== "string") return [];
+        return [{ id: pair.id, prompt: pair.prompt, answer: pair.answer, optionId: optionIdByText.get(pair.answer.trim().toLocaleLowerCase("fa")) }];
+      });
+      return { ...base, type: "matching", options: matchingOptions, pairs };
+    }
     case "short_answer":
       return { ...base, type: "short_answer", placeholder: stringConfig(config, "placeholder"), expectedAnswers: arrayConfig(config, "expected_answers"), caseSensitive: config.case_sensitive === true, maxLength: numberConfig(config, "max_length") };
     case "written":
@@ -85,12 +110,18 @@ function trueFalseOptionIds(dto: { options?: ApiOptionDto[] }) {
 
 /** Student mapper intentionally reads only fields returned by the student-safe serializer. */
 export function toStudentQuestion(dto: ApiStudentQuestionDto): Question {
-  const base = { id: dto.id, order: dto.order, stem: dto.text, helpText: dto.instructions || undefined, points: number(dto.marks) };
+  const base = { id: dto.id, order: dto.order, stem: dto.text, helpText: dto.instructions || undefined, points: number(dto.marks), media: (dto.media ?? []).map(toQuestionMedia) };
   const options = (dto.options || []).map((option) => ({ id: option.id, label: option.text, value: option.id }));
   switch (dto.type) {
     case "multiple_choice": return { ...base, type: "single_choice", options };
     case "multiple_answer": return { ...base, type: "multiple_choice", options };
     case "true_false": return { ...base, type: "true_false", optionIds: trueFalseOptionIds(dto) };
+    case "matching": return {
+      ...base,
+      type: "matching",
+      options,
+      pairs: (dto.matching_prompts ?? []).map((pair) => ({ id: pair.id, prompt: pair.text })),
+    };
     case "short_answer": return { ...base, type: "short_answer" };
     case "written": return { ...base, type: "essay" };
   }
@@ -98,6 +129,11 @@ export function toStudentQuestion(dto: ApiStudentQuestionDto): Question {
 
 function stringConfig(config: Record<string, unknown>, key: string) { return typeof config[key] === "string" ? config[key] : undefined; }
 function arrayConfig(config: Record<string, unknown>, key: string) { return Array.isArray(config[key]) ? config[key].filter((v): v is string => typeof v === "string") : []; }
+function arrayObjectConfig(config: Record<string, unknown>, key: string): Array<Record<string, unknown>> {
+  const value = config[key];
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+}
+function configBoolean(config: Record<string, unknown> | undefined, key: string) { return config?.[key] === true; }
 function numberConfig(config: Record<string, unknown>, key: string) { return typeof config[key] === "number" ? config[key] : undefined; }
 
 function toExamSettings(dto: ApiExamSettingsDto, totalMarks = 0): Exam["settings"] {
@@ -116,6 +152,9 @@ function toExamSettings(dto: ApiExamSettingsDto, totalMarks = 0): Exam["settings
     resultDetail: dto.result_detail ?? null,
     integrityPolicy: dto.integrity_policy ?? "off",
     integrityTabLimit: dto.max_tab_switches ?? 0,
+    integrityTabGraceSeconds: dto.tab_switch_grace_seconds ?? 5,
+    integrityRecordAccessInfo: dto.record_access_info === true,
+    integrityBlockScreenshotShortcuts: dto.block_screenshot_shortcuts === true,
     integrityBlockCopyPaste: dto.block_copy_paste === true,
     integrityRequireFullscreen: dto.require_fullscreen === true,
     integrityLockToOneDevice: dto.lock_to_one_device === true,
@@ -140,7 +179,10 @@ export function toTeacherExam(dto: ApiTeacherExamDto | ApiTeacherExamListDto): E
     schedule: { startAt: dateTimeInput(dto.start_at), endAt: dateTimeInput(dto.end_at), timezone: "Asia/Tehran" },
     questionCount: detailed ? questions.length : dto.question_count,
     participantCount: dto.participant_count, attemptCount: dto.attempt_count,
-    settings, questions, teacherName: dto.teacher_name, accent: accentFor(dto.id),
+    settings, questions, audienceMode: dto.audience_mode ?? "profile",
+    studentGroupIds: "student_groups" in dto ? (dto.student_groups ?? []).map(String) : [],
+    studentIds: "students" in dto ? (dto.students ?? []).map(String) : [],
+    teacherName: dto.teacher_name, accent: accentFor(dto.id),
     createdAt: dto.created_at, updatedAt: dto.updated_at,
   };
 }
@@ -182,6 +224,9 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
     title: draft.title.trim(), description: draft.description.trim(), subject: draft.subject.trim(), grade: draft.grade.trim(),
     class_name: draft.className.trim(), instructions: draft.instructions.trim(), duration_minutes: draft.settings.durationMinutes,
     start_at: apiDate(draft.schedule.startAt, draft.schedule.timezone), end_at: apiDate(draft.schedule.endAt, draft.schedule.timezone),
+    audience_mode: draft.audienceMode ?? "profile",
+    student_groups: draft.audienceMode === "selected" ? [...(draft.studentGroupIds ?? [])] : [],
+    students: draft.audienceMode === "selected" ? [...(draft.studentIds ?? [])] : [],
     settings: {
       allow_previous_questions: draft.settings.allowBackNavigation,
       question_layout: draft.settings.questionLayout,
@@ -195,6 +240,9 @@ export function toExamWritePayload(draft: ExamDraft): ApiExamWritePayload {
       // written on, never off, would not be the teacher's to make.
       integrity_policy: draft.settings.integrityPolicy ?? "off",
       max_tab_switches: draft.settings.integrityTabLimit ?? 0,
+      tab_switch_grace_seconds: draft.settings.integrityTabGraceSeconds ?? 5,
+      record_access_info: draft.settings.integrityRecordAccessInfo === true,
+      block_screenshot_shortcuts: draft.settings.integrityBlockScreenshotShortcuts === true,
       block_copy_paste: draft.settings.integrityBlockCopyPaste === true,
       require_fullscreen: draft.settings.integrityRequireFullscreen === true,
       lock_to_one_device: draft.settings.integrityLockToOneDevice === true,
@@ -214,17 +262,31 @@ export function toQuestionWritePayload(question: Question): ApiQuestionWritePayl
     ...(question.tags ? { tags: question.tags.map((tag) => tag.trim()).filter(Boolean) } : {}),
     ...(question.isArchived !== undefined ? { is_archived: question.isArchived } : {}),
   };
+  const mediaConfiguration = {
+    allow_image_answer: question.allowImageAnswer === true,
+    allow_audio_answer: question.allowAudioAnswer === true,
+    image_only: question.imageOnly === true,
+  };
   switch (question.type) {
-    case "single_choice": return { ...base, type: "multiple_choice", configuration: {}, options: question.options.map((option) => ({ id: existingId(option.id), text: option.label.trim(), is_correct: option.id === question.correctOptionId })) };
-    case "multiple_choice": return { ...base, type: "multiple_answer", configuration: {}, options: question.options.map((option) => ({ id: existingId(option.id), text: option.label.trim(), is_correct: question.correctOptionIds?.includes(option.id) ?? false })) };
+    case "single_choice": return { ...base, type: "multiple_choice", configuration: mediaConfiguration, options: question.options.map((option) => ({ id: existingId(option.id), text: option.label.trim(), is_correct: option.id === question.correctOptionId })) };
+    case "multiple_choice": return { ...base, type: "multiple_answer", configuration: mediaConfiguration, options: question.options.map((option) => ({ id: existingId(option.id), text: option.label.trim(), is_correct: question.correctOptionIds?.includes(option.id) ?? false })) };
     case "true_false": {
       // Reuse the stored option ids so editing a live exam cannot orphan saved answers or trip the
       // protected-delete rule; a freshly created true/false question simply has none.
       const ids = question.optionIds;
-      return { ...base, type: "true_false", configuration: {}, options: [{ id: ids ? existingId(ids.true) : undefined, text: "درست", is_correct: question.correctAnswer === true }, { id: ids ? existingId(ids.false) : undefined, text: "نادرست", is_correct: question.correctAnswer === false }] };
+      return { ...base, type: "true_false", configuration: mediaConfiguration, options: [{ id: ids ? existingId(ids.true) : undefined, text: "درست", is_correct: question.correctAnswer === true }, { id: ids ? existingId(ids.false) : undefined, text: "نادرست", is_correct: question.correctAnswer === false }] };
     }
+    case "matching": return {
+      ...base,
+      type: "matching",
+      configuration: {
+        ...mediaConfiguration,
+        matching_pairs: question.pairs.map((pair) => ({ id: pair.id, prompt: pair.prompt.trim(), answer: (pair.answer ?? "").trim() })),
+      },
+      options: question.pairs.map((pair) => ({ id: existingId(pair.optionId ?? ""), text: (pair.answer ?? "").trim(), is_correct: false })),
+    };
     case "short_answer": {
-      const configuration: Record<string, unknown> = {};
+      const configuration: Record<string, unknown> = { ...mediaConfiguration };
       const expected = (question.expectedAnswers ?? []).map((item) => item.trim()).filter(Boolean);
       if (expected.length) configuration.expected_answers = expected;
       // Only meaningful alongside a key; the server ignores it for manual grading.
@@ -234,7 +296,7 @@ export function toQuestionWritePayload(question: Question): ApiQuestionWritePayl
       return { ...base, type: "short_answer", configuration };
     }
     case "essay": {
-      const configuration: Record<string, unknown> = {};
+      const configuration: Record<string, unknown> = { ...mediaConfiguration };
       if (question.maxLength) configuration.max_length = question.maxLength;
       if (question.placeholder?.trim()) configuration.placeholder = question.placeholder.trim();
       if (question.gradingNote?.trim()) configuration.grading_note = question.gradingNote.trim();
@@ -258,6 +320,14 @@ export function toStudentDashboardExam(dto: ApiAvailableExamDto): Exam {
       randomizeQuestions: dto.randomize_questions === true, randomizeOptions: dto.randomize_options === true, allowUnanswered: dto.allow_unanswered !== false,
       showResultImmediately: dto.result_visibility === "immediate", resultVisibility: dto.result_visibility,
       showCorrectAnswers: false, resultDetail: null, attemptLimit: dto.max_attempts,
+      integrityPolicy: dto.integrity?.policy ?? "off",
+      integrityTabLimit: dto.integrity?.max_tab_switches ?? 0,
+      integrityTabGraceSeconds: dto.integrity?.tab_switch_grace_seconds ?? 5,
+      integrityRecordAccessInfo: dto.integrity?.record_access_info === true,
+      integrityBlockScreenshotShortcuts: dto.integrity?.block_screenshot_shortcuts === true,
+      integrityBlockCopyPaste: dto.integrity?.block_copy_paste === true,
+      integrityRequireFullscreen: dto.integrity?.require_fullscreen === true,
+      integrityLockToOneDevice: dto.integrity?.lock_to_one_device === true,
       passingPercentage: number(result?.passing_percentage ?? dto.passing_percentage),
     },
     questions: [], teacherName: dto.teacher_name ?? "", accent: accentFor(dto.id), createdAt: startAt, updatedAt: startAt,
@@ -288,16 +358,20 @@ export function toIntegrityRules(dto?: ApiExamIntegrityDto): ExamIntegrityRules 
     requireFullscreen: dto.require_fullscreen === true,
     lockToOneDevice: dto.lock_to_one_device === true,
     maxTabSwitches: dto.max_tab_switches ?? 0,
+    tabSwitchGraceSeconds: dto.tab_switch_grace_seconds ?? 0,
+    recordAccessInfo: dto.record_access_info === true,
+    blockScreenshotShortcuts: dto.block_screenshot_shortcuts === true,
     tabSwitches: dto.tab_switches ?? 0,
     tabSwitchesRemaining: dto.tab_switches_remaining ?? null,
     copyEvents: dto.copy_events ?? 0,
   };
 }
 
-function answerValue(question: Question, selected: string[], text: string | null): AnswerValue {
+function answerValue(question: Question, selected: string[], text: string | null, matches?: Record<string, string>): AnswerValue {
   if (question.type === "single_choice") return selected[0] ?? null;
   if (question.type === "multiple_choice") return selected;
   if (question.type === "true_false") return selected.length ? selected[0] === question.optionIds?.true : null;
+  if (question.type === "matching") return matches && Object.keys(matches).length ? matches : null;
   return text || null;
 }
 
@@ -308,7 +382,13 @@ export function toStudentAttempt(dto: ApiAttemptDto): { exam: Exam; attempt: Exa
   for (const response of dto.answers) {
     const question = questionById.get(response.question_id);
     if (!question) continue;
-    answers[question.id] = { questionId: question.id, value: answerValue(question, response.selected_option_ids, response.text), flagged: response.is_flagged, updatedAt: response.updated_at };
+    answers[question.id] = {
+      questionId: question.id,
+      value: answerValue(question, response.selected_option_ids, response.text, response.matches),
+      flagged: response.is_flagged,
+      updatedAt: response.updated_at,
+      attachments: (response.attachments ?? []).map(toAnswerMedia),
+    };
   }
   const startAt = isoOrNow(dto.exam.start_at); const endAt = isoOrNow(dto.exam.end_at);
   const totalMarks = questions.reduce((sum, question) => sum + question.points, 0);
@@ -352,13 +432,16 @@ export function toStudentResult(dto: ApiStudentResultDto, attempt: ExamAttempt, 
       text: row.question_text,
       type: row.question_type,
       marks: number(row.marks),
-      yourAnswer: row.your_answer || (row.selected_option_texts.length ? row.selected_option_texts.join("، ") : "—"),
+      yourAnswer: row.your_answer || (row.selected_option_texts.length ? row.selected_option_texts.join("، ") : row.matching_answers?.length ? row.matching_answers.map((pair) => `${pair.prompt}: ${pair.your_answer || "—"}`).join(" · ") : "—"),
       feedback: row.feedback ?? "",
       awarded: row.awarded_score === undefined ? null : number(row.awarded_score),
       verdict: row.verdict ?? null,
       correctOptions: row.correct_option_texts ?? [],
       expectedAnswers: row.expected_answers ?? [],
       explanation: row.explanation ?? "",
+      matchingAnswers: (row.matching_answers ?? []).map((pair) => ({ prompt: pair.prompt, yourAnswer: pair.your_answer })),
+      questionMedia: (row.question_media ?? []).map(toQuestionMedia),
+      attachments: (row.attachments ?? []).map(toAnswerMedia),
     })),
   };
 }

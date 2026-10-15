@@ -1,7 +1,7 @@
 /** Wire types mirror the Django REST serializers. Keep them separate from UI/domain types. */
 export type ApiRole = "student" | "teacher" | "admin" | "school_admin";
 export type ApiExamStatus = "draft" | "scheduled" | "active" | "completed" | "archived";
-export type ApiQuestionType = "multiple_choice" | "multiple_answer" | "true_false" | "short_answer" | "written";
+export type ApiQuestionType = "multiple_choice" | "multiple_answer" | "true_false" | "matching" | "short_answer" | "written";
 export type ApiAttemptStatus = "in_progress" | "submitted" | "expired";
 
 export interface ApiUserDto {
@@ -26,6 +26,20 @@ export interface ApiRegisterPayload {
 export interface ApiRegisterResponseDto extends ApiUserDto { access: string; refresh: string; }
 
 export interface ApiOptionDto { id: string; text: string; order: number; is_correct?: boolean; }
+export interface ApiQuestionMediaDto {
+  id: string; kind: "image" | "audio"; url: string; content_type: string; size_bytes: number;
+  alt_text?: string; order: number; sha256?: string;
+}
+export interface ApiStudentAnswerAttachmentDto {
+  id: string; kind: "image" | "audio"; url: string; content_type: string; size_bytes: number; original_name?: string;
+}
+export interface ApiStudentDirectoryItemDto {
+  id: string; full_name: string; email: string; grade: string; class_name: string;
+}
+export interface ApiStudentGroupDto {
+  id: string; name: string; description: string; student_ids: string[]; student_count: number;
+  created_at?: string; updated_at?: string;
+}
 /** `count` is only present on the bank's tag list, where it drives the filter chips. */
 /** The bank import answers with a plain list when nothing was dropped, and with a report when it skipped. */
 export interface ApiQuestionImportResult {
@@ -36,8 +50,8 @@ export interface ApiQuestionImportResult {
 export interface ApiQuestionTagDto { id: string; name: string; count?: number; }
 
 export interface ApiQuestionDto {
-  id: string; exam: string; type: ApiQuestionType; text: string; instructions: string;
-  marks: number | string; order: number; options: ApiOptionDto[];
+  id: string; exam: string | null; type: ApiQuestionType; text: string; instructions: string;
+  marks: number | string; order: number; options: ApiOptionDto[]; media?: ApiQuestionMediaDto[];
   /** Bank metadata; `exam_*` fields let the bank list rows without a second request. */
   difficulty?: "easy" | "medium" | "hard"; tags?: ApiQuestionTagDto[]; is_archived?: boolean;
   usage_count?: number; answered_count?: number; copied_from?: string | null;
@@ -66,6 +80,8 @@ export interface ApiQuestionCategoryDto { category: string; count: number; }
 export interface ApiStudentResultAnswerDto {
   question_id: string; question_order: number; question_text: string; question_type: ApiQuestionType; marks: number | string;
   your_answer: string | null; selected_option_texts: string[];
+  matching_answers?: Array<{ prompt: string; your_answer: string }>;
+  question_media?: ApiQuestionMediaDto[]; attachments?: ApiStudentAnswerAttachmentDto[];
   /** Present from the note rung up. */
   feedback?: string;
   /** Present only at `full_key`. */
@@ -76,7 +92,8 @@ export interface ApiStudentResultAnswerDto {
 /** The student attempt serializer omits the parent exam and all answer-key fields. */
 export interface ApiStudentQuestionDto {
   id: string; type: ApiQuestionType; text: string; instructions: string;
-  marks: number | string; order: number; options: ApiOptionDto[];
+  marks: number | string; order: number; options: ApiOptionDto[]; media?: ApiQuestionMediaDto[];
+  matching_prompts?: Array<{ id: string; text: string }>;
 }
 
 export interface ApiExamSettingsDto {
@@ -98,6 +115,9 @@ export interface ApiExamSettingsDto {
   /** Anti-cheating. Absent on a payload stored before the switches existed, which means "off". */
   integrity_policy?: "off" | "observe" | "enforce";
   max_tab_switches?: number;
+  tab_switch_grace_seconds?: number;
+  record_access_info?: boolean;
+  block_screenshot_shortcuts?: boolean;
   block_copy_paste?: boolean;
   require_fullscreen?: boolean;
   lock_to_one_device?: boolean;
@@ -112,6 +132,7 @@ export interface ApiExamSettingsDto {
 export interface ApiIntegritySignalDto extends ApiExamIntegrityDto {
   status: ApiAttemptStatus;
   auto_submitted?: boolean;
+  violation_recorded?: boolean;
   reason?: string;
 }
 
@@ -123,6 +144,10 @@ export interface ApiExamIntegrityDto {
   require_fullscreen: boolean;
   lock_to_one_device: boolean;
   max_tab_switches: number;
+  /** Optional on legacy payloads. */
+  tab_switch_grace_seconds?: number;
+  record_access_info?: boolean;
+  block_screenshot_shortcuts?: boolean;
   tab_switches: number;
   tab_switches_remaining: number | null;
   copy_events: number;
@@ -131,6 +156,7 @@ export interface ApiExamIntegrityDto {
 export interface ApiTeacherExamListDto {
   id: string; title: string; subject: string; grade: string; class_name: string;
   teacher: string; teacher_name: string; status: ApiExamStatus; duration_minutes: number;
+  audience_mode?: "profile" | "selected";
   /** Null only on legacy rows; the mapper then sums question marks. */
   total_marks: number | string | null; start_at: string | null; end_at: string | null;
   settings: ApiExamSettingsDto; question_count: number; attempt_count: number; participant_count: number;
@@ -138,11 +164,13 @@ export interface ApiTeacherExamListDto {
 }
 export interface ApiTeacherExamDto extends ApiTeacherExamListDto {
   description: string; instructions: string; questions: ApiQuestionDto[];
+  student_groups?: string[]; students?: string[];
 }
 
 export interface ApiExamWritePayload {
   title: string; description: string; subject: string; grade: string; class_name: string;
   instructions: string; duration_minutes: number; start_at: string | null; end_at: string | null;
+  audience_mode?: "profile" | "selected"; student_groups?: string[]; students?: string[];
   settings: ApiExamSettingsDto;
 }
 export interface ApiQuestionWritePayload {
@@ -157,7 +185,11 @@ export interface ApiQuestionWritePayload {
 
 export interface ApiStudentAnswerDto {
   id: string; question_id: string; selected_option_ids: string[]; text: string | null;
+  matches?: Record<string, string>; attachments?: ApiStudentAnswerAttachmentDto[];
   answered: boolean; is_flagged: boolean; updated_at: string;
+}
+export interface ApiStudentAttachmentMutationDto {
+  answer: ApiStudentAnswerDto; answer_revision: number;
 }
 export interface ApiStudentAttemptExamDto {
   id: string; title: string; description: string; subject: string; grade: string; class_name: string;
@@ -197,6 +229,8 @@ export interface ApiAvailableExamDto {
   randomize_options?: boolean;
   question_layout?: "paged" | "single_page";
   availability: "available" | "upcoming" | "completed" | "in_progress";
+  /** Monitoring rules shown on the start screen, before any attempt-specific data exists. */
+  integrity?: ApiExamIntegrityDto;
   attempt: {
     id: string; status: ApiAttemptStatus; started_at: string; submitted_at: string | null;
     attempt_number: number; remaining_seconds: number | null;
@@ -250,7 +284,10 @@ export interface ApiTeacherResultRowDto {
 export interface ApiTeacherAttemptAnswerDto {
   id: string; question_id: string; question_text: string; question_type: ApiQuestionType; question_order: number;
   maximum_score: number | string; selected_option_ids: string[]; selected_option_texts: string[];
-  text: string | null; manual_grading_required: boolean; is_flagged: boolean; manual_score: number | string | null; feedback: string; updated_at: string;
+  text: string | null; matches?: Record<string, string>;
+  matching_pairs?: Array<{ id: string; prompt: string; correct_answer: string; selected_answer: string }>;
+  attachments?: ApiStudentAnswerAttachmentDto[]; question_media?: ApiQuestionMediaDto[];
+  manual_grading_required: boolean; is_flagged: boolean; manual_score: number | string | null; feedback: string; updated_at: string;
   /**
    * What the answer is worth and how that was decided, straight from the grading function. A keyed question
    * used to arrive with no number at all, so the marking screen showed only what was left to do.
@@ -275,6 +312,14 @@ export interface ApiTeacherAttemptDetailDto {
   attempt_number: number; server_time: string; remaining_seconds: number | null;
   session_switch_count: number; session_signals: ApiAttemptSignalDto[];
   integrity?: ApiExamIntegrityDto;
+  access_info?: {
+    ip_address: string | null;
+    user_agent: string;
+    browser: string;
+    platform: string;
+    device_type: string;
+    captured_at: string | null;
+  } | null;
   answers: ApiTeacherAttemptAnswerDto[];
   result: ApiTeacherResultDto | null;
 }

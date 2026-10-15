@@ -76,5 +76,5 @@ export function useExamSubmission(exam: Exam, options?: { examSession?: string }
     } finally {
       inFlight.current = false;
     }
-  }, [attempt, exam.id, beginSubmission, failSubmission, finishSubmission, markSaved, router, setSessionConflict, toast, examSession]);
+  }, [attempt, exam, beginSubmission, failSubmission, finishSubmission, markSaved, router, setSessionConflict, toast, examSession]);
 }

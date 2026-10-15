@@ -28,7 +28,7 @@ export default function AdminUsersPage() {
   const principal = viewerRole === "school_admin";
   const [users, setUsers] = useState<ApiAdminUserDto[]>([]); const [schools, setSchools] = useState<ApiSchoolDto[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null); const [query, setQuery] = useState(""); const [role, setRole] = useState<"all" | ApiRole>("all"); const [dialog, setDialog] = useState<"create" | ApiAdminUserDto | null>(null); const [form, setForm] = useState<UserForm>(blank); const [saving, setSaving] = useState(false);
   const load = async () => { try { setError(null); const [receivedUsers, receivedSchools] = await Promise.all([adminApi.users(), adminApi.schools()]); setUsers(receivedUsers); setSchools(receivedSchools); } catch (reason) { setError(apiErrorMessage(reason, "دریافت کاربران انجام نشد.")); } finally { setLoading(false); } };
-  useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { void load(); }, []);
   const shown = useMemo(() => users.filter((user) => (role === "all" || user.role === role) && `${user.full_name} ${user.email} ${user.school?.name || ""}`.toLowerCase().includes(query.toLowerCase())), [users, query, role]);
   const open = (value: "create" | ApiAdminUserDto) => {
     setError(null);

@@ -47,6 +47,9 @@ function securityHeaders(isApi = false): Array<{ key: string; value: string }> {
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // Lint is a separate, fast CI step (`npm run verify` includes it). Avoid running a second, Next-owned copy
+  // of the linter during production builds, where its legacy integration duplicates work and can hang.
+  eslint: { ignoreDuringBuilds: true },
   // Django's API contract is slash-terminated; do not normalize POST URLs before proxying.
   skipTrailingSlashRedirect: true,
   async rewrites() {

@@ -102,6 +102,8 @@ interface ApiRequestOptions extends Omit<RequestInit, "body" | "headers"> {
    * slow one. Twenty seconds is far past a healthy save and far short of a user's patience.
    */
   timeoutMs?: number;
+  /** Private media endpoints return bytes; they still use the same auth refresh and timeout path. */
+  responseType?: "json" | "blob";
 }
 
 /** Every request is cancelled after this long unless a caller asks for something else. */
@@ -120,9 +122,10 @@ function responseMessage(payload: ApiErrorPayload | null, status: number) {
   return status === 401 ? "نشست شما منقضی شده است." : "درخواست توسط سرور پذیرفته نشد.";
 }
 
-async function readPayload(response: Response): Promise<unknown> {
+async function readPayload(response: Response, responseType?: "json" | "blob"): Promise<unknown> {
   if (response.status === 204) return undefined;
   const contentType = response.headers.get("content-type") ?? "";
+  if (responseType === "blob" && response.ok) return response.blob();
   if (!contentType.includes("application/json")) return response.text();
   return response.json();
 }
@@ -141,8 +144,9 @@ async function send<T>(
   cached?: CacheEntry,
 ): Promise<SendResult<T>> {
   const headers = new Headers(options.headers);
-  headers.set("Accept", "application/json");
-  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+  headers.set("Accept", options.responseType === "blob" ? "image/*, audio/*, application/json" : "application/json");
+  const formDataBody = typeof FormData !== "undefined" && options.body instanceof FormData;
+  if (options.body !== undefined && !formDataBody) headers.set("Content-Type", "application/json");
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
   // The conditional header is what makes "revalidate" cheap: the server answers 304 and no JSON is
   // transferred at all. It rides on the request only when a stored body exists to compare against.
@@ -169,7 +173,7 @@ async function send<T>(
       ...options,
       signal: controller.signal,
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: options.body === undefined ? undefined : formDataBody ? options.body as BodyInit : JSON.stringify(options.body),
     });
   } catch (error) {
     if (timedOut) throw new Error("پاسخی از سرور نرسید؛ اتصال کند یا ناپایدار است. دوباره تلاش کنید.");
@@ -183,7 +187,7 @@ async function send<T>(
   if (response.status === 304 && cached) {
     return { payload: cached.body as T, notModified: true, etag: cached.etag };
   }
-  const payload = await readPayload(response);
+  const payload = await readPayload(response, options.responseType);
   if (!response.ok) {
     throw new ApiError(
       response.status,

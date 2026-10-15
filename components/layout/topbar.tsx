@@ -114,6 +114,7 @@ function MobileDrawer({ open, onClose, role, user, returnFocusTo }: { open: bool
 
   useEffect(() => {
     if (!open) return;
+    const returnFocusElement = returnFocusTo.current;
     const focusable = () => Array.from(panelRef.current?.querySelectorAll<HTMLElement>(
       'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])',
     ) ?? []);
@@ -139,7 +140,7 @@ function MobileDrawer({ open, onClose, role, user, returnFocusTo }: { open: bool
       document.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
       window.clearTimeout(focusTimer);
-      returnFocusTo.current?.focus();
+      returnFocusElement?.focus();
     };
   }, [open, onClose, reducedMotion, returnFocusTo]);
 

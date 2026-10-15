@@ -2,20 +2,29 @@ from __future__ import annotations
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Count, Prefetch, Q
+from django.db.models import Count, Max, Prefetch, Q
+from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from apps.core.secure_uploads import inspect_media_upload
+from apps.attempts.models import ExamAttempt
+from apps.attempts.services import attempt_question_ids
 
 from apps.users.models import User
 from apps.organizations.scope import is_school_admin, scope_exams
 from apps.users.permissions import CanSuperviseExam, IsExamOwnerOrAdministrator, IsTeacherOrAdministrator
 
-from .models import Exam, Question, QuestionFolder, QuestionOption, QuestionTag
+from .models import Exam, Question, QuestionFolder, QuestionMedia, QuestionOption, QuestionTag
+from .content_identity import question_content_hash
 from .serializers import (
     ExamWriteSerializer,
+    QuestionMediaSerializer,
     QuestionReorderSerializer,
     QuestionWriteSerializer,
     TeacherExamListSerializer,
@@ -104,7 +113,8 @@ class TeacherExamAccessMixin:
                 Prefetch(
                     "questions",
                     queryset=Question.objects.order_by("order").prefetch_related(
-                        Prefetch("options", queryset=QuestionOption.objects.order_by("order"))
+                        Prefetch("options", queryset=QuestionOption.objects.order_by("order")),
+                        Prefetch("media"),
                     ),
                 )
             )
@@ -165,7 +175,7 @@ class TeacherExamDetailView(TeacherExamAccessMixin, APIView):
     def patch(self, request, exam_id) -> Response:  # type: ignore[no-untyped-def]
         _refuse_school_admin_authoring(request.user)
         exam = self.get_exam(exam_id)
-        serializer = ExamWriteSerializer(exam, data=request.data, partial=True)
+        serializer = ExamWriteSerializer(exam, data=request.data, partial=True, context={"request": request})
         serializer.is_valid(raise_exception=True)
         updated_exam = serializer.save()
         return self.detail_response(updated_exam)
@@ -220,6 +230,7 @@ class QuestionAccessMixin(TeacherExamAccessMixin):
             Question.objects.select_related("exam", "exam__teacher")
             .prefetch_related(
                 Prefetch("options", queryset=QuestionOption.objects.order_by("order")),
+                Prefetch("media"),
                 "tags",
             )
             # Bank bookkeeping: how many attempts answered this question, and how many copies the
@@ -595,6 +606,168 @@ class TeacherQuestionDetailView(QuestionAccessMixin, APIView):
                 resequence_questions(exam.pk)
                 refresh_total_marks(exam)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class QuestionPromptMediaUploadSerializer(serializers.Serializer):
+    file = serializers.FileField()
+    kind = serializers.ChoiceField(choices=QuestionMedia.Kind.choices)
+    alt_text = serializers.CharField(required=False, allow_blank=True, max_length=180)
+    order = serializers.IntegerField(required=False, min_value=1, max_value=255)
+
+    def to_internal_value(self, data):  # type: ignore[no-untyped-def]
+        unexpected = set(data).difference(self.fields)
+        if unexpected:
+            raise serializers.ValidationError({field: "This is not a supported upload field." for field in unexpected})
+        return super().to_internal_value(data)
+
+
+MAX_QUESTION_MEDIA_FILES = 8
+
+
+def _question_media_identity(question: Question, media_hashes: list[str]) -> str:
+    """Fingerprint a question with the proposed media list, not a stale hash from before upload/delete."""
+    return question_content_hash(question, media_hashes=media_hashes)
+
+
+def _ensure_media_identity_is_unique(question: Question, identity: str) -> None:
+    peers = (
+        Question.objects.filter(exam_id=question.exam_id)
+        if question.exam_id is not None
+        else Question.objects.filter(owner_id=question.owner_id, exam__isnull=True)
+    ).exclude(pk=question.pk).prefetch_related("options", "media")
+    for candidate in peers:
+        if question_content_hash(candidate) == identity:
+            raise serializers.ValidationError({
+                "duplicate": (
+                    "با تغییر رسانه، سؤال با یک سؤال دیگر در این آزمون/بانک یکسان می‌شود؛ "
+                    "رسانهٔ دیگری انتخاب کنید یا نسخهٔ تکراری را حذف کنید."
+                )
+            })
+
+
+def _question_has_started_attempts(question: Question) -> bool:
+    return bool(question.exam_id and ExamAttempt.objects.filter(exam_id=question.exam_id).exists())
+
+
+class QuestionPromptMediaCollectionView(QuestionAccessMixin, APIView):
+    """Private prompt-media writes; the file signature, scope, size and question identity are server-owned."""
+
+    parser_classes = (MultiPartParser, FormParser)
+
+    def post(self, request, question_id) -> Response:  # type: ignore[no-untyped-def]
+        question = self.get_question(question_id)
+        serializer = QuestionPromptMediaUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        values = serializer.validated_data
+        try:
+            metadata = inspect_media_upload(values["file"], values["kind"])
+        except ValueError as exc:
+            raise serializers.ValidationError({"file": str(exc)}) from exc
+
+        saved_file = None
+        try:
+            with transaction.atomic():
+                question = Question.objects.select_for_update().get(pk=question.pk)
+                if _question_has_started_attempts(question):
+                    raise serializers.ValidationError({
+                        "question": "پس از شروع هر تلاش، رسانهٔ صورت سؤال قابل تغییر نیست تا برگه‌های دانش‌آموزان ثابت بمانند."
+                    })
+                existing_hashes = list(question.media.order_by("id").values_list("sha256", flat=True))
+                if len(existing_hashes) >= MAX_QUESTION_MEDIA_FILES:
+                    raise serializers.ValidationError({"file": f"حداکثر {MAX_QUESTION_MEDIA_FILES} رسانه برای هر سؤال مجاز است."})
+                order = values.get("order")
+                if order is None:
+                    order = (question.media.aggregate(max_order=Max("order"))["max_order"] or 0) + 1
+                proposed_hashes = [*existing_hashes, metadata["sha256"]]
+                identity = _question_media_identity(question, proposed_hashes)
+                _ensure_media_identity_is_unique(question, identity)
+
+                media = QuestionMedia(
+                    question=question,
+                    kind=values["kind"],
+                    original_name=metadata["original_name"],
+                    content_type=metadata["content_type"],
+                    size_bytes=metadata["size_bytes"],
+                    sha256=metadata["sha256"],
+                    alt_text=values.get("alt_text", "").strip(),
+                    order=order,
+                )
+                media.file.save(metadata["original_name"], values["file"], save=False)
+                saved_file = (media.file.storage, media.file.name)
+                media.save()
+                question.content_hash = identity
+                question.save(update_fields=("content_hash", "updated_at"))
+        except Exception:
+            # Storage is not part of the database transaction; remove a file if any later write rolls back.
+            if saved_file is not None:
+                saved_file[0].delete(saved_file[1])
+            raise
+        return Response(QuestionMediaSerializer(media).data, status=status.HTTP_201_CREATED)
+
+
+
+class QuestionPromptMediaDetailView(QuestionAccessMixin, APIView):
+    def delete(self, request, question_id, media_id) -> Response:  # type: ignore[no-untyped-def]
+        question = self.get_question(question_id)
+        storage_and_name = None
+        with transaction.atomic():
+            question = Question.objects.select_for_update().get(pk=question.pk)
+            media = get_object_or_404(QuestionMedia.objects.select_for_update(), pk=media_id, question=question)
+            if _question_has_started_attempts(question):
+                raise serializers.ValidationError({
+                    "question": "پس از شروع هر تلاش، رسانهٔ صورت سؤال قابل حذف نیست تا برگه‌های دانش‌آموزان ثابت بمانند."
+                })
+            remaining_hashes = list(
+                question.media.exclude(pk=media.pk).order_by("id").values_list("sha256", flat=True)
+            )
+            identity = _question_media_identity(question, remaining_hashes)
+            _ensure_media_identity_is_unique(question, identity)
+            storage_and_name = (media.file.storage, media.file.name)
+            media.delete()
+            question.content_hash = identity
+            question.save(update_fields=("content_hash", "updated_at"))
+            if storage_and_name[1]:
+                transaction.on_commit(lambda: storage_and_name[0].delete(storage_and_name[1]))
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class QuestionPromptMediaFileView(APIView):
+    """Serve a private prompt file to its owner, platform admin, or a student with a matching attempt."""
+
+    permission_classes = (IsAuthenticated,)
+
+    @staticmethod
+    def _can_read(user, question: Question) -> bool:  # type: ignore[no-untyped-def]
+        if user.role == User.Role.ADMIN:
+            return True
+        if user.role == User.Role.TEACHER:
+            return bool(
+                (question.exam_id and question.exam.teacher_id == user.id)
+                or (question.owner_id and question.owner_id == user.id)
+            )
+        if user.role != User.Role.STUDENT or question.exam_id is None:
+            return False
+        attempts = ExamAttempt.objects.filter(
+            exam_id=question.exam_id,
+            student=user,
+            status__in=(ExamAttempt.Status.IN_PROGRESS, ExamAttempt.Status.SUBMITTED, ExamAttempt.Status.EXPIRED),
+        ).only("id", "exam_id", "question_order")
+        return any(str(question.id) in attempt_question_ids(attempt) for attempt in attempts)
+
+    def get(self, request, question_id, media_id) -> FileResponse:  # type: ignore[no-untyped-def]
+        media = get_object_or_404(
+            QuestionMedia.objects.select_related("question", "question__exam", "question__exam__teacher"),
+            pk=media_id,
+            question_id=question_id,
+        )
+        if not self._can_read(request.user, media.question):
+            # A 404 avoids confirming the presence of a file to an unrelated account.
+            raise NotFound()
+        response = FileResponse(media.file.open("rb"), content_type=media.content_type)
+        response["Content-Disposition"] = "inline"
+        response["Cache-Control"] = "private, no-store"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
 
 
 class QuestionArchiveView(QuestionAccessMixin, APIView):

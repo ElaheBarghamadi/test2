@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpDown, CheckCircle2, ClipboardList, Download, Search, Send } from "lucide-react";
+import { ArrowUpDown, ClipboardList, Download, Search, Send } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { examsApi } from "@/lib/api/exams";

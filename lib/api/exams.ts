@@ -1,5 +1,5 @@
 import { apiRequest } from "@/lib/api/client";
-import type { ApiExamBundleDto, ApiExamSettingsDto, ApiExamWritePayload, ApiQuestionCategoryDto, ApiQuestionFolderDto, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
+import type { ApiExamBundleDto, ApiExamSettingsDto, ApiExamWritePayload, ApiQuestionCategoryDto, ApiQuestionFolderDto, ApiQuestionBankQuery, ApiQuestionImportResult, ApiQuestionDto, ApiQuestionMediaDto, ApiQuestionTagDto, ApiQuestionWritePayload, ApiTeacherExamDto, ApiTeacherExamListDto } from "@/lib/api/dtos";
 
 /**
  * How long a list may be painted from memory before the network is asked again.
@@ -77,6 +77,16 @@ export const examsApi = {
     );
     return Array.isArray(response) ? { created: response, skippedDuplicates: 0 } : { created: response.questions, skippedDuplicates: response.skipped_duplicates };
   },
+  uploadQuestionMedia: (questionId: string, file: File, kind: "image" | "audio", altText = "", order?: number) => {
+    const body = new FormData();
+    body.append("file", file);
+    body.append("kind", kind);
+    body.append("alt_text", altText);
+    if (order !== undefined) body.append("order", String(order));
+    return apiRequest<ApiQuestionMediaDto>(`/questions/${questionId}/media/`, { method: "POST", body, invalidate: QUESTION_INVALIDATE });
+  },
+  deleteQuestionMedia: (questionId: string, mediaId: string) =>
+    apiRequest<void>(`/questions/${questionId}/media/${mediaId}/`, { method: "DELETE", invalidate: QUESTION_INVALIDATE }),
   archiveQuestion: (questionId: string, action: "archive" | "restore") =>
     apiRequest<ApiQuestionDto>(`/questions/${questionId}/archive/`, { method: "POST", body: { action }, invalidate: QUESTION_INVALIDATE }),
   createQuestion: (examId: string, payload: ApiQuestionWritePayload) =>
