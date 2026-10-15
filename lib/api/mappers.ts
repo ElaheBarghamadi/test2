@@ -7,6 +7,8 @@ import type {
   ApiQuestionDto,
   ApiQuestionMediaDto,
   ApiStudentAnswerAttachmentDto,
+  ApiStudentDirectoryItemDto,
+  ApiStudentGroupDto,
   ApiStudentQuestionDto,
   ApiQuestionWritePayload,
   ApiNotificationPageDto,
@@ -16,7 +18,7 @@ import type {
   ApiTeacherExamListDto,
   ApiUserDto,
 } from "@/lib/api/dtos";
-import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamIntegrityRules, ExamDraft, ExamResult, NotificationItem, Question, QuestionMediaAsset, Role, StudentAnswerMedia, User } from "@/lib/types/domain";
+import type { AnswerValue, Exam, ExamAnswer, ExamAttempt, ExamIntegrityRules, ExamDraft, ExamResult, NotificationItem, Question, QuestionMediaAsset, Role, StudentAnswerMedia, StudentAudienceItem, StudentGroup, User } from "@/lib/types/domain";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Only a real server UUID may be echoed back as an option id; rows the builder has not saved yet must be created. */
@@ -36,6 +38,28 @@ export function toNotificationPage(dto: ApiNotificationPageDto): { unreadCount: 
 export function toUser(dto: ApiUserDto): User {
   const fullName = dto.full_name?.trim() || `${dto.first_name} ${dto.last_name}`.trim() || dto.email;
   return { id: dto.id, fullName, email: dto.email, role: dto.role as Role, avatar: dto.profile?.avatar ?? undefined, schoolName: dto.school?.name };
+}
+
+export function toStudentAudienceItem(dto: ApiStudentDirectoryItemDto): StudentAudienceItem {
+  return { id: dto.id, fullName: dto.full_name?.trim() || dto.email, email: dto.email, grade: dto.grade ?? "", className: dto.class_name ?? "" };
+}
+
+/**
+ * A group's membership as the server states it.
+ *
+ * `student_count` is read from the payload rather than derived from `student_ids.length` on purpose: the two
+ * can disagree for a moment after another teacher's edit, and the count is what the roster header shows, so
+ * showing the server's own figure keeps this screen and the exam's audience step telling the same story.
+ */
+export function toStudentGroup(dto: ApiStudentGroupDto): StudentGroup {
+  const ids = (dto.student_ids ?? []).map(String);
+  return {
+    id: dto.id,
+    name: dto.name,
+    description: dto.description ?? "",
+    studentIds: ids,
+    studentCount: typeof dto.student_count === "number" ? dto.student_count : ids.length,
+  };
 }
 
 function frontendVisibility(value: ApiExamSettingsDto["result_visibility"]): Exam["settings"]["resultVisibility"] {

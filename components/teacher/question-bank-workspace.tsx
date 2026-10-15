@@ -7,7 +7,7 @@ import { examsApi } from "@/lib/api/exams";
 import { apiErrorMessage } from "@/lib/api/client";
 import type { ApiQuestionCategoryDto, ApiQuestionDto, ApiQuestionFolderDto, ApiQuestionTagDto, ApiQuestionType } from "@/lib/api/dtos";
 import { toQuestionWritePayload, toTeacherQuestion } from "@/lib/api/mappers";
-import { blankQuestion, questionIssues, QuestionFields } from "@/components/teacher/question-builder";
+import { blankQuestion, questionIssues, QuestionFields, QuestionTypeGrid } from "@/components/teacher/question-builder";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -57,6 +57,11 @@ export function QuestionBankWorkspace({ initialExamId }: { initialExamId?: strin
   const [createTarget, setCreateTarget] = useState("");
   const [creating, setCreating] = useState(false);
   const [newQuestion, setNewQuestion] = useState<Question>(() => blankQuestion("single_choice", 1));
+  /**
+   * The bank composer asks for the type before it shows any field, exactly like adding a question to an exam.
+   * Reset whenever the dialog is opened or a question is saved, so "سؤال تازه" really does start from a choice.
+   */
+  const [typeChosen, setTypeChosen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   // Bank organisation: folders and categories are the teacher's own vocabulary, so neither is a fixed list.
   const [folders, setFolders] = useState<ApiQuestionFolderDto[]>([]);
@@ -311,7 +316,7 @@ export function QuestionBankWorkspace({ initialExamId }: { initialExamId?: strin
             <option value="draft">پیش‌نویس</option>
             <option value="ready">آمادهٔ استفاده</option>
           </select>
-          <Button type="button" size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4"/>سؤال تازه در بانک</Button>
+          <Button type="button" size="sm" onClick={() => { setTypeChosen(false); setCreateOpen(true); }}><Plus className="h-4 w-4"/>سؤال تازه در بانک</Button>
           <Button type="button" size="sm" variant={showArchived ? "default" : "outline"} onClick={() => setShowArchived(!showArchived)}><Archive className="h-3.5 w-3.5"/>بایگانی‌شده‌ها</Button>
         </div>
       </CardHeader>
@@ -417,7 +422,16 @@ export function QuestionBankWorkspace({ initialExamId }: { initialExamId?: strin
         پیش‌نویس بماند تا آماده‌اش کنم
       </label>
       <p className="mt-2 flex items-start gap-2 rounded-xl bg-muted/60 p-3 text-[11px] leading-5 text-muted-foreground"><Layers className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary"/>اگر همین سؤال با همین گزینه‌ها، همین کلید و همین نمره در آن آزمون وجود داشته باشد، نسخهٔ دوم ساخته نمی‌شود؛ بانک همان ردیف را نگه می‌دارد تا برگهٔ دانش‌آموز دو بار نمره نگیرد.</p>
-      <div className="mt-4"><QuestionFields question={newQuestion} onChange={setNewQuestion}/></div>
+      <div className="mt-4">
+        {!typeChosen ? (
+          <>
+            <p className="mb-2 text-xs font-black">اول نوع سؤال را انتخاب کنید</p>
+            <QuestionTypeGrid onPick={(type) => { setNewQuestion(blankQuestion(type, 1)); setTypeChosen(true); }}/>
+          </>
+        ) : (
+          <QuestionFields question={newQuestion} onChange={setNewQuestion}/>
+        )}
+      </div>
       <div className="mt-5 flex flex-wrap justify-end gap-2">
         <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>بستن</Button>
         <Button variant="outline" onClick={() => void create(false)} disabled={creating}>افزودن به آزمون</Button>

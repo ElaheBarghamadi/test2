@@ -24,9 +24,15 @@ function securityHeaders(isApi = false): Array<{ key: string; value: string }> {
     // A proxied API response is JSON, and a mislabelled body must never be sniffed into a script.
     { key: "X-Content-Type-Options", value: "nosniff" },
     { key: "Referrer-Policy", value: "same-origin" },
-    // An exam client has no use for a camera, a microphone or a location fix: refuse them at the boundary
-    // so no future feature can ask by accident, and no page can silently record the screen.
-    { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), display-capture=()" },
+    /*
+     * An exam client has no use for a camera or a location fix, and no page may silently record the screen.
+     *
+     * The microphone is the one exception: a written answer can be spoken instead (see
+     * `components/exam/answer-media-upload.tsx`), and a recording made in the page is uploaded through the
+     * same guarded attachment endpoint as a picked file. `(self)` keeps the permission on this origin only,
+     * so an embedded third-party frame still gets nothing.
+     */
+    { key: "Permissions-Policy", value: "camera=(), microphone=(self), geolocation=(), display-capture=()" },
     { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
     // The API is reached through this origin in the recommended deployment, and its own responses are
     // private per session: a shared cache must not hand one teacher's row set to the next visitor.

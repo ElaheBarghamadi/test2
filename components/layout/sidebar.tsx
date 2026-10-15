@@ -72,6 +72,9 @@ export function Sidebar({
             <Link
               key={item.href}
               href={item.href}
+              // Warm the route's bundle while the menu is on screen, so the click is a paint rather than a
+              // fetch. Six links is a bounded cost; the payoff is that switching panels never waits on JS.
+              prefetch
               onClick={close}
               aria-current={active ? "page" : undefined}
               className={cn(

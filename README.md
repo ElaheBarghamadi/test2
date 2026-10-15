@@ -69,6 +69,49 @@ npm run dev:stack:turbo    # both services with Turbopack for the frontend
 The standard workflow is the two-terminal API-then-frontend sequence above; `dev:stack` is retained as an
 optional shortcut.
 
+## Running with no internet connection
+
+School networks are frequently air-gapped, so nothing in this project is fetched at run time. Everything the
+app needs is checked into the folder or installed into it:
+
+| Need | Where it lives | How it got there |
+| --- | --- | --- |
+| Node packages | `node_modules/` (git-ignored) | `npm ci` — or `npm run setup`, which passes `--prefer-offline` |
+| Python packages | `backend/.venv/` (git-ignored) | `backend/requirements.lock` pins exact versions |
+| Persian webfont | `public/fonts/Vazirmatn-var.woff2` | **committed** — Vazirmatn 33.0.3, variable weight 100–900 |
+| Icons | `lucide-react` in `node_modules/` | no icon CDN, no remote SVG |
+| Next.js telemetry | disabled (`NEXT_TELEMETRY_DISABLED=1` in `dev-stack.mjs`) | Next would otherwise attempt an outbound call on first run |
+
+The font is the one thing that used to depend on the network. It is declared with `@font-face` in
+`app/globals.css`, `preload`ed from `app/layout.tsx`, and mapped in `tailwind.config.ts` as `font-sans` and
+`font-vazir`; `next/font/google` is deliberately **not** used, because it resolves at build time and would
+need an egress connection. Serve the folder and the type renders offline.
+
+To prepare an air-gapped machine, do this once while a connection is available and copy the whole folder:
+
+```bash
+npm ci                       # populates node_modules/ with the lockfile's exact tree
+cd backend && python3 -m venv .venv && ./.venv/bin/pip install -r requirements.lock && cd ..
+```
+
+Both directories are git-ignored, so either commit them to your deployment branch or copy the tree as-is.
+After that, `npm run dev:stack` works with the network cable unplugged; it never reaches for a package
+manager unless `node_modules/` or `backend/.venv/` is missing.
+
+### Demo data
+
+`backend/apps/core/management/commands/seed_demo.py` builds a self-contained school for local testing —
+one admin, one teacher, twelve students with Persian names, and two overlapping student groups:
+
+```bash
+cd backend && ./.venv/bin/python manage.py seed_demo
+```
+
+Every account uses the password `Examora1234!` (`teacher@examora.test`, `student1@examora.test`, …). The
+command is idempotent and refuses to run unless `DEBUG` is true, so it cannot seed a production database.
+The two groups deliberately share a student: picking both must count that student once, which is the union
+rule the exam audience screen implements.
+
 ## Frontend
 
 The frontend is at the repository root. `.env.local` is created from the shipped example if it is missing.
@@ -104,6 +147,25 @@ Validate a production build after stopping the Next.js dev process (do not run t
 ```bash
 npm run build
 ```
+
+### Instant navigation
+
+Every screen now paints the moment it is clicked, before any data arrives. Three pieces work together:
+
+1. **Route-level skeletons.** Each page directory has a `loading.tsx` rendering a `PageSkeleton`
+   (`components/shared/skeleton.tsx`) shaped like that screen — dashboard cards, a list of rows, a form, an
+   exam detail. Next.js streams it immediately, so the destination is on screen while the route compiles or
+   refetches.
+2. **A navigation progress bar.** `components/shared/navigation-progress.tsx` is mounted in the dashboard
+   shell and sweeps across the top of the page for the duration of a transition. It wraps
+   `history.pushState`/`replaceState` rather than listening for clicks, because `usePathname()` alone cannot
+   see a navigation start and `useSearchParams()` in the shell would force a Suspense boundary during static
+   rendering. It is disabled under `prefers-reduced-motion`.
+3. **Prefetching.** Sidebar links carry `prefetch`, so the route chunk is already in the browser by the time
+   it is needed.
+
+The skeletons are deliberately *not* shimmering placeholders that lie about the content — they carry the
+real shape of the screen, and the data drops into the same layout, so nothing jumps when it lands.
 
 ### Quality gates
 
@@ -177,7 +239,7 @@ Two dependency rules carry security weight here and are enforced, not remembered
 - `/` — product landing
 - `/login`, `/register`, `/forgot-password`, `/reset-password` — JWT authentication, school-code onboarding, and delivered password reset flow
 - `/student/dashboard`, `/student/exam/{exam_id}`, `/student/exam/{exam_id}/review`, `/student/results/{attempt_id}`
-- `/teacher/dashboard`, `/teacher/exams`, `/teacher/exams/create`, `/teacher/exams/{exam_id}`, `/teacher/exams/{exam_id}/edit`, `/teacher/questions`, `/teacher/results`, `/teacher/students`
+- `/teacher/dashboard`, `/teacher/exams`, `/teacher/exams/create`, `/teacher/exams/{exam_id}`, `/teacher/exams/{exam_id}/edit`, `/teacher/questions`, `/teacher/groups`, `/teacher/results`, `/teacher/students`
 - `/admin/dashboard`, `/admin/users`, `/admin/schools`, `/admin/exams`, and `/admin/profile` — real school/user administration and network-wide read-only exam monitoring
 
 ## Backend quick start
@@ -219,6 +281,8 @@ The backend loads `backend/.env` and, if needed, a monorepo-root `.env`. Copy `b
 - Student APIs under `/api/v1/student/` for safe availability, idempotent start/reuse, persistent randomized question order, server-authoritative timing (including the extended window while an attempt is open), attempt number/limit, single/batch autosave, review flags, submission, automatic grading where deterministic, and result visibility enforcement.
 - Safe result access only for immediate visibility or explicit teacher publication; answer keys, expected answers, explanations, teacher identity, grading configuration, and teacher-only settings are never emitted through student endpoints.
 - Teacher reporting endpoints under `/api/v1/results/teacher/` for owned exam rows, actual-participant lists, submitted answer review, manual text grading, feedback, and controlled result publication. Results carry `passing_percentage` and a derived `passed` verdict for both teacher rows and the student result view.
+- Teacher-owned student groups under `/api/v1/users/groups/` (list/create/update/delete) and a student directory under `/api/v1/users/students/`, which together drive exam targeting. A group is a named roster; membership is a separate row, so removing a student from a group never deletes them.
+- Exam targeting is stored as `audience_mode` (`profile` or `selected`) plus the chosen `student_groups` and individual student ids. The server resolves both to one eligibility set, so a student in two chosen groups is counted once, and `GET /api/v1/student/exams/` only ever returns exams that student is eligible for.
 - School/membership models, public active-school code onboarding, admin-only school/user management and network monitoring APIs, professional Django Admin registration for all domain models, a safe liveness endpoint at `GET /health/`, and a predictable DRF error envelope.
 
 Read [`backend/docs/api-v1.md`](backend/docs/api-v1.md) for the actual endpoints and payloads, then [`backend/docs/architecture.md`](backend/docs/architecture.md) before implementing the next API slice.
@@ -232,7 +296,60 @@ Read [`backend/docs/api-v1.md`](backend/docs/api-v1.md) for the actual endpoints
 
 ## Teacher workflow
 
-The teacher workspace supports server-backed search/filter/sort, duplication/archive/restore, a five-step exam builder, typed question editing, scheduling, draft save/publish, participant reporting, manual text grading, controlled result publication, and CSV export. Question authoring is full CRUD: options can be added, re-worded, duplicated, reordered, and removed (the builder offers between two and ten rows, matching the server's minimum of two), each type marks its own answer key, short answers keep a list of accepted responses with case sensitivity, and every rule the publish gate enforces is previewed inline before saving. `start now` and `extend time` live on the exam detail screen and refuse themselves with the server's reason when the status or the clock does not allow it, and the detail screen states plainly when an exam is live and how many attempts are already recorded. It keeps the Persian/RTL design system and discriminated `Question` union intact. A separate question bank searches every question the teacher owns (text, type, difficulty, tag, archived state), shows where each one is used, and inserts copies of the selected rows into another exam in one action — copying, never sharing, so no live answer sheet can change under a class. The results screen adds a grading queue ordered by progress (`17 / 24 graded`), a per-row verdict column against the exam's pass mark, and a session-signals panel that reports what the platform observed without treating it as proof.
+The teacher workspace supports server-backed search/filter/sort, duplication/archive/restore, a six-step exam builder (اطلاعات پایه → تنظیمات → مخاطبان → سؤال‌ها → زمان‌بندی → بازبینی), typed question editing, scheduling, draft save/publish, participant reporting, manual text grading, controlled result publication, and CSV export. Question authoring is full CRUD: options can be added, re-worded, duplicated, reordered, and removed (the builder offers between two and ten rows, matching the server's minimum of two), each type marks its own answer key, short answers keep a list of accepted responses with case sensitivity, and every rule the publish gate enforces is previewed inline before saving. `start now` and `extend time` live on the exam detail screen and refuse themselves with the server's reason when the status or the clock does not allow it, and the detail screen states plainly when an exam is live and how many attempts are already recorded. It keeps the Persian/RTL design system and discriminated `Question` union intact. A separate question bank searches every question the teacher owns (text, type, difficulty, tag, archived state), shows where each one is used, and inserts copies of the selected rows into another exam in one action — copying, never sharing, so no live answer sheet can change under a class. The results screen adds a grading queue ordered by progress (`17 / 24 graded`), a per-row verdict column against the exam's pass mark, and a session-signals panel that reports what the platform observed without treating it as proof.
+
+### Exam audience (step 3)
+
+Step 3 of the builder answers one question: *who is allowed to sit this exam?* Two modes, both enforced on
+the server:
+
+- **بر اساس پروفایل** — every student whose grade/class profile matches the exam's. No list is stored, so a
+  student added to the class tomorrow is included automatically.
+- **گروه‌ها و دانش‌آموزان انتخابی** — an explicit roster assembled from the teacher's own student groups plus
+  any individual students, with a live count of how many people the exam will be open to.
+
+The screen is in `components/forms/exam-audience-form.tsx`; the eligibility rule is duplicated in
+`backend/apps/exams/serializers.py` and `backend/apps/attempts/services.py`, and the backend refuses to
+change the audience once an attempt exists. A published exam with `selected` targeting and an empty roster is
+rejected with a Persian message rather than silently becoming a no-one exam.
+
+### Student groups (گروه‌بندی)
+
+`/teacher/groups` is its own section in the sidebar: create a group, give it a description, and pick members
+by name, grade or class. Groups are reusable across exams — build «تجربی ۲ — گروه الف» once and select it in
+every exam for that class. Editing or deleting a group attached to a scheduled exam is refused with the
+reason, because it would silently change who can sit a published paper.
+
+Models: `apps/users/models.py` (`StudentGroup`, `StudentGroupMember`) · views: `apps/users/group_views.py` ·
+UI: `components/teacher/student-groups-workspace.tsx` and `components/teacher/student-picker.tsx`.
+
+### Adding a question
+
+`افزودن سؤال` opens a dialog that asks **only** for the question type first — six cards, each with its own
+Persian label and one-line description — and then renders the fields that type actually has. A matching
+question no longer shows an option list; an essay no longer shows an accepted-answer field. The stem, mark,
+media and tags survive a trip back to the type picker, and nothing is added to the exam until the teacher
+confirms, so closing the dialog throws the half-typed question away.
+
+Supported types: چهارگزینه‌ای (one correct), چندگزینه‌ای چندپاسخی (teacher sets how many), درست/نادرست,
+وصل‌کردنی, پاسخ کوتاه (list of accepted answers, case sensitivity), پاسخ تشریحی.
+
+Optional material sits in two collapsible sections — «پاسخ رسانه‌ای دانش‌آموز» and «راهنما، برچسب و توضیح» —
+which start closed and open themselves only when they already hold something. The stem, options and answer
+key are never hidden.
+
+### Images and audio in a question
+
+A question's prompt can carry its own images and audio (`PromptMediaEditor`), or be given as an image alone
+(«سؤال فقط تصویر است»). Per question, the teacher can also require the student to answer with an uploaded
+image or a recording, with a cap on files and size.
+
+Everything on that path is validated by magic bytes in `backend/apps/core/secure_uploads.py`, not by the
+content type the browser claims: JPEG/PNG/WebP for images (SVG is rejected outright), MPEG/Ogg/WAV/WebM and
+`ftyp`-branded MP4 for audio — the last one because Safari has no WebM encoder, so a student on an iPad would
+otherwise be unable to answer. Declared size, dimension bombs, path traversal in the file name and empty
+uploads are all refused, and stored media is served through an authenticated private route with
+`no-store` and `nosniff`.
 
 ## Student exam workflow
 

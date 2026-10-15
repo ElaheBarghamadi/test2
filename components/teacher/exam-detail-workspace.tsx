@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Clock3, Copy, Eye, ListChecks, PlusCircle, RotateCcw, Timer, UsersRound } from "lucide-react";
+import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Clock3, Copy, Eye, Layers, ListChecks, PlusCircle, RotateCcw, Timer, UsersRound } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Exam } from "@/lib/types/domain";
 import { INTEGRITY_POLICY_LABELS, rulesFromSettings } from "@/lib/exam/integrity";
@@ -97,6 +97,20 @@ export function TeacherExamDetailWorkspace({ examId }: { examId: string }) {
         { icon: Timer, label: "تلاش‌ها", value: `${toPersianNumber(exam.attemptCount ?? 0)} تلاش` },
       ].map((item) => { const Icon = item.icon; return <div key={item.label} className="rounded-xl bg-muted/55 p-3"><Icon className="h-4 w-4 text-primary"/><p className="mt-4 text-[10px] font-bold text-muted-foreground">{item.label}</p><p className="mt-1 text-xs font-extrabold">{item.value}</p></div>; })}</div>
       <div className="mt-6 rounded-2xl border bg-surface p-4"><p className="text-xs font-bold text-muted-foreground">توضیح آزمون</p><p className="mt-2 text-sm leading-7">{exam.description}</p>{exam.instructions && <p className="mt-4 border-t pt-4 text-xs leading-6 text-muted-foreground"><b className="text-foreground">راهنمای دانش‌آموز: </b>{exam.instructions}</p>}</div>
+      {/*
+        Who may sit the paper, stated on the exam itself rather than only in the builder. A teacher revisiting
+        a scheduled exam needs to answer "is this for everyone or just my group?" without opening the wizard,
+        and a `selected` exam with an empty roster is exactly the mistake worth surfacing here.
+      */}
+      <div className="mt-3 flex items-start gap-3 rounded-2xl border bg-muted/35 p-4">
+        <Layers className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true"/>
+        <div className="min-w-0 text-xs leading-6 text-muted-foreground">
+          <p className="font-black text-foreground">مخاطبان آزمون</p>
+          {exam.audienceMode === "selected"
+            ? <p className="mt-1">{toPersianNumber(exam.studentGroupIds?.length ?? 0)} گروه و {toPersianNumber(exam.studentIds?.length ?? 0)} دانش‌آموز به‌صورت انتخابی. فقط همین افراد آزمون را در فهرست خود می‌بینند.{!(exam.studentGroupIds?.length) && !(exam.studentIds?.length) && <b className="mr-1 font-black text-warning"> هشدار: هیچ مخاطبی انتخاب نشده است.</b>}</p>
+            : <p className="mt-1">بر اساس پایه و کلاس ({exam.grade || "—"} · {exam.className || "—"}). هر دانش‌آموزی که پروفایلش مطابقت داشته باشد آزمون را می‌بیند.</p>}
+        </div>
+      </div>
     </CardContent></Card>
 
     {live && <Card className="border-amber-500/25 bg-amber-500/[.05]"><CardContent className="flex flex-wrap items-start gap-3 p-4 text-xs leading-6 text-amber-900 dark:text-amber-200"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning"/>{started ? <span><b>این آزمون در حال برگزاری است و {toPersianNumber(exam.attemptCount ?? 0)} تلاش ثبت شده.</b> تغییر متن و نمرهٔ سؤال‌ها برای تلاش‌های تازه اعمال می‌شود و پاسخ‌های ثبت‌شده بازنویسی نمی‌شوند. گزینه‌ای که دانش‌آموزی آن را انتخاب کرده حذف نمی‌شود؛ برای ساختار تازه، از «ساخت یک کپی» استفاده کنید.</span> : <span><b>آزمون فعال است و دانش‌آموزان می‌توانند آن را شروع کنند.</b> پیش از ورود نفر بعدی، از تکمیل سؤال‌ها و زمان‌بندی مطمئن شوید.</span>}</CardContent></Card>}

@@ -16,6 +16,9 @@ IMAGE_LIMIT = 5 * 1024 * 1024
 AUDIO_LIMIT = 15 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 
+# ISO-BMFF brands that mean "audio in an MP4 container". Read from bytes 8..12 of the `ftyp` box.
+_MP4_AUDIO_BRANDS = frozenset({b"M4A ", b"M4B ", b"mp42", b"isom", b"iso2", b"M4V "})
+
 
 def _safe_name(name: str) -> str:
     value = unicodedata.normalize("NFKC", os.path.basename((name or "").replace("\\", "/")))
@@ -68,8 +71,13 @@ def inspect_media_upload(upload: Any, kind: str) -> dict[str, Any]:
             # WebM is accepted for browser MediaRecorder audio. The endpoint serves it as audio/webm only;
             # no uploaded HTML/SVG/script is ever rendered as a document.
             mime = "audio/webm"
+        elif header[4:8] == b"ftyp" and header[8:12] in _MP4_AUDIO_BRANDS:
+            # Safari's MediaRecorder has no WebM encoder and answers an in-page recording as MP4/AAC. Refusing
+            # it would mean every iPad student silently cannot send a spoken answer. The brand is checked, not
+            # just the box, so a renamed .mov or .mp4 video does not ride through on the same four bytes.
+            mime = "audio/mp4"
         if mime is None:
-            raise ValueError("فقط فایل صوتی MP3، OGG، WAV یا WebM مجاز است.")
+            raise ValueError("فقط فایل صوتی MP3، OGG، WAV، WebM یا M4A مجاز است.")
 
     digest = hashlib.sha256()
     try:

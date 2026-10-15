@@ -2,6 +2,39 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Vazirmatn lives inside the repository (`public/fonts/`), not on a CDN.
+ *
+ * An offline school network is a normal deployment for this product, so a font fetched from the internet
+ * is a font that silently does not exist: the interface would fall back to Tahoma and every measured
+ * width in the layout would change. One variable file (112 KB) covers weights 100–900, which is the whole
+ * range the design uses, so there is no per-weight round trip either. `font-display: swap` keeps text
+ * readable on the very first paint while the file lands from disk.
+ */
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("/fonts/Vazirmatn-var.woff2") format("woff2-variations"),
+       url("/fonts/Vazirmatn-var.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+/* Static fallbacks for browsers that reject a variable face; they carry only the two weights in use. */
+@font-face {
+  font-family: "Vazirmatn Static";
+  src: url("/fonts/Vazirmatn-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Vazirmatn Static";
+  src: url("/fonts/Vazirmatn-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 @layer base {
   :root {
     color-scheme: light;
@@ -67,7 +100,7 @@
   html { scroll-behavior: smooth; }
   body {
     @apply min-h-dvh bg-background text-foreground antialiased;
-    font-family: Vazirmatn, IRANSansX, "Noto Sans Arabic", Tahoma, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: Vazirmatn, "Vazirmatn Static", IRANSansX, "Noto Sans Arabic", Tahoma, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background-image:
       radial-gradient(48rem circle at 100% 0%, hsl(var(--primary) / .055), transparent 55%),
       radial-gradient(40rem circle at 0% 24%, hsl(181 68% 48% / .045), transparent 52%);
@@ -169,6 +202,13 @@
 
 @keyframes page-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
+/*
+ * The navigation bar sweeps right-to-left: `dir="rtl"` does not flip a transform, and a progress indicator
+ * travelling against the reading direction looks like it is unwinding.
+ */
+@keyframes nav-progress-sweep { from { transform: translateX(300%); } to { transform: translateX(-100%); } }
+.nav-progress-bar { animation: nav-progress-sweep 1.1s ease-in-out infinite; will-change: transform; }
+
 /* Right-to-left: the highlight travels from the start of the line to its end, like the Persian reading order. */
 @keyframes skeleton-sweep { from { background-position: 0% 0; } to { background-position: -300% 0; } }
 
@@ -176,6 +216,8 @@
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
   /* A frozen sweep reads as a rendering bug; a flat block reads clearly as "loading". */
   .skeleton { animation: none !important; background-image: none; background-color: hsl(var(--muted)); }
+  /* A frozen sweep would leave the bar off-screen and invisible; hold a plain full-width line instead. */
+  .nav-progress-bar { animation: none !important; transform: none !important; width: 100%; }
 }
 
 /* Small screens get calmer spacing and full-width primary actions without enlarging every data table. */

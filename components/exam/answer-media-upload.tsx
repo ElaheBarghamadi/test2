@@ -1,16 +1,19 @@
 "use client";
 
-import { useState } from "react";
-import { FileAudio2, FileImage, LoaderCircle, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CircleStop, FileAudio2, FileImage, LoaderCircle, Mic, Trash2, TriangleAlert } from "lucide-react";
 import { attemptsApi, type AttemptWriteGuards } from "@/lib/api/attempts";
 import { ApiError, apiErrorMessage } from "@/lib/api/client";
 import { PrivateMedia } from "@/components/shared/private-media";
 import { Button } from "@/components/ui/button";
 import { toAnswerMedia } from "@/lib/api/mappers";
 import type { StudentAnswerMedia } from "@/lib/types/domain";
+import { useVoiceRecorder } from "@/hooks/use-voice-recorder";
 import { cn, toPersianNumber } from "@/lib/utils";
 
+/** Mirrors `MAX_ANSWER_MEDIA_FILES` in `apps/attempts/services.py`; the server refuses past it either way. */
 const MAX_FILES = 5;
+const MAX_RECORD_SECONDS = 180;
 
 export function AnswerMediaUpload({
   attemptId,
@@ -33,6 +36,18 @@ export function AnswerMediaUpload({
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const full = attachments.length >= MAX_FILES;
+
+  const recorder = useVoiceRecorder({
+    maxSeconds: MAX_RECORD_SECONDS,
+    onRecording: (file) => void upload(file, "audio"),
+  });
+  // A recording that finishes after the attempt has closed (the timer ran out, the teacher completed the
+  // exam) must not fire an upload into a dead session; the student gets one clear sentence instead.
+  const recorderState = recorder.state;
+  const cancelRecording = recorder.cancel;
+  useEffect(() => { if (disabled && recorderState === "recording") cancelRecording(); }, [disabled, recorderState, cancelRecording]);
+
   if (!allowImage && !allowAudio) return null;
 
   async function withRevisionRetry<T>(write: (revision: number | undefined) => Promise<T>): Promise<T> {
@@ -77,22 +92,61 @@ export function AnswerMediaUpload({
     }
   }
 
+  const recording = recorder.state === "recording";
+  // Persian digits, zero-padded, so the timer does not jitter its own width as it counts.
+  const clock = `${toPersianNumber(String(Math.floor(recorder.seconds / 60)).padStart(2, "0"))}:${toPersianNumber(String(recorder.seconds % 60).padStart(2, "0"))}`;
+
   return <section className="mt-5 rounded-2xl border border-primary/15 bg-primary/[.025] p-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div><h2 className="text-sm font-black">پیوست پاسخ شما</h2><p className="mt-1 text-[11px] leading-5 text-muted-foreground">فایل‌ها خصوصی هستند و فقط شما و آموزگار این آزمون می‌توانید آن‌ها را ببینید.</p></div>
       <span className="text-[10px] font-bold text-muted-foreground">{toPersianNumber(attachments.length)} / {toPersianNumber(MAX_FILES)} فایل</span>
     </div>
+
     <div className="mt-3 flex flex-wrap gap-2">
-      {allowImage && <label className={cn("inline-flex h-10 cursor-pointer items-center gap-2 rounded-xl border bg-card px-3 text-xs font-bold transition-colors hover:border-primary/40 hover:bg-muted", (disabled || busyId || attachments.length >= MAX_FILES) && "pointer-events-none opacity-55")}>
+      {allowImage && <label className={cn("inline-flex h-10 cursor-pointer items-center gap-2 rounded-xl border bg-card px-3 text-xs font-bold transition-colors hover:border-primary/40 hover:bg-muted", (disabled || busyId || full) && "pointer-events-none opacity-55")}>
         <FileImage className="h-4 w-4 text-primary"/>افزودن تصویر
-        <input className="sr-only" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" disabled={disabled || Boolean(busyId) || attachments.length >= MAX_FILES} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void upload(file, "image"); event.currentTarget.value = ""; }}/>
+        <input className="sr-only" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" disabled={disabled || Boolean(busyId) || full} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void upload(file, "image"); event.currentTarget.value = ""; }}/>
       </label>}
-      {allowAudio && <label className={cn("inline-flex h-10 cursor-pointer items-center gap-2 rounded-xl border bg-card px-3 text-xs font-bold transition-colors hover:border-primary/40 hover:bg-muted", (disabled || busyId || attachments.length >= MAX_FILES) && "pointer-events-none opacity-55")}>
-        <FileAudio2 className="h-4 w-4 text-primary"/>افزودن صدا
-        <input className="sr-only" type="file" accept=".mp3,.ogg,.wav,.webm,audio/*" capture="user" disabled={disabled || Boolean(busyId) || attachments.length >= MAX_FILES} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void upload(file, "audio"); event.currentTarget.value = ""; }}/>
+      {allowAudio && <label className={cn("inline-flex h-10 cursor-pointer items-center gap-2 rounded-xl border bg-card px-3 text-xs font-bold transition-colors hover:border-primary/40 hover:bg-muted", (disabled || busyId || full || recording) && "pointer-events-none opacity-55")}>
+        <FileAudio2 className="h-4 w-4 text-primary"/>افزودن فایل صدا
+        <input className="sr-only" type="file" accept=".mp3,.ogg,.wav,.webm,.m4a,audio/*" disabled={disabled || Boolean(busyId) || full || recording} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void upload(file, "audio"); event.currentTarget.value = ""; }}/>
       </label>}
+      {allowAudio && (recording
+        ? <span className="inline-flex h-10 items-center gap-2">
+            <button type="button" onClick={recorder.stop} className="inline-flex h-10 items-center gap-2 rounded-xl border border-destructive/35 bg-destructive/[.07] px-3 text-xs font-black text-destructive">
+              <CircleStop className="h-4 w-4"/>پایان ضبط و ارسال
+            </button>
+            <button type="button" onClick={recorder.cancel} className="inline-flex h-10 items-center rounded-xl border bg-card px-3 text-xs font-bold hover:bg-muted" aria-label="لغو ضبط">لغو</button>
+          </span>
+        : recorder.supported && <Button type="button" variant="outline" onClick={() => void recorder.start()} disabled={disabled || Boolean(busyId) || full || recorder.state === "requesting"}>
+            {recorder.state === "requesting" ? <LoaderCircle className="h-4 w-4 animate-spin"/> : <Mic className="h-4 w-4 text-primary"/>}
+            {recorder.state === "requesting" ? "درخواست دسترسی به میکروفون…" : "ضبط صدا"}
+          </Button>)}
       {busyId && <span role="status" className="inline-flex items-center gap-1.5 text-xs font-bold text-primary"><LoaderCircle className="h-4 w-4 animate-spin"/>در حال ذخیرهٔ امن فایل…</span>}
     </div>
+
+    {recording && (
+      <div role="status" className="mt-3 flex items-center gap-3 rounded-xl border border-destructive/25 bg-destructive/[.05] p-3">
+        <span className="relative flex h-3 w-3 shrink-0" aria-hidden="true">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-destructive opacity-60"/>
+          <span className="relative inline-flex h-3 w-3 rounded-full bg-destructive"/>
+        </span>
+        <span className="min-w-0 flex-1 text-xs font-bold leading-5">
+          در حال ضبط… <span dir="ltr" className="font-mono">{clock}</span> از {toPersianNumber(MAX_RECORD_SECONDS / 60)} دقیقه
+          <span className="mt-0.5 block text-[10px] font-normal text-muted-foreground">با «پایان ضبط و ارسال» فایل بلافاصله ذخیره می‌شود. تا وقتی ارسال نشده، پاسخی ثبت نشده است.</span>
+        </span>
+      </div>
+    )}
+
+    {(recorder.state === "denied" || recorder.state === "unsupported" || recorder.state === "error") && (
+      <p className="mt-3 flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/[.07] p-3 text-[11px] font-bold leading-5 text-warning">
+        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true"/>
+        <span>{recorder.message ?? (recorder.state === "unsupported"
+          ? "مرورگر شما ضبط صدا در صفحه را پشتیبانی نمی‌کند؛ می‌توانید فایل صوتی را از دستگاه انتخاب کنید."
+          : "دسترسی به میکروفون داده نشد. می‌توانید فایل صوتی را از دستگاه انتخاب کنید.")}</span>
+      </p>
+    )}
+
     {attachments.length > 0 && <div className="mt-3 space-y-2">{attachments.map((attachment) => <div key={attachment.id} className="flex flex-col gap-2 rounded-xl border bg-card p-3 sm:flex-row sm:items-center">
       <div className="min-w-0 flex-1">
         <p className="mb-2 truncate text-[11px] font-bold text-muted-foreground">{attachment.originalName || (attachment.kind === "image" ? "تصویر پاسخ" : "صدای پاسخ")}</p>
@@ -101,6 +155,6 @@ export function AnswerMediaUpload({
       <Button type="button" size="sm" variant="ghost" className="self-end text-destructive sm:self-center" disabled={disabled || Boolean(busyId)} onClick={() => void remove(attachment)} aria-label="حذف پیوست"><Trash2 className="h-4 w-4"/>حذف</Button>
     </div>)}</div>}
     {error && <p role="alert" className="mt-3 rounded-xl border border-destructive/20 bg-destructive/[.04] p-2.5 text-[11px] font-bold text-destructive">{error}</p>}
-    <p className="mt-3 text-[10px] leading-5 text-muted-foreground">تصویر: JPEG، PNG یا WebP، حداکثر ۵ مگابایت. صدا: MP3، OGG، WAV یا WebM، حداکثر ۱۵ مگابایت. فایل با امضای واقعی و اندازهٔ مجاز در سرور بررسی می‌شود.</p>
+    <p className="mt-3 text-[10px] leading-5 text-muted-foreground">تصویر: JPEG، PNG یا WebP، حداکثر ۵ مگابایت. صدا: ضبط در همین صفحه یا فایل MP3، OGG، WAV، WebM یا M4A، حداکثر ۱۵ مگابایت و {toPersianNumber(MAX_RECORD_SECONDS / 60)} دقیقه. فایل در سرور از روی امضای واقعی بایت‌ها بررسی می‌شود، نه نامی که مرورگر می‌فرستد.</p>
   </section>;
 }

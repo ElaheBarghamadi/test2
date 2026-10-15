@@ -1,5 +1,5 @@
 import type { Role } from "@/lib/types/domain";
-import { BarChart3, BookOpenCheck, Building2, ClipboardList, FileText, GraduationCap, Home, KeyRound, LayoutDashboard, ListChecks, School, Settings2, UserRoundCog, Users } from "lucide-react";
+import { BarChart3, BookOpenCheck, Building2, ClipboardList, FileText, GraduationCap, Home, KeyRound, Layers, LayoutDashboard, ListChecks, School, Settings2, UserRoundCog, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 export interface NavItem { label: string; href: string; icon: LucideIcon; }
 export const roleNavigation: Record<Role, NavItem[]> = {
@@ -12,6 +12,7 @@ export const roleNavigation: Record<Role, NavItem[]> = {
     { label: "نمای کلی", href: "/teacher/dashboard", icon: LayoutDashboard },
     { label: "آزمون‌ها", href: "/teacher/exams", icon: ClipboardList },
     { label: "بانک سؤال", href: "/teacher/questions", icon: ListChecks },
+    { label: "گروه‌ها", href: "/teacher/groups", icon: Layers },
     { label: "نتایج", href: "/teacher/results", icon: BarChart3 },
     { label: "دانش‌آموزان", href: "/teacher/students", icon: GraduationCap },
   ],

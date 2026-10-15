@@ -170,7 +170,7 @@ function ensureDependencies() {
     spawnSync(py, ["-c", "import django"], { stdio: "ignore" }).status !== 0;
   if (!djangoMissing && fs.existsSync(stamp) && fs.readFileSync(stamp, "utf8") === hash) return;
   info("installing backend dependencies from requirements.lock…");
-  run(py, ["-m", "pip", "install", "-q", "-r", "requirements.lock"], {
+  run(py, ["-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", "requirements.lock"], {
     cwd: BACKEND_DIR,
     label: "pip install",
     env: { PIP_DISABLE_PIP_VERSION_WARNING: "1" },
@@ -235,7 +235,8 @@ async function startApi() {
 function ensureNodeModules() {
   if (fs.existsSync(path.join(ROOT, "node_modules", "next"))) return;
   info("node_modules missing — running `npm install` first…");
-  run(IS_WIN ? "npm.cmd" : "npm", ["install"], { label: "npm install" });
+  // `--prefer-offline` keeps a re-install working from the local npm cache on a machine with no route out.
+  run(IS_WIN ? "npm.cmd" : "npm", ["install", "--prefer-offline", "--no-audit", "--no-fund"], { label: "npm install" });
 }
 
 function startWeb() {
@@ -244,7 +245,16 @@ function startWeb() {
   const nextArgs = [nextBin, "dev", "-p", WEB_PORT, "-H", "0.0.0.0"];
   if (TURBO) nextArgs.push("--turbo");
   serve("Next.js", "web", process.execPath, nextArgs, {
-    env: { API_PROXY_TARGET: process.env.API_PROXY_TARGET || API_ORIGIN },
+    env: {
+      API_PROXY_TARGET: process.env.API_PROXY_TARGET || API_ORIGIN,
+      /*
+       * Nothing in this stack needs the internet once dependencies are on disk, and one thing tried anyway:
+       * Next.js phones home with anonymous telemetry on first run. On an air-gapped school network that is a
+       * blocked request and a startup delay for no benefit, so it is turned off here rather than left to
+       * whoever remembers the `next telemetry disable` incantation.
+       */
+      NEXT_TELEMETRY_DISABLED: "1",
+    },
   });
   info(`frontend is starting on http://localhost:${WEB_PORT}`);
 }

@@ -156,7 +156,9 @@ def validate_exam_for_publication(exam: Exam) -> None:
         direct_recipients = exam.students.filter(role="student", is_active=True).exists()
         group_recipients = exam.student_groups.filter(students__role="student", students__is_active=True).exists()
         if not direct_recipients and not group_recipients:
-            errors.setdefault("audience", []).append("At least one active student or non-empty student group must be selected.")
+            errors.setdefault("audience", []).append(
+                "حداقل یک دانش‌آموز فعال یا یک گروه دارای عضو را انتخاب کنید؛ وگرنه هیچ‌کس نمی‌تواند این آزمون را باز کند."
+            )
 
     for question in exam.questions.prefetch_related("options").order_by("order"):
         option_data = [

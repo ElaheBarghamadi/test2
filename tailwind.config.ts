@@ -29,6 +29,14 @@ const config: Config = {
         surface: "hsl(var(--surface))",
       },
       borderRadius: { xl: "1rem", "2xl": "1.25rem", "3xl": "1.75rem" },
+      /*
+       * The Persian face as the sans default, so `font-sans` and the body agree. Listed first: a Latin-only
+       * system face earlier in the stack would win for digits and punctuation and produce a mixed-script
+       * line, which is the single most visible way an RTL interface looks broken.
+       */
+      fontFamily: {
+        sans: ["Vazirmatn", "Vazirmatn Static", "IRANSansX", "Noto Sans Arabic", "Tahoma", "ui-sans-serif", "system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
+      },
       boxShadow: { soft: "0 10px 30px -12px rgba(20, 36, 61, .14)", lift: "0 22px 50px -24px rgba(20, 36, 61, .22)" },
       keyframes: { "soft-pulse": { "0%,100%": { opacity: "1" }, "50%": { opacity: ".55" } } },
       animation: { "soft-pulse": "soft-pulse 2s ease-in-out infinite" },

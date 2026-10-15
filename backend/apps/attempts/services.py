@@ -1009,9 +1009,9 @@ def add_answer_attachment(
             config = question.configuration if isinstance(question.configuration, dict) else {}
             kind = metadata.get("kind")
             if kind not in {StudentAnswerAttachment.Kind.IMAGE, StudentAnswerAttachment.Kind.AUDIO}:
-                raise ValidationError({"kind": ["Only image and audio answers are supported."]})
+                raise ValidationError({"kind": ["فقط پاسخ تصویری یا صوتی پذیرفته می‌شود."]})
             if not config.get(f"allow_{kind}_answer", False):
-                raise ValidationError({"kind": ["This question does not allow this answer-file type."]})
+                raise ValidationError({"kind": ["این سؤال اجازهٔ این نوع فایل پاسخ را نمی‌دهد."]})
 
             answer, _ = StudentAnswer.objects.get_or_create(
                 attempt=attempt,
@@ -1019,9 +1019,9 @@ def add_answer_attachment(
                 defaults={"answer_data": {}, "is_flagged": False},
             )
             if answer.attachments.count() >= MAX_ANSWER_MEDIA_FILES:
-                raise ValidationError({"file": [f"At most {MAX_ANSWER_MEDIA_FILES} response files are allowed per question."]})
+                raise ValidationError({"file": [f"برای هر سؤال حداکثر {MAX_ANSWER_MEDIA_FILES} فایل پاسخ مجاز است."]})
             if answer.attachments.filter(sha256=metadata["sha256"]).exists():
-                raise ValidationError({"file": ["The same file is already attached to this answer."]})
+                raise ValidationError({"file": ["همین فایل پیش‌تر به این پاسخ اضافه شده است."]})
 
             attachment = StudentAnswerAttachment(
                 answer=answer,

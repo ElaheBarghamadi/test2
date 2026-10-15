@@ -1,12 +1,13 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, Clock3, Eye, FileText, Info, ListChecks, Save, Settings2, ShieldAlert, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, Clock3, Eye, FileText, Info, Layers, ListChecks, Save, Settings2, ShieldAlert, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { Exam, ExamDraft, ExamSettings, ResultVisibility } from "@/lib/types/domain";
 import { TeacherQuestionBuilder, questionIssues } from "@/components/teacher/question-builder";
+import { ExamAudienceForm } from "@/components/forms/exam-audience-form";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,6 +27,9 @@ import { createDefaultExamSchedule, createExamSchedulePreset, DEFAULT_EXAM_TIMEZ
 const steps = [
   { title: "اطلاعات پایه", description: "مشخصات اصلی آزمون را تنظیم کنید.", icon: FileText },
   { title: "تنظیمات", description: "قواعد تجربهٔ آزمون را مشخص کنید.", icon: Settings2 },
+  // Sits next to the settings rather than at the end: "who may sit this" is a rule of the paper, and a
+  // teacher who only reads the first three steps should not publish one that nobody can open.
+  { title: "مخاطبان", description: "تعیین کنید کدام دانش‌آموزان مجاز به شرکت‌اند.", icon: Layers },
   { title: "سؤال‌ها", description: "سؤال‌ها و نمره‌های آزمون را بسازید.", icon: ListChecks },
   { title: "زمان‌بندی", description: "بازهٔ دسترسی دانش‌آموزان را انتخاب کنید.", icon: CalendarDays },
   { title: "بازبینی", description: "جزئیات را نهایی و منتشر کنید.", icon: Check },
@@ -52,8 +56,8 @@ const examTemplates: Array<{ id: ExamTemplateId; title: string; summary: string;
     settings: { durationMinutes: 90, questionLayout: "paged", allowBackNavigation: true, randomizeQuestions: true, randomizeOptions: true, allowUnanswered: true, resultVisibility: "hidden", showResultImmediately: false, showCorrectAnswers: false, resultDetail: "score_only", attemptLimit: 1, passingPercentage: 50 },
   },
 ];
-const emptyDraft = (): ExamDraft => ({ title: "", subject: "زیست‌شناسی", grade: "پایه دوازدهم", className: "تجربی ۲", description: "", instructions: "", settings: { ...defaultSettings }, schedule: { startAt: "", endAt: "", timezone: DEFAULT_EXAM_TIMEZONE }, questions: [] });
-const asDraft = (exam: Exam): ExamDraft => ({ id: exam.id, title: exam.title, subject: exam.subject, grade: exam.grade, className: exam.className, description: exam.description, instructions: exam.instructions ?? "", settings: { ...exam.settings }, schedule: { ...exam.schedule }, questions: exam.questions.map((question) => question.type === "single_choice" || question.type === "multiple_choice" ? { ...question, options: question.options.map((option) => ({ ...option })) } : { ...question }) });
+const emptyDraft = (): ExamDraft => ({ title: "", subject: "زیست‌شناسی", grade: "پایه دوازدهم", className: "تجربی ۲", description: "", instructions: "", settings: { ...defaultSettings }, schedule: { startAt: "", endAt: "", timezone: DEFAULT_EXAM_TIMEZONE }, audienceMode: "profile", studentGroupIds: [], studentIds: [], questions: [] });
+const asDraft = (exam: Exam): ExamDraft => ({ id: exam.id, title: exam.title, subject: exam.subject, grade: exam.grade, className: exam.className, description: exam.description, instructions: exam.instructions ?? "", settings: { ...exam.settings }, schedule: { ...exam.schedule }, audienceMode: exam.audienceMode ?? "profile", studentGroupIds: [...(exam.studentGroupIds ?? [])], studentIds: [...(exam.studentIds ?? [])], questions: exam.questions.map((question) => question.type === "single_choice" || question.type === "multiple_choice" ? { ...question, options: question.options.map((option) => ({ ...option })) } : { ...question }) });
 
 export function ExamCreator({ examId }: { examId?: string }) {
   const router = useRouter();
@@ -117,6 +121,10 @@ export function ExamCreator({ examId }: { examId?: string }) {
   };
   const updateSchedule = (patch: Partial<ExamDraft["schedule"]>) => {
     setDraft((current) => ({ ...current, schedule: { ...current.schedule, ...patch } }));
+    setDirty(true);
+  };
+  const updateAudience = (patch: { audienceMode?: ExamDraft["audienceMode"]; studentGroupIds?: string[]; studentIds?: string[] }) => {
+    setDraft((current) => ({ ...current, ...patch }));
     setDirty(true);
   };
   function validateStep(index: number) { return validation.filter((item) => item.step === index); }
@@ -216,13 +224,13 @@ export function ExamCreator({ examId }: { examId?: string }) {
                   {examId ? "ذخیرهٔ تغییرات" : "ذخیره پیش‌نویس"}
                   <kbd className="mr-1 hidden rounded border bg-background/60 px-1 text-[9px] font-bold sm:inline">Ctrl S</kbd>
                 </Button>
-              </div></div></CardHeader><CardContent className="p-5 sm:p-6"><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} transition={{ duration: .18 }}>{step === 0 && <div className="space-y-5">{!examId && <ExamTemplatePicker selected={activeTemplate} onSelect={applyTemplate}/>}<BasicInformation draft={draft} update={update} errors={validateStep(0)}/></div>} {step === 1 && <ExamSettingsForm settings={draft.settings} totalMarks={totalMarks} errors={validateStep(1)} onChange={updateSettings}/>} {step === 2 && <div className="space-y-3">
+              </div></div></CardHeader><CardContent className="p-5 sm:p-6"><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} transition={{ duration: .18 }}>{step === 0 && <div className="space-y-5">{!examId && <ExamTemplatePicker selected={activeTemplate} onSelect={applyTemplate}/>}<BasicInformation draft={draft} update={update} errors={validateStep(0)}/></div>} {step === 1 && <ExamSettingsForm settings={draft.settings} totalMarks={totalMarks} errors={validateStep(1)} onChange={updateSettings}/>} {step === 2 && <ExamAudienceForm audienceMode={draft.audienceMode ?? "profile"} studentGroupIds={draft.studentGroupIds ?? []} studentIds={draft.studentIds ?? []} grade={draft.grade} examClassName={draft.className} errors={validateStep(2)} onChange={updateAudience}/>} {step === 3 && <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-muted/35 p-3">
                 <p className="min-w-0 flex-1 text-[11px] leading-5 text-muted-foreground">{examId ? "سؤال‌های آزمون‌های قبلی در بانک‌اند؛ کپی‌شان کنید یا همین‌جا یکی تازه بسازید. با بازگشت، این صفحه از سرور تازه می‌شود." : "برای افزودن از بانک، اول پیش‌نویس را ذخیره کنید تا آزمون شناسه بگیرد."}</p>
                 {examId ? <Button asChild variant="outline" size="sm"><Link href={`/teacher/questions?exam=${examId}`}><ListChecks className="h-3.5 w-3.5"/>افزودن از بانک</Link></Button> : <Button variant="outline" size="sm" onClick={() => void persist("draft")} disabled={busy || !online}><Save className="h-3.5 w-3.5"/>{saving === "draft" ? "در حال ذخیره…" : "ذخیرهٔ پیش‌نویس برای افزودن از بانک"}</Button>}
               </div>
               <TeacherQuestionBuilder questions={draft.questions} onChange={(questions) => update("questions", questions)}/>
-            </div>} {step === 3 && <ScheduleForm schedule={draft.schedule} onChange={updateSchedule} errors={validateStep(3)}/>} {step === 4 && <ReviewPublish draft={draft} totalMarks={totalMarks} validation={validation}/>}</motion.div></AnimatePresence>{error && <div role="alert" className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs leading-6 text-rose-800 dark:text-rose-300"><AlertTriangle className="h-4 w-4 shrink-0 text-danger"/><span className="flex-1">{error}</span>{dirty && <Button variant="outline" size="sm" disabled={busy || !online} onClick={() => void persist(lastMode)}><RefreshCw className="h-3.5 w-3.5"/>تلاش دوباره</Button>}<Button variant="ghost" size="sm" onClick={clearError}>بستن</Button></div>}<div className="sticky bottom-0 -mx-5 mt-8 flex flex-wrap items-center gap-2 border-t bg-card/95 px-5 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:static sm:mx-0 sm:gap-3 sm:bg-transparent sm:px-0 sm:py-0 sm:pt-5 sm:backdrop-blur-none">
+            </div>} {step === 4 && <ScheduleForm schedule={draft.schedule} onChange={updateSchedule} errors={validateStep(4)}/>} {step === 5 && <ReviewPublish draft={draft} totalMarks={totalMarks} validation={validation}/>}</motion.div></AnimatePresence>{error && <div role="alert" className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs leading-6 text-rose-800 dark:text-rose-300"><AlertTriangle className="h-4 w-4 shrink-0 text-danger"/><span className="flex-1">{error}</span>{dirty && <Button variant="outline" size="sm" disabled={busy || !online} onClick={() => void persist(lastMode)}><RefreshCw className="h-3.5 w-3.5"/>تلاش دوباره</Button>}<Button variant="ghost" size="sm" onClick={clearError}>بستن</Button></div>}<div className="sticky bottom-0 -mx-5 mt-8 flex flex-wrap items-center gap-2 border-t bg-card/95 px-5 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:static sm:mx-0 sm:gap-3 sm:bg-transparent sm:px-0 sm:py-0 sm:pt-5 sm:backdrop-blur-none">
       <Button variant="outline" className="flex-1 sm:flex-none" onClick={() => setStep((current) => Math.max(current - 1, 0))} disabled={step === 0 || busy}><ArrowRight className="h-4 w-4"/>قبلی</Button>
       {step < steps.length - 1
         ? <Button className="flex-1 sm:flex-none sm:mr-auto" onClick={() => goTo(step + 1)} disabled={busy}>ادامه <ArrowLeft className="h-4 w-4"/></Button>
@@ -392,6 +400,9 @@ function ReviewPublish({ draft, totalMarks, validation }: { draft: ExamDraft; to
       {[
         { label: "عنوان", value: draft.title || "بدون عنوان" },
         { label: "کلاس", value: `${draft.grade} · ${draft.className}` },
+        { label: "مخاطبان", value: draft.audienceMode === "selected"
+          ? `${toPersianNumber(draft.studentGroupIds?.length ?? 0)} گروه + ${toPersianNumber(draft.studentIds?.length ?? 0)} نفر (انتخابی)`
+          : `همهٔ ${draft.grade || "پایه"} · ${draft.className || "کلاس"}` },
         { label: "سؤال‌ها", value: `${toPersianNumber(draft.questions.length)} سؤال` },
         { label: "نمره کل", value: `${toPersianNumber(totalMarks)} نمره` },
         { label: "مدت", value: `${toPersianNumber(draft.settings.durationMinutes)} دقیقه` },
@@ -541,22 +552,27 @@ function validateDraft(draft: ExamDraft): ValidationIssue[] {
   if (!draft.className.trim()) issues.push({ step: 0, field: "className", message: "نام کلاس را وارد کنید." });
   if (!draft.description.trim()) issues.push({ step: 0, field: "description", message: "یک توضیح کوتاه برای آزمون وارد کنید." });
   if (draft.settings.durationMinutes < 5 || draft.settings.durationMinutes > 300) issues.push({ step: 1, field: "duration", message: "مدت آزمون باید بین ۵ تا ۳۰۰ دقیقه باشد." });
-  if (!draft.questions.length) issues.push({ step: 2, field: "questions", message: "حداقل یک سؤال به آزمون اضافه کنید." });
+  // An exam in `selected` mode with nobody selected is a paper no student can open. Refusing it here is the
+  // difference between "publish blocked, here is why" and a teacher hearing about it from the class.
+  if (draft.audienceMode === "selected" && !(draft.studentGroupIds?.length) && !(draft.studentIds?.length)) {
+    issues.push({ step: 2, field: "audience", message: "دست‌کم یک گروه یا یک دانش‌آموز را انتخاب کنید، یا حالت مخاطبان را روی «پایه و کلاس» بگذارید." });
+  }
+  if (!draft.questions.length) issues.push({ step: 3, field: "questions", message: "حداقل یک سؤال به آزمون اضافه کنید." });
 
   duplicateQuestionIndexes(draft.questions).forEach((original, index) => issues.push({
-    step: 2,
+    step: 3,
     field: `duplicate-${draft.questions[index].id}`,
     message: `سؤال ${toPersianNumber(index + 1)} با سؤال ${toPersianNumber(original + 1)} عیناً یکی است؛ یکی را حذف کنید تا نمرهٔ همین بخش دو بار شمرده نشود.`,
   }));
   draft.questions.forEach((question, index) => {
     const [firstIssue] = questionIssues(question);
-    if (firstIssue) issues.push({ step: 2, field: `question-${question.id}`, message: `سؤال ${toPersianNumber(index + 1)}: ${firstIssue}` });
+    if (firstIssue) issues.push({ step: 3, field: `question-${question.id}`, message: `سؤال ${toPersianNumber(index + 1)}: ${firstIssue}` });
   });
 
   const start = wallClockToIso(draft.schedule.startAt, draft.schedule.timezone);
   const end = wallClockToIso(draft.schedule.endAt, draft.schedule.timezone);
   if (!start || !end || new Date(end) <= new Date(start)) {
-    issues.push({ step: 3, field: "schedule", message: "زمان پایان باید بعد از زمان شروع باشد." });
+    issues.push({ step: 4, field: "schedule", message: "زمان پایان باید بعد از زمان شروع باشد." });
   }
   return issues;
 }

@@ -76,6 +76,8 @@ beforeEach(() => {
 async function openComposer() {
   render(<QuestionBankWorkspace/>);
   fireEvent.click(await screen.findByRole("button", { name: /سؤال تازه در بانک/ }));
+  // The composer now asks for the type before it shows any field; four-choice is what these tests fill in.
+  fireEvent.click(await screen.findByRole("button", { name: /چهارگزینه‌ای/ }));
 }
 
 async function fillACompleteQuestion() {

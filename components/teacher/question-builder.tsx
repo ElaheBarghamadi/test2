@@ -1,7 +1,7 @@
 "use client";
 
-import { Check, ChevronDown, ChevronUp, CircleCheck, Copy, Eye, FileText, GripVertical, Headphones, ImagePlus, ListPlus, Plus, Trash2, TriangleAlert, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { AlignRight, ArrowRight, Check, ChevronDown, ChevronUp, CircleCheck, CircleDot, Copy, Eye, FileText, GripVertical, Headphones, ImagePlus, Link2, ListChecks, ListPlus, Plus, SlidersHorizontal, TextCursorInput, ToggleLeft, Trash2, TriangleAlert, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import type { MatchingQuestion, Question, QuestionOption, QuestionType } from "@/lib/types/domain";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
 import { PrivateMedia } from "@/components/shared/private-media";
@@ -16,7 +16,7 @@ import { cn, toPersianNumber } from "@/lib/utils";
 import { parseQuestionText } from "@/lib/exam/question-text-import";
 
 const questionTypes: Array<{ type: QuestionType; label: string; description: string }> = [
-  { type: "single_choice", label: "چندگزینه‌ای", description: "یک پاسخ درست" },
+  { type: "single_choice", label: "چهارگزینه‌ای", description: "یک پاسخ درست" },
   { type: "multiple_choice", label: "چندپاسخی", description: "چند پاسخ درست" },
   { type: "true_false", label: "درست / نادرست", description: "یک انتخاب دوگانه" },
   { type: "matching", label: "وصل‌کردنی", description: "هر پرسش را به پاسخ درست وصل کنید" },
@@ -24,6 +24,22 @@ const questionTypes: Array<{ type: QuestionType; label: string; description: str
   { type: "essay", label: "تشریحی", description: "پاسخ نوشتاری" },
 ];
 const questionTypeLabel = Object.fromEntries(questionTypes.map((item) => [item.type, item.label])) as Record<QuestionType, string>;
+
+/**
+ * What each type actually asks the teacher for.
+ *
+ * The type is chosen *first* and alone, on its own screen, so this is where the picker earns its space: a
+ * name is not enough to choose between «چهارگزینه‌ای» and «چندپاسخی» at a glance, and the line that settles
+ * it is which fields are about to appear.
+ */
+const questionTypeMeta: Record<QuestionType, { label: string; icon: typeof CircleDot; summary: string; fields: string }> = {
+  single_choice: { label: "چهارگزینه‌ای", icon: CircleDot, summary: "چند گزینه، فقط یکی درست است. نمره همه یا هیچ.", fields: "متن سؤال · گزینه‌ها · علامت پاسخ درست" },
+  multiple_choice: { label: "چندگزینه‌ای چندپاسخی", icon: ListChecks, summary: "چند گزینه و چند پاسخ درست. دانش‌آموز باید همه را علامت بزند.", fields: "متن سؤال · گزینه‌ها · چند پاسخ درست" },
+  true_false: { label: "درست / نادرست", icon: ToggleLeft, summary: "دو گزینهٔ ثابت؛ فقط درست یا نادرست را مشخص می‌کنید.", fields: "متن سؤال · پاسخ درست" },
+  matching: { label: "وصل‌کردنی", icon: Link2, summary: "دو ستون پرسش و پاسخ؛ سمت پاسخ‌ها برای دانش‌آموز به‌هم‌ریخته می‌شود.", fields: "متن سؤال · جفت‌های پرسش/پاسخ" },
+  short_answer: { label: "پاسخ کوتاه", icon: TextCursorInput, summary: "یک کلمه یا عبارت کوتاه. با فهرست پاسخ‌های قابل‌قبول خودکار تصحیح می‌شود.", fields: "متن سؤال · پاسخ‌های قابل‌قبول · سقف کاراکتر" },
+  essay: { label: "پاسخ تشریحی", icon: AlignRight, summary: "پاسخ نوشتاری بلند؛ تصحیح دستی توسط آموزگار.", fields: "متن سؤال · راهنمای تصحیح · سقف کاراکتر" },
+};
 
 /** Server-side publish gate mirrored here so the teacher sees the problem before saving. */
 const MIN_OPTIONS = 2;
@@ -75,7 +91,7 @@ function BankFields({ question, onChange }: { question: Question; onChange: (que
     setDraftTag("");
   }
   function removeTag(name: string) { onChange({ ...question, tags: tags.filter((tag) => tag !== name) }); }
-  return <section className="mt-5 rounded-2xl border bg-muted/35 p-4">
+  return <section className="rounded-2xl border bg-muted/35 p-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h3 className="text-sm font-black">برچسب و سطح سؤال</h3>
@@ -137,9 +153,143 @@ function questionCountText(questions: Question[]) {
   return incompleteCount ? ` · ${toPersianNumber(incompleteCount)} سؤال نیازمند تکمیل` : " · همهٔ سؤال‌ها آماده‌اند";
 }
 
+/**
+ * A disclosure for the parts of a question that are not the question.
+ *
+ * The form used to show nine sections at once, which reads as "fill all of this in" even though six of them
+ * are optional metadata. Collapsing them behind their own heading says what it means: the stem and the answer
+ * are the work, everything here is a refinement. `defaultOpen` is computed by the caller from whether the
+ * section already holds something, so a question that *does* use answer media never hides that fact.
+ */
+function CollapsibleSection({ title, description, summary, defaultOpen = false, children }: { title: string; description?: string; summary?: string; defaultOpen?: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className={cn("mt-4 overflow-hidden rounded-2xl border transition-colors", open ? "bg-card" : "bg-muted/25 hover:bg-muted/40")}>
+      <button type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open} className="flex w-full items-center gap-3 p-3.5 text-right">
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-black">{title}</span>
+          {description && <span className="mt-0.5 block text-[11px] leading-5 text-muted-foreground">{description}</span>}
+        </span>
+        {!open && summary && <Badge variant="neutral" className="hidden shrink-0 sm:inline-flex">{summary}</Badge>}
+        <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} aria-hidden="true"/>
+      </button>
+      {open && <div className="border-t p-3.5">{children}</div>}
+    </section>
+  );
+}
+
+/** Step one of adding a question: the type, alone, with enough text to choose between the two similar ones. */
+export function QuestionTypeGrid({ onPick }: { onPick: (type: QuestionType) => void }) {
+  return (
+    <div className="grid gap-2.5 sm:grid-cols-2">
+      {(Object.keys(questionTypeMeta) as QuestionType[]).map((type) => {
+        const meta = questionTypeMeta[type];
+        const Icon = meta.icon;
+        return (
+          <button
+            type="button"
+            key={type}
+            onClick={() => onPick(type)}
+            data-autofocus={type === "single_choice" ? true : undefined}
+            className="group flex min-h-[112px] flex-col items-start gap-2 rounded-2xl border bg-card p-3.5 text-right transition-all hover:-translate-y-0.5 hover:border-primary/45 hover:shadow-soft"
+          >
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary transition-colors group-hover:bg-primary group-hover:text-primary-foreground" aria-hidden="true">
+              <Icon className="h-4 w-4"/>
+            </span>
+            <span className="block text-sm font-black">{meta.label}</span>
+            <span className="block text-[11px] leading-5 text-muted-foreground">{meta.summary}</span>
+            <span className="mt-auto flex items-center gap-1 pt-1 text-[10px] font-bold text-primary opacity-0 transition-opacity group-hover:opacity-100">
+              <SlidersHorizontal className="h-3 w-3" aria-hidden="true"/>{meta.fields}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Add a question in two steps: pick the type, then see only the fields that type has.
+ *
+ * The draft lives here, not in the parent list, so closing the dialog discards it — a half-typed question
+ * never lands in the paper and never trips the publish gate on the way out.
+ */
+function QuestionComposerDialog({ open, nextOrder, onClose, onAdd }: { open: boolean; nextOrder: number; onClose: () => void; onAdd: (question: Question) => void }) {
+  const [draft, setDraft] = useState<Question | null>(null);
+  /**
+   * What survives a trip back to the type picker.
+   *
+   * Choosing «چهارگزینه‌ای», typing a two-line stem, then realising it is a matching question is a normal
+   * sequence. Starting the second attempt from an empty form would make the back button cost the teacher
+   * their work, so the type-independent parts are carried across and only the answer section is rebuilt —
+   * which is exactly what changing the type later in the editor does, too.
+   */
+  const [carried, setCarried] = useState<Partial<Question> | null>(null);
+  useEffect(() => { if (open) { setDraft(null); setCarried(null); } }, [open]);
+
+  function pick(type: QuestionType) {
+    const fresh = blankQuestion(type, nextOrder);
+    setDraft(carried ? ({ ...fresh, ...carried } as Question) : fresh);
+  }
+  function back() {
+    if (draft) {
+      setCarried({
+        stem: draft.stem,
+        points: draft.points,
+        helpText: draft.helpText,
+        explanation: draft.explanation,
+        difficulty: draft.difficulty,
+        tags: draft.tags,
+        media: draft.media,
+        imageOnly: draft.imageOnly,
+        allowImageAnswer: draft.allowImageAnswer,
+        allowAudioAnswer: draft.allowAudioAnswer,
+      });
+    }
+    setDraft(null);
+  }
+
+  const issues = draft ? questionIssues(draft) : [];
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      size="lg"
+      title={draft ? `سؤال ${questionTypeMeta[draft.type].label}` : "افزودن سؤال"}
+      description={draft
+        ? "فقط فیلدهای همین نوع سؤال نمایش داده می‌شود. بخش‌های اختیاری بسته‌اند و با یک کلیک باز می‌شوند."
+        : "اول نوع سؤال را انتخاب کنید؛ فرم بر اساس همان نوع ساخته می‌شود."}
+    >
+      {!draft ? (
+        <>
+          <QuestionTypeGrid onPick={pick}/>
+          <p className="mt-4 text-[11px] leading-5 text-muted-foreground">
+            {carried
+              ? "متن سؤال، نمره و رسانه‌ای که نوشته بودید حفظ شد؛ فقط بخش پاسخ از نو ساخته می‌شود."
+              : "بعداً هم می‌توانید نوع را عوض کنید؛ متن سؤال، نمره، رسانه و برچسب‌ها حفظ می‌شوند و فقط بخش پاسخ از نو ساخته می‌شود."}
+          </p>
+        </>
+      ) : (
+        <>
+          <QuestionFields question={draft} onChange={setDraft}/>
+          <div className="mt-5 flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <Button type="button" variant="ghost" size="sm" onClick={back}>
+              <ArrowRight className="h-3.5 w-3.5"/>بازگشت به انتخاب نوع
+            </Button>
+            <Button type="button" onClick={() => { onAdd(draft); onClose(); }}>
+              <Plus className="h-4 w-4"/>{issues.length ? "افزودن و تکمیل در فهرست" : "افزودن سؤال"}
+            </Button>
+          </div>
+        </>
+      )}
+    </Dialog>
+  );
+}
+
 export function TeacherQuestionBuilder({ questions, onChange, className }: { questions: Question[]; onChange: (questions: Question[]) => void; className?: string }) {
   const [selectedId, setSelectedId] = useState(questions[0]?.id ?? "");
-  const [adding, setAdding] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -151,7 +301,7 @@ export function TeacherQuestionBuilder({ questions, onChange, className }: { que
   const incomplete = useMemo(() => questions.filter((question) => !questionIsComplete(question)).length, [questions]);
   const replace = (next: Question[]) => onChange(next.map((question, index) => ({ ...question, order: index + 1 })));
   function updateSelected(next: Question) { if (!selected) return; replace(questions.map((question) => question.id === selected.id ? next : question)); }
-  function addQuestion(type: QuestionType) { const next = blankQuestion(type, questions.length + 1); replace([...questions, next]); setSelectedId(next.id); setAdding(false); }
+  function addQuestion(question: Question) { replace([...questions, question]); setSelectedId(question.id); }
   function duplicateSelected() { if (!selected) return; const copy = cloneQuestion(selected, `question-${Date.now().toString(36)}`); const titledCopy = { ...copy, stem: selected.stem ? `${selected.stem} (کپی)` : "" } as Question; replace([...questions, titledCopy]); setSelectedId(titledCopy.id); }
   function deleteSelected() { if (!selected) return; const remaining = questions.filter((question) => question.id !== selected.id); replace(remaining); setSelectedId(remaining[0]?.id ?? ""); setDeleteOpen(false); }
   function moveSelected(delta: -1 | 1) { if (!selected) return; const index = questions.findIndex((question) => question.id === selected.id); const target = index + delta; if (target < 0 || target >= questions.length) return; const next = [...questions]; [next[index], next[target]] = [next[target], next[index]]; replace(next); }
@@ -177,10 +327,11 @@ export function TeacherQuestionBuilder({ questions, onChange, className }: { que
 
   return <div className={cn("grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]", className)}>
     <Card className="overflow-hidden xl:max-h-[720px]">
-      <CardHeader className="flex-row items-center justify-between gap-3"><div><CardTitle>سؤال‌های آزمون</CardTitle><CardDescription>{toPersianNumber(questions.length)} سؤال · {toPersianNumber(questions.reduce((sum, question) => sum + question.points, 0))} نمره{incomplete ? ` · ${toPersianNumber(incomplete)} سؤال نیازمند تکمیل` : ""}</CardDescription></div><div className="flex shrink-0 items-center gap-2"><Button type="button" variant="outline" size="sm" onClick={() => { setImportText(""); setImportedQuestions(null); setImportWarnings([]); setImportOpen(true); }}><FileText className="h-4 w-4"/>ورود از متن</Button><Button type="button" size="icon-sm" onClick={() => setAdding(!adding)} aria-label="افزودن سؤال"><Plus className="h-4 w-4"/></Button></div></CardHeader>
-      <CardContent className="relative"><div className="space-y-2 overflow-y-auto xl:max-h-[560px]">{adding && <QuestionTypePicker onPick={addQuestion}/>} {questions.length === 0 ? <div className="rounded-2xl border border-dashed bg-muted/30 p-6 text-center"><ListPlus className="mx-auto h-6 w-6 text-primary"/><p className="mt-3 text-sm font-black">اولین سؤال را اضافه کنید</p><p className="mt-1 text-xs leading-5 text-muted-foreground">از دکمهٔ بالا نوع سؤال را انتخاب کنید.</p></div> : ordered.map((question) => <button type="button" onClick={() => setSelectedId(question.id)} key={question.id} className={cn("flex w-full items-center gap-2.5 rounded-xl border p-3 text-right transition-all", selected?.id === question.id ? "border-primary bg-primary/[.06] shadow-sm" : "border-transparent bg-muted/55 hover:border-border hover:bg-card")}><GripVertical className="h-4 w-4 shrink-0 text-muted-foreground"/><span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg text-xs font-black", selected?.id === question.id ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground")}>{toPersianNumber(question.order)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-extrabold">{question.stem || "بدون متن سؤال"}</span><span className="mt-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">{questionTypeLabel[question.type]} · {toPersianNumber(question.points)} نمره</span></span>{questionIsComplete(question) ? <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" title="آماده"/> : <span className="flex shrink-0 items-center gap-1 rounded-lg bg-amber-500/10 px-1.5 py-1 text-[9px] font-black text-amber-700 dark:text-amber-400">{toPersianNumber(questionIssues(question).length)} مورد</span>}</button>)}</div></CardContent>
+      <CardHeader className="flex-row items-center justify-between gap-3"><div><CardTitle>سؤال‌های آزمون</CardTitle><CardDescription>{toPersianNumber(questions.length)} سؤال · {toPersianNumber(questions.reduce((sum, question) => sum + question.points, 0))} نمره{incomplete ? ` · ${toPersianNumber(incomplete)} سؤال نیازمند تکمیل` : ""}</CardDescription></div><div className="flex shrink-0 items-center gap-2"><Button type="button" variant="outline" size="sm" onClick={() => { setImportText(""); setImportedQuestions(null); setImportWarnings([]); setImportOpen(true); }}><FileText className="h-4 w-4"/>ورود از متن</Button><Button type="button" size="sm" onClick={() => setComposerOpen(true)}><Plus className="h-4 w-4"/>افزودن سؤال</Button></div></CardHeader>
+      <CardContent className="relative"><div className="space-y-2 overflow-y-auto xl:max-h-[560px]">{questions.length === 0 ? <div className="rounded-2xl border border-dashed bg-muted/30 p-6 text-center"><ListPlus className="mx-auto h-6 w-6 text-primary"/><p className="mt-3 text-sm font-black">اولین سؤال را اضافه کنید</p><p className="mt-1 text-xs leading-5 text-muted-foreground">با «افزودن سؤال» اول نوع را انتخاب می‌کنید، بعد فقط فیلدهای همان نوع باز می‌شود.</p></div> : ordered.map((question) => <button type="button" onClick={() => setSelectedId(question.id)} key={question.id} className={cn("flex w-full items-center gap-2.5 rounded-xl border p-3 text-right transition-all", selected?.id === question.id ? "border-primary bg-primary/[.06] shadow-sm" : "border-transparent bg-muted/55 hover:border-border hover:bg-card")}><GripVertical className="h-4 w-4 shrink-0 text-muted-foreground"/><span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg text-xs font-black", selected?.id === question.id ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground")}>{toPersianNumber(question.order)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-extrabold">{question.stem || "بدون متن سؤال"}</span><span className="mt-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">{questionTypeLabel[question.type]} · {toPersianNumber(question.points)} نمره</span></span>{questionIsComplete(question) ? <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" title="آماده"/> : <span className="flex shrink-0 items-center gap-1 rounded-lg bg-amber-500/10 px-1.5 py-1 text-[9px] font-black text-amber-700 dark:text-amber-400">{toPersianNumber(questionIssues(question).length)} مورد</span>}</button>)}</div></CardContent>
     </Card>
-    {selected ? <QuestionEditor question={selected} onChange={updateSelected} onPreview={() => setPreviewOpen(true)} onDuplicate={duplicateSelected} onDelete={() => setDeleteOpen(true)} onMove={moveSelected} first={questions[0]?.id === selected.id} last={questions[questions.length - 1]?.id === selected.id}/> : <QuestionEmpty onAdd={() => setAdding(true)}/>}
+    {selected ? <QuestionEditor question={selected} onChange={updateSelected} onPreview={() => setPreviewOpen(true)} onDuplicate={duplicateSelected} onDelete={() => setDeleteOpen(true)} onMove={moveSelected} first={questions[0]?.id === selected.id} last={questions[questions.length - 1]?.id === selected.id}/> : <QuestionEmpty onAdd={() => setComposerOpen(true)}/>}
+    <QuestionComposerDialog open={composerOpen} nextOrder={questions.length + 1} onClose={() => setComposerOpen(false)} onAdd={addQuestion}/>
     <Dialog open={importOpen} onClose={closeImport} title="ورود چند سؤال از متن" description="قالب سؤال‌ها را بچسبانید، پیش‌نمایش را بررسی کنید و سپس به ویرایشگر اضافه کنید." size="lg">
       <div className="space-y-4">
         <div className="rounded-2xl bg-muted/55 p-3 text-xs leading-6 text-muted-foreground">
@@ -192,18 +343,17 @@ export function TeacherQuestionBuilder({ questions, onChange, className }: { que
         {importedQuestions === null ? <div className="flex justify-end"><Button onClick={previewImport} disabled={!importText.trim()}><Eye className="h-4 w-4"/>بررسی و پیش‌نمایش</Button></div> : <div className="space-y-3">
           <div role="status" className="rounded-xl border bg-muted/35 p-3 text-sm font-bold">{toPersianNumber(importedQuestions.length)} سؤال شناسایی شد{importedQuestions.length ? ` · ${toPersianNumber(importedQuestions.reduce((sum, question) => sum + question.points, 0))} نمره` : ""}{importedQuestions.length > 0 && questionCountText(importedQuestions)}</div>
           {importWarnings.length > 0 && <div className="rounded-xl border border-amber-500/30 bg-amber-500/[.06] p-3 text-xs leading-5"><p className="font-bold text-amber-800 dark:text-amber-300">نیاز به بازبینی</p><ul className="mt-1 list-inside list-disc text-muted-foreground">{importWarnings.slice(0, 4).map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}</ul>{importWarnings.length > 4 && <p className="mt-1 text-muted-foreground">و {toPersianNumber(importWarnings.length - 4)} پیام دیگر.</p>}</div>}
-          {importedQuestions.length > 0 && <div className="max-h-48 space-y-2 overflow-y-auto rounded-xl border p-3">{importedQuestions.slice(0, 8).map((question, index) => <div key={question.id} className="flex items-start gap-2 border-b pb-2 last:border-0 last:pb-0"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-muted text-xs font-black">{toPersianNumber(index + 1)}</span><div className="min-w-0 flex-1"><p className="text-xs font-bold">{question.stem || "بدون متن سؤال"}</p><p className="mt-1 text-[10px] text-muted-foreground">{questionTypeLabel[question.type]} · {toPersianNumber(question.points)} نمره{!questionIsComplete(question) ? " · نیازمند تکمیل" : ""}</p></div></div>)}{importedQuestions.length > 8 && <p className="text-center text-xs text-muted-foreground">و {toPersianNumber(importedQuestions.length - 8)} سؤال دیگر</p>}</div>}
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" variant="outline" onClick={() => { setImportedQuestions(null); setImportWarnings([]); }}>ویرایش متن</Button><Button type="button" onClick={addImportedQuestions} disabled={!importedQuestions.length}>افزودن {toPersianNumber(importedQuestions.length)} سؤال به آزمون</Button></div>
+          {importedQuestions.length > 0 && <div className="max-h-48 space-y-2 overflow-y-auto rounded-xl border p-3">{importedQuestions.slice(0, 8).map((question, index) => <div key={question.id} className="flex items-start gap-2 border-b pb-2 last:border-0 last:pb-0"><span className="grid h-6 w-6 shrink-0 place-items-center rounded-lg bg-muted text-[10px] font-black text-muted-foreground">{toPersianNumber(index + 1)}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{question.stem || "بدون متن"}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">{questionTypeLabel[question.type]} · {toPersianNumber(question.points)} نمره{questionIsComplete(question) ? "" : " · نیازمند تکمیل"}</span></span></div>)}</div>}
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={closeImport}>انصراف</Button><Button onClick={addImportedQuestions} disabled={importedQuestions.length === 0}><Plus className="h-4 w-4"/>افزودن {toPersianNumber(importedQuestions.length)} سؤال به آزمون</Button></div>
         </div>}
       </div>
     </Dialog>
-    <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} title="پیش‌نمایش دانش‌آموز" description="این بخش نحوهٔ نمایش سؤال در آزمون را نشان می‌دهد." size="md"><div className="rounded-2xl border bg-surface p-4"><QuestionRenderer question={selected ?? blankQuestion("single_choice", 1)} value={null} onChange={() => undefined} disabled/></div><div className="mt-5 flex justify-end"><Button onClick={() => setPreviewOpen(false)}>بستن پیش‌نمایش</Button></div></Dialog>
+    <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} title="پیش‌نمایش سؤال" description="همان چیزی که دانش‌آموز می‌بیند، بدون کلید پاسخ." size="lg"><div className="rounded-2xl border bg-surface p-4"><QuestionRenderer question={selected ?? blankQuestion("single_choice", 1)} value={null} onChange={() => undefined} disabled/></div><div className="mt-5 flex justify-end"><Button onClick={() => setPreviewOpen(false)}>بستن پیش‌نمایش</Button></div></Dialog>
     <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)} title="حذف سؤال؟" description={selected ? `«${selected.stem || "بدون عنوان"}» از این آزمون حذف می‌شود.` : undefined} size="sm"><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" onClick={() => setDeleteOpen(false)}>انصراف</Button><Button variant="destructive" data-autofocus onClick={deleteSelected}><Trash2 className="h-4 w-4"/>حذف سؤال</Button></div></Dialog>
   </div>;
 }
 
-function QuestionTypePicker({ onPick }: { onPick: (type: QuestionType) => void }) { return <div className="rounded-2xl border border-primary/20 bg-primary/[.04] p-3"><p className="mb-2 text-[11px] font-black text-primary">انتخاب نوع سؤال</p><div className="grid gap-1">{questionTypes.map((item) => <button type="button" key={item.type} onClick={() => onPick(item.type)} className="rounded-xl px-2 py-2 text-right hover:bg-card"><span className="text-xs font-bold">{item.label}</span><span className="mr-1 text-[10px] text-muted-foreground">{item.description}</span></button>)}</div></div>; }
-function QuestionEmpty({ onAdd }: { onAdd: () => void }) { return <Card className="grid min-h-80 place-items-center border-dashed bg-muted/20"><div className="p-6 text-center"><ListPlus className="mx-auto h-8 w-8 text-primary"/><h3 className="mt-4 font-black">هنوز سؤالی انتخاب نشده</h3><p className="mt-2 text-sm text-muted-foreground">یک سؤال جدید بسازید تا ویرایش آن را شروع کنید.</p><Button className="mt-5" onClick={onAdd}>افزودن سؤال</Button></div></Card>; }
+function QuestionEmpty({ onAdd }: { onAdd: () => void }) { return <Card className="grid min-h-80 place-items-center border-dashed bg-muted/20"><div className="p-6 text-center"><ListPlus className="mx-auto h-8 w-8 text-primary"/><h3 className="mt-4 font-black">هنوز سؤالی انتخاب نشده</h3><p className="mt-2 text-sm text-muted-foreground">یک سؤال جدید بسازید تا ویرایش آن را شروع کنید.</p><Button className="mt-5" onClick={onAdd}><Plus className="h-4 w-4"/>افزودن سؤال</Button></div></Card>; }
 
 function QuestionEditor({ question, onChange, onPreview, onDuplicate, onDelete, onMove, first, last }: { question: Question; onChange: (question: Question) => void; onPreview: () => void; onDuplicate: () => void; onDelete: () => void; onMove: (direction: -1 | 1) => void; first: boolean; last: boolean }) {
   return <Card className="overflow-hidden">
@@ -213,11 +363,12 @@ function QuestionEditor({ question, onChange, onPreview, onDuplicate, onDelete, 
 }
 
 /**
- * The question form itself, shared by the exam builder and by the bank's own composer.
+ * The question form itself, shared by the exam builder, the add dialog, and the bank's own composer.
  *
- * The bank used to be read-only: to add anything you had to open an exam, reach its questions step and
- * build it there — which also meant a question you only wanted to keep for later had to be attached to a
- * paper first. Same fields, same validation, one less trip.
+ * Ordered by how often a teacher actually touches it: what the student reads, then the answer, then — behind
+ * a heading they can leave shut — media, answer permissions and bank metadata. Opening everything at once is
+ * what made this form feel like a tax form; the optional parts are still one click away and never hidden when
+ * they already hold something.
  */
 export function QuestionFields({ question, onChange, autosaved = false }: { question: Question; onChange: (question: Question) => void; autosaved?: boolean }) {
   const issues = questionIssues(question);
@@ -239,8 +390,12 @@ export function QuestionFields({ question, onChange, autosaved = false }: { ques
       allowAudioAnswer: question.allowAudioAnswer,
     });
   }
+  const hasBankMetadata = Boolean((question.tags?.length ?? 0) || question.helpText?.trim() || question.explanation?.trim() || (question.difficulty && question.difficulty !== "medium"));
+  const allowsAnswerMedia = question.allowImageAnswer === true || question.allowAudioAnswer === true;
+
   return <>
       <div className="grid gap-4 sm:grid-cols-[1fr_130px]"><label className="block text-sm font-bold">نوع سؤال<select value={question.type} onChange={(event) => changeType(event.target.value as QuestionType)} className="mt-2 h-11 w-full rounded-xl border bg-background px-3 text-sm">{questionTypes.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}</select></label><label className="block text-sm font-bold">نمره<Input className="mt-2" type="number" min="0" max="100" step="0.25" value={question.points} onChange={(event) => onChange({ ...question, points: Math.max(0, Number(event.target.value)) })}/></label></div>
+
       <div className="mt-5 rounded-2xl border bg-muted/25 p-4">
         <label className="flex cursor-pointer items-start gap-3 text-sm font-bold">
           <input type="checkbox" checked={question.imageOnly === true} onChange={(event) => onChange({ ...question, imageOnly: event.target.checked, ...(event.target.checked ? { stem: "" } : {}) })} className="mt-1 h-4 w-4 accent-[hsl(var(--primary))]"/>
@@ -249,16 +404,36 @@ export function QuestionFields({ question, onChange, autosaved = false }: { ques
         {!question.imageOnly && <label className="mt-4 block text-sm font-bold">متن سؤال<Textarea className="mt-2 min-h-28" value={question.stem} onChange={(event) => onChange({ ...question, stem: event.target.value })} placeholder="متن روشن و کامل سؤال را وارد کنید..." maxLength={1000}/><span className="mt-1 block text-left text-[10px] font-bold text-muted-foreground">{toPersianNumber(question.stem.length)} / ۱۰۰۰</span></label>}
         <PromptMediaEditor question={question} onChange={onChange}/>
       </div>
-      <label className="mt-4 block text-sm font-bold">راهنمای همین سؤال (اختیاری)<Input className="mt-2" value={question.helpText ?? ""} onChange={(event) => onChange({ ...question, helpText: event.target.value })} placeholder="مثلاً از واحد میلی‌متر استفاده کنید."/></label>
+
       {question.type === "single_choice" && <SingleChoiceEditor question={question} onChange={onChange}/>}
       {question.type === "multiple_choice" && <MultipleAnswerEditor question={question} onChange={onChange}/>}
       {question.type === "true_false" && <TrueFalseEditor question={question} onChange={onChange}/>}
       {question.type === "matching" && <MatchingEditor question={question} onChange={onChange}/>}
       {question.type === "short_answer" && <ShortAnswerEditor question={question} onChange={onChange}/>}
       {question.type === "essay" && <WrittenEditor question={question} onChange={onChange}/>}
-      <AnswerMediaOptions question={question} onChange={onChange}/>
-      <BankFields question={question} onChange={onChange}/>
-      <label className="mt-5 block text-sm font-bold">توضیح یا بازخورد (اختیاری)<Textarea className="mt-2 min-h-20" value={question.explanation ?? ""} onChange={(event) => onChange({ ...question, explanation: event.target.value })} placeholder="توضیحی که بعداً می‌تواند به دانش‌آموز نمایش داده شود..."/></label>
+
+      <CollapsibleSection
+        title="پاسخ رسانه‌ای دانش‌آموز"
+        description="اجازه دهید پاسخ را با عکس یا صدا بفرستند."
+        summary={allowsAnswerMedia ? (question.allowImageAnswer && question.allowAudioAnswer ? "عکس و صدا" : question.allowImageAnswer ? "عکس" : "صدا") : undefined}
+        defaultOpen={allowsAnswerMedia}
+      >
+        <AnswerMediaOptions question={question} onChange={onChange}/>
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="راهنما، برچسب و توضیح"
+        description="راهنمای همین سؤال، سطح و برچسب بانک، و بازخورد پس از تصحیح."
+        summary={hasBankMetadata ? "تکمیل شده" : undefined}
+        defaultOpen={hasBankMetadata}
+      >
+        <div className="space-y-4">
+          <label className="block text-sm font-bold">راهنمای همین سؤال (اختیاری)<Input className="mt-2" value={question.helpText ?? ""} onChange={(event) => onChange({ ...question, helpText: event.target.value })} placeholder="مثلاً از واحد میلی‌متر استفاده کنید."/></label>
+          <BankFields question={question} onChange={onChange}/>
+          <label className="block text-sm font-bold">توضیح یا بازخورد (اختیاری)<Textarea className="mt-2 min-h-20" value={question.explanation ?? ""} onChange={(event) => onChange({ ...question, explanation: event.target.value })} placeholder="توضیحی که بعداً می‌تواند به دانش‌آموز نمایش داده شود..."/></label>
+        </div>
+      </CollapsibleSection>
+
       <div className="mt-5 flex items-center justify-between border-t pt-5"><span className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground">{issues.length === 0 ? <><CircleCheck className="h-4 w-4 text-success"/>آماده برای انتشار</> : <><TriangleAlert className="h-4 w-4 text-warning"/>نیازمند تکمیل</>}</span>{autosaved ? <Badge variant="neutral">به‌صورت خودکار ذخیره می‌شود</Badge> : <Badge variant="neutral">با ذخیره به بانک افزوده می‌شود</Badge>}</div>
       {issues.length > 0 && <ul className="mt-3 space-y-1 rounded-2xl border border-amber-500/25 bg-amber-500/[.07] p-3 text-xs leading-6 text-amber-900 dark:text-amber-300">{issues.map((issue) => <li key={issue} className="flex gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"/>{issue}</li>)}</ul>}
   </>;
@@ -294,10 +469,14 @@ function PromptMediaEditor({ question, onChange }: { question: Question; onChang
     onChange({ ...question, media: media.filter((asset) => asset.id !== id).map((asset, index) => ({ ...asset, order: index + 1 })) });
   }
 
+  const images = media.filter((asset) => asset.kind === "image").length;
+  const audios = media.length - images;
+
   return <section className="mt-4 rounded-2xl border border-primary/10 bg-background/80 p-3.5">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div><h3 className="text-xs font-black">رسانهٔ صورت سؤال</h3><p className="mt-1 text-[10px] leading-5 text-muted-foreground">JPEG، PNG یا WebP تا ۵ مگابایت؛ صوت MP3، OGG، WAV یا WebM تا ۱۵ مگابایت.</p></div>
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {media.length > 0 && <span className="text-[10px] font-bold text-muted-foreground">{toPersianNumber(images)} تصویر · {toPersianNumber(audios)} صدا</span>}
         <label className={cn("inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-xl border px-3 text-[11px] font-bold hover:bg-muted", media.length >= 8 && "pointer-events-none opacity-50")}>
           <ImagePlus className="h-3.5 w-3.5"/>تصویر
           <input className="sr-only" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple disabled={media.length >= 8} onChange={(event) => { addFiles(event.target.files, "image"); event.currentTarget.value = ""; }}/>
@@ -323,13 +502,19 @@ function PromptMediaEditor({ question, onChange }: { question: Question; onChang
 
 function AnswerMediaOptions({ question, onChange }: { question: Question; onChange: (question: Question) => void }) {
   const enabled = question.allowImageAnswer === true || question.allowAudioAnswer === true;
-  return <section className="mt-5 rounded-2xl border border-dashed bg-muted/25 p-4">
-    <div><h3 className="text-sm font-black">پاسخ رسانه‌ای دانش‌آموز</h3><p className="mt-1 text-[11px] leading-5 text-muted-foreground">اختیاری است. فایل‌ها تا ۵ مگابایت برای تصویر و ۱۵ مگابایت برای صدا پذیرفته می‌شوند.</p></div>
+  return <section>
+    <p className="text-[11px] leading-5 text-muted-foreground">فایل‌ها تا ۵ مگابایت برای تصویر و ۱۵ مگابایت برای صدا پذیرفته می‌شوند. سرور امضای واقعی بایت‌ها را بررسی می‌کند، نه نام یا نوع اعلام‌شده از سوی مرورگر.</p>
     <div className="mt-3 grid gap-2 sm:grid-cols-2">
       <label className="flex cursor-pointer items-center gap-2 rounded-xl border bg-card p-3 text-xs font-bold"><input type="checkbox" checked={question.allowImageAnswer === true} onChange={(event) => onChange({ ...question, allowImageAnswer: event.target.checked })} className="h-4 w-4 accent-[hsl(var(--primary))]"/><ImagePlus className="h-4 w-4 text-primary"/>اجازهٔ بارگذاری تصویر</label>
-      <label className="flex cursor-pointer items-center gap-2 rounded-xl border bg-card p-3 text-xs font-bold"><input type="checkbox" checked={question.allowAudioAnswer === true} onChange={(event) => onChange({ ...question, allowAudioAnswer: event.target.checked })} className="h-4 w-4 accent-[hsl(var(--primary))]"/><Headphones className="h-4 w-4 text-primary"/>اجازهٔ بارگذاری صدا</label>
+      <label className="flex cursor-pointer items-center gap-2 rounded-xl border bg-card p-3 text-xs font-bold"><input type="checkbox" checked={question.allowAudioAnswer === true} onChange={(event) => onChange({ ...question, allowAudioAnswer: event.target.checked })} className="h-4 w-4 accent-[hsl(var(--primary))]"/><Headphones className="h-4 w-4 text-primary"/>اجازهٔ ضبط یا بارگذاری صدا</label>
     </div>
     {enabled && <p className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/[.06] p-3 text-[10px] leading-5 text-amber-900 dark:text-amber-200">پاسخ‌های فایلی بعداً در برگهٔ تصحیح معلم دیده می‌شوند و خودکار از روی تصویر/صدا نمره نمی‌گیرند؛ برای این سؤال تصحیح انسانی در نظر گرفته می‌شود.</p>}
+    {/*
+      Two rules that can contradict each other, said out loud before the exam rather than in front of the
+      student: a microphone prompt is a browser chrome dialog, and in some browsers it drops the page out of
+      fullscreen — which a "require fullscreen" exam records as a violation the student did nothing to earn.
+    */}
+    {question.allowAudioAnswer === true && <p className="mt-2 rounded-xl border bg-muted/40 p-3 text-[10px] leading-5 text-muted-foreground">اگر در تنظیمات آزمون «تمام‌صفحهٔ اجباری» را روشن کرده‌اید، درخواست دسترسی میکروفون در بعضی مرورگرها تمام‌صفحه را می‌شکند و به‌عنوان خروج ثبت می‌شود. دانش‌آموز همیشه می‌تواند به‌جای ضبط، فایل صوتی انتخاب کند.</p>}
   </section>;
 }
 

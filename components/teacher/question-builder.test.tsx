@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { describe, expect, it } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { TeacherQuestionBuilder, blankQuestion, questionIssues } from "@/components/teacher/question-builder";
 import type { Question } from "@/lib/types/domain";
 
@@ -171,5 +171,100 @@ describe("questionIssues", () => {
     const essay = { ...blankQuestion("essay", 1), stem: "پدیده را توضیح دهید." };
     expect(questionIssues(essay)).toEqual([]);
     expect(essay.type).toBe("essay");
+  });
+});
+
+/**
+ * Adding a question is a two-step dialog: the type on its own, then only the fields that type has.
+ *
+ * `within(dialog)` throughout, because the trigger button and the dialog's own confirm button carry the same
+ * label — a bare `getByRole` matches both and tells you nothing about which one was clicked.
+ */
+describe("adding a question", () => {
+  function openComposer() {
+    render(<Harness initial={[singleChoice()]}/>);
+    fireEvent.click(screen.getByRole("button", { name: /افزودن سؤال/ }));
+    return screen.getByRole("dialog", { name: /افزودن سؤال/ });
+  }
+
+  it("asks for the type before showing any field", async () => {
+    const dialog = openComposer();
+    expect(await within(dialog).findByRole("button", { name: /چهارگزینه‌ای/ })).toBeTruthy();
+    // No field yet: not a stem, not an option, not a mark.
+    expect(within(dialog).queryByRole("textbox", { name: /متن سؤال/ })).toBeNull();
+    expect(within(dialog).queryByRole("textbox", { name: /متن گزینه/ })).toBeNull();
+    for (const label of ["چهارگزینه‌ای", "چندگزینه‌ای چندپاسخی", "درست / نادرست", "وصل‌کردنی", "پاسخ کوتاه", "پاسخ تشریحی"]) {
+      expect(within(dialog).getByRole("button", { name: new RegExp(label) })).toBeTruthy();
+    }
+  });
+
+  it("shows only the fields the chosen type has", async () => {
+    const dialog = openComposer();
+    fireEvent.click(await within(dialog).findByRole("button", { name: /پاسخ تشریحی/ }));
+
+    expect(await within(dialog).findByRole("textbox", { name: /متن سؤال/ })).toBeTruthy();
+    expect(within(dialog).getByRole("textbox", { name: /راهنمای تصحیح/ })).toBeTruthy();
+    // An essay has no options at all, and no accepted-answer list.
+    expect(within(dialog).queryByRole("textbox", { name: /متن گزینه/ })).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: /^پاسخ$/ })).toBeNull();
+  });
+
+  it("appends the question only when the teacher confirms", async () => {
+    // `onEmit` records the whole list, and only when the list actually changes — so an untouched draft in a
+    // dialog that is then closed must leave this empty, which is the point being tested.
+    let emitted: Question[] = [];
+    render(<Harness initial={[singleChoice()]} onEmit={(next) => { emitted = next; }}/>);
+    fireEvent.click(screen.getByRole("button", { name: /افزودن سؤال/ }));
+    const dialog = screen.getByRole("dialog", { name: /افزودن سؤال/ });
+    fireEvent.click(await within(dialog).findByRole("button", { name: /وصل‌کردنی/ }));
+    fireEvent.change(await within(dialog).findByRole("textbox", { name: /متن سؤال/ }), { target: { value: "هر اندامک را به کارش وصل کنید." } });
+
+    // Closing the dialog throws the half-typed question away rather than dropping it into the paper.
+    fireEvent.click(within(dialog).getByRole("button", { name: "بستن" }));
+    expect(emitted).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /افزودن سؤال/ }));
+    const reopened = screen.getByRole("dialog", { name: /افزودن سؤال/ });
+    fireEvent.click(await within(reopened).findByRole("button", { name: /وصل‌کردنی/ }));
+    fireEvent.change(await within(reopened).findByRole("textbox", { name: /متن سؤال/ }), { target: { value: "هر اندامک را به کارش وصل کنید." } });
+    fireEvent.click(within(reopened).getByRole("button", { name: /افزودن و تکمیل در فهرست/ }));
+
+    expect(emitted).toHaveLength(2);
+    expect(emitted[1]).toMatchObject({ type: "matching", stem: "هر اندامک را به کارش وصل کنید.", order: 2 });
+  });
+
+  it("goes back to the type choice without losing the stem", async () => {
+    const dialog = openComposer();
+    fireEvent.click(await within(dialog).findByRole("button", { name: /چهارگزینه‌ای/ }));
+    fireEvent.change(await within(dialog).findByRole("textbox", { name: /متن سؤال/ }), { target: { value: "کدام‌یک واحد نیرو است؟" } });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /بازگشت به انتخاب نوع/ }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: /پاسخ کوتاه/ }));
+    expect((await within(dialog).findByRole("textbox", { name: /متن سؤال/ }) as HTMLTextAreaElement).value).toBe("کدام‌یک واحد نیرو است؟");
+  });
+});
+
+describe("optional sections stay out of the way", () => {
+  it("keeps the answer-media and metadata sections closed on a plain question", () => {
+    render(<Harness initial={[singleChoice()]}/>);
+    const media = screen.getByRole("button", { name: /پاسخ رسانه‌ای دانش‌آموز/ });
+    const metadata = screen.getByRole("button", { name: /راهنما، برچسب و توضیح/ });
+    expect(media.getAttribute("aria-expanded")).toBe("false");
+    expect(metadata.getAttribute("aria-expanded")).toBe("false");
+    // The stem and the options — the actual question — are never hidden.
+    expect(screen.getByRole("textbox", { name: /متن سؤال/ })).toBeTruthy();
+    expect(screen.getAllByRole("textbox", { name: /متن گزینه/ })).toHaveLength(2);
+
+    fireEvent.click(media);
+    expect(media.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText(/اجازهٔ بارگذاری تصویر/)).toBeTruthy();
+  });
+
+  it("opens a section that already holds something", () => {
+    const withMedia = { ...singleChoice(), allowAudioAnswer: true } as Question;
+    render(<Harness initial={[withMedia]}/>);
+    const media = screen.getByRole("button", { name: /پاسخ رسانه‌ای دانش‌آموز/ });
+    expect(media.getAttribute("aria-expanded")).toBe("true");
+    expect(media.textContent).toContain("صدا");
   });
 });
