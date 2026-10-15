@@ -27,6 +27,7 @@ from django.utils import timezone
 from apps.attempts.models import ExamAttempt, StudentAnswer
 from apps.attempts.services import _grade_attempt, start_attempt
 from apps.exams.models import Exam, ExamSettings, Question, QuestionOption
+from apps.results.models import ExamResult
 from apps.exams.services import publish_exam, refresh_question_hashes, refresh_total_marks
 from apps.organizations.models import School, SchoolMembership
 from apps.users.models import StudentGroup, User
@@ -108,7 +109,7 @@ EXAM_SPECS: list[dict] = [
         "title": "آزمون ریاضی — حد و پیوستگی",
         "subject": "ریاضی",
         "description": "در حال برگزاری؛ یک دانش‌آموز جلسهٔ نیمه‌تمام دارد",
-        "start_hours": -1, "end_hours": 6, "duration": 50, "passing": 50,
+        "start_hours": -1, "end_hours": 23, "duration": 90, "passing": 50,
         "visibility": "immediate", "publish": True, "in_progress_for": [1, 3],
     },
     {
@@ -264,8 +265,12 @@ class Command(BaseCommand):
             exam.save(update_fields=("status", "updated_at"))
         elif spec.get("publish"):
             # The real gate, so the demo cannot drift out of step with what publishing actually requires —
-            # and it fires the audience notification, which gives the bell something to show.
-            if exam.status in {Exam.Status.DRAFT, Exam.Status.SCHEDULED}:
+            # and it fires the audience notification, which gives the bell something to show. Publishing a
+            # future exam that is already scheduled is refused by that gate, so on a re-run only a draft, or
+            # a scheduled exam whose start time has since passed, is pushed through.
+            now = timezone.now()
+            already_published = exam.status == Exam.Status.SCHEDULED and exam.start_at and exam.start_at > now
+            if exam.status == Exam.Status.DRAFT or (exam.status == Exam.Status.SCHEDULED and not already_published):
                 exam = publish_exam(exam.id)
         else:
             # A window that has already closed cannot be published; a finished exam is set directly.
@@ -298,9 +303,24 @@ class Command(BaseCommand):
 
         for number in (spec.get("in_progress_for") or []):
             student = by_number.get(number)
-            if student is None or ExamAttempt.objects.filter(exam=exam, student=student).exists():
+            if student is None:
                 continue
+            # An attempt's deadline is `started_at + duration`, so a half-finished session seeded an hour
+            # ago has already expired by the time anyone looks at it — and the resume band, the one state
+            # this dataset exists to show, quietly disappears. Re-running the command therefore rewinds the
+            # session rather than skipping it: `seed_demo` doubles as "refresh the demo".
+            existing = ExamAttempt.objects.filter(exam=exam, student=student).first()
+            if existing is not None:
+                existing.answers.all().delete()
+                existing.events.all().delete()
+                ExamResult.objects.filter(attempt=existing).delete()
+                existing.delete()
             attempt, _ = start_attempt(exam.id, student, client_session="seed-demo", user_agent="seed_demo")
+            rewound = timezone.now() - timedelta(minutes=4)
+            attempt.started_at = rewound
+            attempt.last_activity_at = rewound
+            attempt.expires_at = rewound + timedelta(minutes=exam.duration_minutes)
+            attempt.save(update_fields=("started_at", "last_activity_at", "expires_at", "updated_at"))
             # Two questions in, so the session looks like something a person was actually doing.
             self._answer_sheets(exam, attempt, 2, limit=2)
 

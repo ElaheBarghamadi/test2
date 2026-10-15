@@ -118,6 +118,10 @@ two with published results at different percentages so the score trend has a dir
 not yet marked, and one still a draft that only the teacher can see. Seeding accounts alone leaves every
 dashboard empty, which tells you nothing about whether it works.
 
+Re-running the command rewinds the half-finished attempts rather than skipping them — an attempt's deadline
+is `started_at + duration`, so a session seeded an hour ago has already expired and the resume band, the one
+state the dataset exists to show, would be gone. `seed_demo` therefore doubles as "refresh the demo".
+
 Two deliberate details: the groups share a student, so picking both must count that student once — the union
 rule the exam audience screen implements; and the exams reach students both through group membership and
 through the direct `students` list, so one dataset exercises both halves of the audience rule.
