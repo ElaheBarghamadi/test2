@@ -174,11 +174,17 @@ export function AuthForm({ mode }: { mode: Mode }) {
   }
 
   return (
-    <div className="auth-panel mx-auto grid w-full max-w-6xl overflow-hidden rounded-[1.75rem] border bg-card shadow-lift lg:grid-cols-[1.02fr_.98fr]">
+    <div className="auth-panel mx-auto grid w-full max-w-6xl overflow-hidden rounded-[1.75rem] border bg-card shadow-lift lg:h-full lg:min-h-0 lg:grid-cols-[1.02fr_.98fr]">
       <BrandPanel mode={mode}/>
 
-      <div className="flex items-center justify-center p-5 sm:p-8 lg:p-11">
-        <div className="w-full max-w-md">
+      {/*
+       * The register form is taller than most laptop viewports, and on `lg` this column is exactly the
+       * card's height. So it scrolls here rather than growing the page. `my-auto` on the child — not
+       * `items-center` on the column — because centring an overflowing flex child clips its top and the
+       * first fields become unreachable; auto margins collapse to zero instead and the box scrolls.
+       */}
+      <div className="flex min-h-0 flex-col overflow-y-auto overscroll-contain p-5 sm:p-8 lg:p-11">
+        <div className="my-auto w-full max-w-md">
           <p className="section-label">{copy.eyebrow}</p>
           <h1 className="mt-3 text-2xl font-black tracking-tight sm:text-[1.75rem]">{copy.title}</h1>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">{copy.subtitle}</p>
@@ -314,28 +320,35 @@ const PANEL_POINTS = ["تجربهٔ فارسی و راست‌چین", "گزار�
 function BrandPanel({ mode }: { mode: Mode }) {
   const heading = mode === "forgot" ? "بازگشت به حساب، بدون دردسر." : "ارزیابی مدرن، برای آموزش معنادار.";
   return (
-    <aside className="relative hidden min-h-[600px] overflow-hidden bg-gradient-to-br from-indigo-600 via-indigo-600 to-violet-700 p-8 text-white lg:flex lg:flex-col xl:p-10">
+    <aside className="relative hidden overflow-hidden bg-gradient-to-br from-indigo-600 via-indigo-600 to-violet-700 text-white lg:flex lg:min-h-0 lg:flex-col">
       <span aria-hidden="true" className="demo-orb absolute -left-28 -top-24 h-72 w-72 rounded-full bg-white/12 blur-3xl"/>
       <span aria-hidden="true" className="demo-orb demo-orb-slow absolute -bottom-24 -right-20 h-64 w-64 rounded-full bg-teal-300/22 blur-3xl"/>
       <span aria-hidden="true" className="soft-grid pointer-events-none absolute inset-0 opacity-[.14]"/>
 
-      <div className="relative">
-        <p className="text-xs font-black uppercase tracking-[.18em] text-indigo-200">Examora for education</p>
-        <h2 className="mt-4 text-[1.75rem] font-black leading-snug xl:text-3xl">{heading}</h2>
-        <p className="mt-4 max-w-sm text-sm leading-7 text-indigo-100">
-          محیطی آرام برای دانش‌آموز و ابزارهایی روشن برای آموزگار؛ از ساخت سؤال تا تحلیل نتیجه، در یک فضای منسجم.
-        </p>
+      {/*
+       * The padding and the scrolling live here, not on the `aside`, so the orbs and the grid behind stay
+       * pinned to the panel while the content moves. On a short viewport the card is now exactly the
+       * remaining height, so this column would otherwise clip whatever did not fit.
+       */}
+      <div className="auth-brand-scroll relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain p-8 xl:p-10">
+        <div className="relative shrink-0">
+          <p className="text-xs font-black uppercase tracking-[.18em] text-indigo-200">Examora for education</p>
+          <h2 className="mt-4 text-[1.75rem] font-black leading-snug xl:text-3xl">{heading}</h2>
+          <p className="mt-4 max-w-sm text-sm leading-7 text-indigo-100">
+            محیطی آرام برای دانش‌آموز و ابزارهایی روشن برای آموزگار؛ از ساخت سؤال تا تحلیل نتیجه، در یک فضای منسجم.
+          </p>
+        </div>
+
+        <ExamDemoCard tone="glass" className="auth-panel-demo relative mt-7 shrink-0"/>
+
+        <ul className="auth-panel-points relative mt-auto shrink-0 space-y-2 pt-7">
+          {PANEL_POINTS.map((point) => (
+            <li key={point} className="flex items-center gap-2.5 rounded-xl border border-white/12 bg-white/[.07] px-3 py-2.5 text-xs font-bold">
+              <Check className="h-3.5 w-3.5 shrink-0 text-teal-200" aria-hidden="true"/>{point}
+            </li>
+          ))}
+        </ul>
       </div>
-
-      <ExamDemoCard tone="glass" className="relative mt-7"/>
-
-      <ul className="relative mt-auto space-y-2 pt-7">
-        {PANEL_POINTS.map((point) => (
-          <li key={point} className="flex items-center gap-2.5 rounded-xl border border-white/12 bg-white/[.07] px-3 py-2.5 text-xs font-bold">
-            <Check className="h-3.5 w-3.5 shrink-0 text-teal-200" aria-hidden="true"/>{point}
-          </li>
-        ))}
-      </ul>
     </aside>
   );
 }

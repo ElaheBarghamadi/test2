@@ -220,3 +220,50 @@ describe("with no connection", () => {
     expect(api.login).not.toHaveBeenCalled();
   });
 });
+
+describe("the full-screen card", () => {
+  function panel() {
+    return document.querySelector(".auth-panel") as HTMLElement;
+  }
+
+  it("fills the height the layout leaves it, on every signed-out screen", () => {
+    // `reset-password` renders its own form, but through this same layout.
+    for (const mode of ["login", "register", "forgot"] as const) {
+      const { unmount } = render(<AuthForm mode={mode}/>);
+      expect(panel().className, mode).toContain("lg:h-full");
+      expect(panel().className, mode).toContain("lg:min-h-0");
+      unmount();
+    }
+  });
+
+  it("scrolls the tall register form inside the card rather than centring its top out of reach", () => {
+    render(<AuthForm mode="register"/>);
+    const column = panel().children[1] as HTMLElement;
+
+    expect(column.className).toContain("overflow-y-auto");
+    expect(column.className).toContain("min-h-0");
+    expect(column.className).toContain("flex-col");
+    /*
+     * `items-center` on a column that scrolls clips whatever overflows the top, which is exactly the part
+     * of a form a visitor needs first. Auto margins on the child centre it when there is room and collapse
+     * to zero when there is not.
+     */
+    expect(column.className).not.toContain("items-center");
+    expect((column.firstElementChild as HTMLElement).className).toContain("my-auto");
+    // The first field has to stay reachable: it lives inside the scrolling column, not above it.
+    expect(column.contains(screen.getByLabelText(/نام و نام خانوادگی/))).toBe(true);
+  });
+
+  it("keeps the brand side from pushing the card open on a short viewport", () => {
+    render(<AuthForm mode="login"/>);
+    const aside = panel().querySelector("aside") as HTMLElement;
+
+    expect(aside.className).toContain("lg:min-h-0");
+    expect(aside.className).not.toContain("min-h-[600px]");
+    const scroll = aside.querySelector(".auth-brand-scroll") as HTMLElement;
+    expect(scroll.className).toContain("overflow-y-auto");
+    // The decorative blocks are the ones a short screen gives up, so they have to be hookable from CSS.
+    expect(aside.querySelector(".auth-panel-demo")).toBeTruthy();
+    expect(aside.querySelector(".auth-panel-points")).toBeTruthy();
+  });
+});

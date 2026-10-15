@@ -251,6 +251,33 @@ Two dependency rules carry security weight here and are enforced, not remembered
 
    برای محیط اشتراکی/production مقدارهای `DJANGO_SECRET_KEY`، `DATABASE_URL` و تنظیمات ایمیل را در `backend\.env` وارد کنید. در توسعهٔ محلی، بدون `DATABASE_URL` از SQLite محلی استفاده می‌شود.
 
+   > **اگر `manage.py` را با پایتون سراسری ویندوز اجرا کنید** (یعنی `python manage.py …` بدون `.venv`)،
+   > جنگوی نصب‌شدهٔ سیستم به کار می‌افتد نه جنگوی `requirements.lock`. خطای رایجش این است:
+   >
+   > ```text
+   > File "...\backend\apps\exams\models.py", line 64, in Meta
+   >     models.CheckConstraint(condition=models.Q(duration_minutes__gte=1), ...)
+   > TypeError: CheckConstraint.__init__() got an unexpected keyword argument 'condition'
+   > ```
+   >
+   > معنی‌اش این است که جنگوی آن مفسر قدیمی‌تر از ۵.۱ است؛ کلیدواژهٔ `condition=` در Django 5.1 جای
+   > `check=` را گرفت. این پروژه به `Django==5.2.17` قفل شده است و کدش درست است. `manage.py` پیش از
+   > `import` هر مدل، نسخه را بررسی می‌کند و به‌جای آن خطای مبهم، نسخهٔ پیدا‌شده و دستور درست را
+   > نشان می‌دهد. راه‌حل، از پوشهٔ `backend`:
+   >
+   > ```powershell
+   > .venv\Scripts\pip install -r requirements.lock
+   > .venv\Scripts\python.exe manage.py migrate
+   > ```
+   >
+   > یا `backend\.venv\Scripts\activate` و بعد همان `python manage.py …` معمولی.
+   >
+   > برای حساب مدیر سامانه نیازی به `createsuperuser` نیست — `manage.py seed_demo` حساب
+   > `admin@examora.test` را با گذرواژهٔ `Examora1234!` می‌سازد. اگر `createsuperuser` را اجرا کنید هم
+   > درست کار می‌کند: این دستور `role` را `admin` می‌گذارد، پس حساب هم به `/admin/` جنگو و هم به کنسول
+   > مدیر سامانه دسترسی کامل دارد و چون مدیر سامانه به مدرسه محدود نمی‌شود، نبودِ عضویت مدرسه چیزی را
+   > پنهان نمی‌کند. تنها تفاوتش این است که دادهٔ نمونه‌ای کنارش ساخته نمی‌شود.
+
 4. در پنجرهٔ اول، سایت را با npm محلی اجرا کنید:
 
    ```powershell
@@ -472,6 +499,33 @@ behind it. A refused read renders one sentence, not nine zeros.
 
 Everything a visitor sees before they have an account: `/`, `/login`, `/register`, `/forgot-password`,
 `/reset-password`.
+
+**The four auth screens are exactly one viewport tall.** `app/(auth)/layout.tsx` builds a `h-dvh` flex
+column that clips — `header` (`shrink-0`) → `main` (`min-h-0 flex-1`) → trust strip (`shrink-0`) — with the
+card in between filling whatever height is left. Nothing scrolls as a page, so the header and the strip
+stay put while the visitor works through the form, and the register form (the tall one) scrolls inside the
+card instead of pushing the screen open.
+
+Three details are easy to undo without noticing, because every way of losing them still renders a
+good-looking page. All three are pinned by `app/(auth)/layout.test.tsx` and by the «full-screen card»
+block in `components/forms/auth-form.test.tsx`:
+
+- `min-h-dvh` instead of `h-dvh` *is* the bug: a minimum height lets a tall form grow the page, and the
+  screen stops being a screen.
+- `min-h-0` on `main`. A flex child defaults to `min-height: auto` and refuses to shrink below its
+  content, which quietly turns `h-dvh` back into "at least a viewport" even though the class looks right.
+- The form column centres its child with `my-auto`, **not** `items-center` on the column. Centring a
+  flex child that overflows clips its top, which is exactly the part of a form a visitor needs first;
+  auto margins collapse to zero when there is no room, so the column scrolls from the first field.
+
+Below `lg` the brand side is hidden and `main` owns the only scrollbar, because a phone has no room for a
+nested one. On `lg` the card is exactly the height the viewport leaves, so the brand side gives content up
+rather than scrolling a marketing panel: `globals.css` hides `.auth-panel-points` under 900 px of viewport
+height and `.auth-panel-demo` under 720 px, with `.auth-brand-scroll` as the scrollbar-free fallback
+behind both. `/reset-password` is a single narrow column rather than a two-column card, so its wrapper
+adds `lg:items-center`; without it a flex child stretches and the card becomes a tall thin panel.
+`@supports not (height: 100dvh)` falls back to `100vh`, so a browser without `dvh` still gets a
+full-height screen instead of one collapsed onto its content.
 
 **The landing page claims only what is in this repository.** The earlier version opened with a strip of
 invented statistics — «۹۸٪ رضایت مدارس», «+۴۵هزار آزمون موفق», «۲۴/۷ پایداری سرویس» — for a product with no
