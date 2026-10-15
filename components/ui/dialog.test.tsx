@@ -92,3 +92,73 @@ describe("Dialog focus management", () => {
     expect(document.activeElement).toBe(trigger);
   });
 });
+
+/**
+ * The three structural guarantees, each one a complaint that came from using the app rather than from
+ * reading it: a dialog opened from a scrolled page appeared in the wrong place, the page behind it scrolled
+ * along, and the backdrop did not read as "everything else is inactive".
+ */
+function DialogInsideATransformedPage() {
+  const [open, setOpen] = useState(false);
+  return (
+    // `PageTransition` wraps every page in exactly this: a `motion.main` with a transform. Any non-`none`
+    // transform makes the element the containing block for `position: fixed` descendants.
+    <div data-testid="transformed-page" style={{ transform: "translateY(40px)" }}>
+      <Button onClick={() => setOpen(true)}>open</Button>
+      <Dialog open={open} onClose={() => setOpen(false)} title="سؤال جدید">
+        <p>محتوا</p>
+      </Dialog>
+    </div>
+  );
+}
+
+describe("Dialog placement and the page behind it", () => {
+  it("renders outside the transformed page, so `fixed` means the viewport", async () => {
+    render(<DialogInsideATransformedPage/>);
+    fireEvent.click(screen.getByRole("button", { name: "open" }));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(screen.getByTestId("transformed-page").contains(dialog)).toBe(false);
+    // The sheet is the portal's own child; the panel sits inside it.
+    expect(dialog.closest(".dialog-sheet")?.parentElement).toBe(document.body);
+  });
+
+  it("locks the page scroll while open and hands it back on close", async () => {
+    render(<DialogInsideATransformedPage/>);
+    const root = document.documentElement;
+    expect(root.style.overflow).toBe("");
+
+    fireEvent.click(screen.getByRole("button", { name: "open" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(root.style.overflow).toBe("hidden"));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull(), { timeout: 2000 });
+    expect(root.style.overflow).toBe("");
+  });
+
+  it("dims and blurs what is behind it", async () => {
+    render(<DialogInsideATransformedPage/>);
+    fireEvent.click(screen.getByRole("button", { name: "open" }));
+    await screen.findByRole("dialog");
+
+    // The wash is a class rather than inline utilities so it can differ between light and dark themes.
+    const overlay = document.querySelector(".dialog-overlay");
+    expect(overlay).toBeTruthy();
+    expect(document.querySelector(".dialog-panel")).toBeTruthy();
+  });
+
+  it("keeps the panel itself scrollable, and only the panel", async () => {
+    render(<DialogInsideATransformedPage/>);
+    fireEvent.click(screen.getByRole("button", { name: "open" }));
+    const dialog = await screen.findByRole("dialog");
+
+    // The panel itself clips; a single inner body is the only thing that scrolls, which is what keeps the
+    // header and footer on screen while a long form moves underneath them.
+    expect(dialog.className).toContain("overflow-hidden");
+    const body = dialog.querySelector(".min-h-0.flex-1");
+    expect(body?.className).toContain("overflow-y-auto");
+    // Without this, a scroll that reaches the end of the body chains into the page behind it.
+    expect(body?.className).toContain("overscroll-contain");
+  });
+});

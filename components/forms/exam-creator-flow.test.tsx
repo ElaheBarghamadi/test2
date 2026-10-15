@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   push: vi.fn(),
   replace: vi.fn(),
   toast: vi.fn(),
+  bank: vi.fn(),
 }));
 
 vi.mock("framer-motion", async (importOriginal) => {
@@ -31,6 +32,7 @@ vi.mock("@/hooks/use-teacher-exams", () => ({
   }),
 }));
 vi.mock("@/lib/state/toast-store", () => ({ useToastStore: (selector: (s: { push: typeof state.toast }) => unknown) => selector({ push: state.toast }) }));
+vi.mock("@/lib/api/exams", () => ({ examsApi: { bank: state.bank } }));
 
 import { ExamCreator } from "@/components/forms/exam-creator";
 
@@ -107,22 +109,66 @@ describe("builder navigation", () => {
   });
 });
 
+/**
+ * Adding a bank question used to cost three screens and a write: save the draft so the exam has an id,
+ * navigate to `/teacher/questions?exam=…`, search there, copy across. `examsApi.bank()` needs no exam id, so
+ * the whole thing now happens in a dialog over the wizard, straight into the local draft.
+ */
 describe("reaching the bank from the builder", () => {
-  it("opens the bank pointed back at the exam being edited", async () => {
+  const bankRow = {
+    id: "bank-1", order: 1, text: "کدام واحد نیرو است؟", marks: "2.00", type: "multiple_choice",
+    options: [
+      { id: "bank-1-a", text: "نیوتن", order: 1, is_correct: true },
+      { id: "bank-1-b", text: "ژول", order: 2, is_correct: false },
+    ],
+    configuration: {}, tags: [], media: [],
+  };
+
+  it("copies a bank question into an unsaved draft without leaving the builder", async () => {
+    state.bank.mockResolvedValue([bankRow]);
+    render(<ExamCreator/>);
+    fireEvent.click(screen.getByRole("button", { name: /سؤال‌ها/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /انتخاب از بانک/ }));
+
+    const row = await screen.findByRole("checkbox", { name: /کدام واحد نیرو است؟/ });
+    fireEvent.click(row);
+    fireEvent.click(screen.getByRole("button", { name: /^افزودن ۱ سؤال$/ }));
+
+    // It lands in the paper, and the key survived the copy rather than being reset to the first option.
+    // (More than one match is expected: the row in the list and the closing dialog's own copy overlap for a
+    // frame while AnimatePresence runs its exit.)
+    await waitFor(() => expect(screen.getAllByText("کدام واحد نیرو است؟").length).toBeGreaterThan(0));
+    expect(screen.getByRole("radio", { name: /علامت‌گذاری گزینه ۱/ }).getAttribute("aria-checked")).toBe("true");
+    // Nothing was written to get there.
+    expect(state.saveExam).not.toHaveBeenCalled();
+    expect(state.toast).toHaveBeenCalled();
+  });
+
+  it("does not offer a question the paper already holds", async () => {
+    state.bank.mockResolvedValue([bankRow]);
+    state.exams = [exam({ questions: [choice("bank-1")] })];
+    render(<ExamCreator examId="exam-1"/>);
+    fireEvent.click(screen.getByRole("button", { name: /سؤال‌ها/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /انتخاب از بانک/ }));
+
+    const row = await screen.findByRole("checkbox", { name: /کدام واحد نیرو است؟/ });
+    expect(row.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("اضافه شده")).toBeTruthy();
+  });
+
+  it("still links out to the full bank, pointed at this exam when there is one", async () => {
     state.exams = [exam()];
     render(<ExamCreator examId="exam-1"/>);
     fireEvent.click(screen.getByRole("button", { name: /سؤال‌ها/ }));
-    const link = await screen.findByRole("link", { name: /افزودن از بانک/ });
-    expect(link.getAttribute("href")).toBe("/teacher/questions?exam=exam-1");
+    expect((await screen.findByRole("link", { name: /مدیریت بانک/ })).getAttribute("href")).toBe("/teacher/questions?exam=exam-1");
   });
 
-  it("asks for a save first while the exam has no id to bank into", async () => {
-    state.saveExam.mockResolvedValue(exam());
+  it("links to the bank from a brand-new exam too, instead of asking for a save first", async () => {
     render(<ExamCreator/>);
     fireEvent.click(screen.getByRole("button", { name: /سؤال‌ها/ }));
-    expect(await screen.findByText(/اول پیش‌نویس را ذخیره کنید/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس برای افزودن از بانک/ }));
-    await waitFor(() => expect(state.saveExam).toHaveBeenCalled());
+    expect((await screen.findByRole("link", { name: /مدیریت بانک/ })).getAttribute("href")).toBe("/teacher/questions");
+    // The old gate is gone: there is nothing left to save before the bank can be used.
+    expect(screen.queryByText(/اول پیش‌نویس را ذخیره کنید/)).toBeNull();
   });
 });
 

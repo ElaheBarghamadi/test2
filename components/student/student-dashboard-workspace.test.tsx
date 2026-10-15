@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ApiAvailableExamDto } from "@/lib/api/dtos";
-import { StudentDashboardWorkspace } from "@/components/student/student-dashboard-workspace";
+import type { Exam } from "@/lib/types/domain";
+import { StudentDashboardWorkspace, subjectAverages } from "@/components/student/student-dashboard-workspace";
+import { toStudentDashboardExam } from "@/lib/api/mappers";
 import { useAuthStore } from "@/lib/state/auth-store";
 import { humanRemaining } from "@/lib/utils";
 
@@ -237,3 +239,101 @@ function graded({ id, title, percentage, passed, submitted }: { id: string; titl
     },
   });
 }
+
+/**
+ * The two additions to the front door: a hero that says what is next before the list does, and a per-subject
+ * mean that answers "what do I revise" rather than "how am I doing".
+ *
+ * Both are derived from the same payload the cards render, which is the property worth pinning — a summary
+ * from a second source is a summary that can contradict the list next to it.
+ */
+describe("subject averages", () => {
+  /** The helper reads the mapped shape the page renders, not the raw DTO. */
+  const mapped = (dtos: ApiAvailableExamDto[]) => dtos.map(toStudentDashboardExam) as Exam[];
+
+  it("averages only published results, and counts every paper sat", () => {
+    const rows = subjectAverages(mapped([
+      graded({ id: "a", title: "یک", percentage: 80, passed: true, submitted: "2026-03-01T08:00:00Z" }),
+      graded({ id: "b", title: "دو", percentage: 60, passed: false, submitted: "2026-03-08T08:00:00Z" }),
+      examDto({ id: "c", title: "سه", availability: "completed", subject: "ریاضی", attempt: null }),
+    ]));
+
+    // The two graded fixtures are both «ریاضی»; the unmarked one joins the count but not the mean.
+    const maths = rows.find((row) => row.subject === "ریاضی")!;
+    expect(maths).toMatchObject({ sat: 3, graded: 2, average: 70 });
+  });
+
+  it("leaves a subject with nothing published at null rather than zero", () => {
+    const rows = subjectAverages(mapped([examDto({ id: "c", title: "سه", availability: "upcoming", subject: "شیمی" })]));
+    expect(rows[0]).toMatchObject({ subject: "شیمی", sat: 1, graded: 0, average: null });
+  });
+
+  it("splits by subject and puts the graded ones first", () => {
+    const rows = subjectAverages(mapped([
+      examDto({ id: "x", title: "x", availability: "upcoming", subject: "شیمی" }),
+      graded({ id: "a", title: "یک", percentage: 90, passed: true, submitted: "2026-03-01T08:00:00Z" }),
+    ]));
+
+    expect(rows.map((row) => row.subject)).toEqual(["ریاضی", "شیمی"]);
+  });
+});
+
+describe("the hero band", () => {
+  it("names the next exam and how long there is, without taking the page's only timer", async () => {
+    await renderDesk();
+    const hero = screen.getByRole("region", { name: "وضعیت شما" });
+
+    expect(hero.textContent).toContain("آزمون هفتهٔ بعد");
+    expect(hero.textContent).toContain("نزدیک‌ترین آزمون پیش‌رو");
+    // The resume banner owns `role="timer"`; a second one would make both unaddressable.
+    expect(screen.getAllByRole("timer")).toHaveLength(1);
+    // And the title stays a paragraph here: the card below owns the heading.
+    expect(screen.getAllByRole("heading", { name: "آزمون هفتهٔ بعد" })).toHaveLength(1);
+  });
+
+  it("points an exam that can be started straight at its session", async () => {
+    listAvailable.mockResolvedValue([examDto({ id: "ready", title: "آزمون آماده", availability: "available" })]);
+    render(<StudentDashboardWorkspace/>);
+    const hero = await screen.findByRole("region", { name: "وضعیت شما" });
+
+    expect(within(hero).getByRole("link", { name: /رفتن به آزمون/ }).getAttribute("href")).toBe("/student/exam/ready");
+  });
+
+  it("says how many papers are waiting on the teacher", async () => {
+    await renderDesk();
+    const hero = screen.getByRole("region", { name: "وضعیت شما" });
+    expect(hero.textContent).toContain("۱ آزمون منتظر نمرهٔ آموزگار است");
+  });
+});
+
+describe("the per-subject breakdown", () => {
+  it("stays out of the way when there is only one subject", async () => {
+    await renderDesk();
+    expect(screen.queryByRole("heading", { name: /میانگین به تفکیک درس/ })).toBeNull();
+  });
+
+  it("shows one bar per subject and flags the one worth revising", async () => {
+    listAvailable.mockResolvedValue([
+      { ...graded({ id: "a", title: "یک", percentage: 90, passed: true, submitted: "2026-03-01T08:00:00Z" }), subject: "ریاضی" },
+      { ...graded({ id: "b", title: "دو", percentage: 40, passed: false, submitted: "2026-03-08T08:00:00Z" }), subject: "شیمی" },
+    ]);
+    render(<StudentDashboardWorkspace/>);
+    await screen.findByRole("heading", { name: /میانگین به تفکیک درس/ });
+
+    expect(screen.getByRole("progressbar", { name: "میانگین درس ریاضی" }).getAttribute("aria-valuenow")).toBe("90");
+    expect(screen.getByRole("progressbar", { name: "میانگین درس شیمی" }).getAttribute("aria-valuenow")).toBe("40");
+    expect(screen.getByText("نیازمند مرور: شیمی")).toBeTruthy();
+  });
+
+  it("says a subject has no published result instead of drawing an empty bar as zero", async () => {
+    listAvailable.mockResolvedValue([
+      { ...examDto({ id: "a", title: "یک", availability: "completed", attempt: null }), subject: "ریاضی" },
+      { ...graded({ id: "b", title: "دو", percentage: 70, passed: true, submitted: "2026-03-08T08:00:00Z" }), subject: "شیمی" },
+    ]);
+    render(<StudentDashboardWorkspace/>);
+    await screen.findByRole("heading", { name: /میانگین به تفکیک درس/ });
+
+    expect(screen.getByText("۱ آزمون · بدون نتیجهٔ منتشرشده")).toBeTruthy();
+    expect(screen.queryByText("نیازمند مرور: ریاضی")).toBeNull();
+  });
+});

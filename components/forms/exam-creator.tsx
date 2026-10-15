@@ -1,12 +1,13 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, Clock3, Eye, FileText, Info, Layers, ListChecks, Save, Settings2, ShieldAlert, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, Clock3, Eye, FileText, Info, Layers, Library, ListChecks, Save, Settings2, ShieldAlert, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import type { Exam, ExamDraft, ExamSettings, ResultVisibility } from "@/lib/types/domain";
+import type { Exam, ExamDraft, ExamSettings, Question, ResultVisibility } from "@/lib/types/domain";
 import { TeacherQuestionBuilder, questionIssues } from "@/components/teacher/question-builder";
+import { QuestionBankPicker } from "@/components/teacher/question-bank-picker";
 import { ExamAudienceForm } from "@/components/forms/exam-audience-form";
 import { QuestionRenderer } from "@/components/exam/question-renderer";
 import { Button } from "@/components/ui/button";
@@ -65,6 +66,7 @@ export function ExamCreator({ examId }: { examId?: string }) {
   const { exams, loading, detailLoadingId, initialized, error, clearError, saveExam, loadExam, saving: storeSaving } = useTeacherExams();
 
   const [step, setStep] = useState(0);
+  const [bankOpen, setBankOpen] = useState(false);
   const [draft, setDraft] = useState<ExamDraft>(emptyDraft);
   const [activeTemplate, setActiveTemplate] = useState<ExamTemplateId | null>(null);
   const [saving, setSaving] = useState<"draft" | "publish" | null>(null);
@@ -128,6 +130,25 @@ export function ExamCreator({ examId }: { examId?: string }) {
     setDirty(true);
   };
   function validateStep(index: number) { return validation.filter((item) => item.step === index); }
+  /**
+   * Bank rows the paper already holds — by their own id and by the id they were copied from — so the picker
+   * can grey them out instead of letting the same question be added twice under two ids.
+   */
+  const takenBankIds = useMemo(
+    () => new Set(draft.questions.flatMap((question) => [question.id, question.copiedFromId].filter((value): value is string => Boolean(value)))),
+    [draft.questions],
+  );
+  function addFromBank(picked: Question[]) {
+    // Straight into the local draft: `persist` sends the whole question set, so a brand-new exam can take
+    // bank questions before it has an id of its own.
+    setDraft((current) => ({ ...current, questions: [...current.questions, ...picked] }));
+    setDirty(true);
+    toast({
+      title: `${toPersianNumber(picked.length)} سؤال از بانک اضافه شد`,
+      description: "کپی شدند، نه منتقل؛ تا ذخیره یا انتشار فقط در همین پیش‌نویس‌اند.",
+      variant: "success",
+    });
+  }
   function goTo(target: number) { setStep(Math.max(0, Math.min(steps.length - 1, target))); }
   async function persist(mode: "draft" | "publish") {
     // Two identical questions are never worth saving twice, and the server would answer the second one with
@@ -226,10 +247,22 @@ export function ExamCreator({ examId }: { examId?: string }) {
                 </Button>
               </div></div></CardHeader><CardContent className="p-5 sm:p-6"><AnimatePresence mode="wait"><motion.div key={step} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 8 }} transition={{ duration: .18 }}>{step === 0 && <div className="space-y-5">{!examId && <ExamTemplatePicker selected={activeTemplate} onSelect={applyTemplate}/>}<BasicInformation draft={draft} update={update} errors={validateStep(0)}/></div>} {step === 1 && <ExamSettingsForm settings={draft.settings} totalMarks={totalMarks} errors={validateStep(1)} onChange={updateSettings}/>} {step === 2 && <ExamAudienceForm audienceMode={draft.audienceMode ?? "profile"} studentGroupIds={draft.studentGroupIds ?? []} studentIds={draft.studentIds ?? []} grade={draft.grade} examClassName={draft.className} errors={validateStep(2)} onChange={updateAudience}/>} {step === 3 && <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-muted/35 p-3">
-                <p className="min-w-0 flex-1 text-[11px] leading-5 text-muted-foreground">{examId ? "سؤال‌های آزمون‌های قبلی در بانک‌اند؛ کپی‌شان کنید یا همین‌جا یکی تازه بسازید. با بازگشت، این صفحه از سرور تازه می‌شود." : "برای افزودن از بانک، اول پیش‌نویس را ذخیره کنید تا آزمون شناسه بگیرد."}</p>
-                {examId ? <Button asChild variant="outline" size="sm"><Link href={`/teacher/questions?exam=${examId}`}><ListChecks className="h-3.5 w-3.5"/>افزودن از بانک</Link></Button> : <Button variant="outline" size="sm" onClick={() => void persist("draft")} disabled={busy || !online}><Save className="h-3.5 w-3.5"/>{saving === "draft" ? "در حال ذخیره…" : "ذخیرهٔ پیش‌نویس برای افزودن از بانک"}</Button>}
+                <p className="min-w-0 flex-1 text-[11px] leading-5 text-muted-foreground">
+                  سؤال‌های آزمون‌های قبلی در بانک‌اند؛ کپی‌شان کنید یا همین‌جا یکی تازه بسازید. تا ذخیره یا انتشار، همه‌چیز فقط در همین صفحه است.
+                </p>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setBankOpen(true)} disabled={busy || !online}>
+                    <Library className="h-3.5 w-3.5"/>انتخاب از بانک
+                  </Button>
+                  <Button asChild variant="ghost" size="sm">
+                    <Link href={examId ? `/teacher/questions?exam=${examId}` : "/teacher/questions"}>
+                      <ListChecks className="h-3.5 w-3.5"/>مدیریت بانک
+                    </Link>
+                  </Button>
+                </div>
               </div>
               <TeacherQuestionBuilder questions={draft.questions} onChange={(questions) => update("questions", questions)}/>
+              <QuestionBankPicker open={bankOpen} onClose={() => setBankOpen(false)} takenIds={takenBankIds} onPick={addFromBank}/>
             </div>} {step === 4 && <ScheduleForm schedule={draft.schedule} onChange={updateSchedule} errors={validateStep(4)}/>} {step === 5 && <ReviewPublish draft={draft} totalMarks={totalMarks} validation={validation}/>}</motion.div></AnimatePresence>{error && <div role="alert" className="mt-5 flex flex-wrap items-center gap-3 rounded-2xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs leading-6 text-rose-800 dark:text-rose-300"><AlertTriangle className="h-4 w-4 shrink-0 text-danger"/><span className="flex-1">{error}</span>{dirty && <Button variant="outline" size="sm" disabled={busy || !online} onClick={() => void persist(lastMode)}><RefreshCw className="h-3.5 w-3.5"/>تلاش دوباره</Button>}<Button variant="ghost" size="sm" onClick={clearError}>بستن</Button></div>}<div className="sticky bottom-0 -mx-5 mt-8 flex flex-wrap items-center gap-2 border-t bg-card/95 px-5 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-sm sm:static sm:mx-0 sm:gap-3 sm:bg-transparent sm:px-0 sm:py-0 sm:pt-5 sm:backdrop-blur-none">
       <Button variant="outline" className="flex-1 sm:flex-none" onClick={() => setStep((current) => Math.max(current - 1, 0))} disabled={step === 0 || busy}><ArrowRight className="h-4 w-4"/>قبلی</Button>
       {step < steps.length - 1

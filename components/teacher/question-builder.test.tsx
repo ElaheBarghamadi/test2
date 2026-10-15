@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { TeacherQuestionBuilder, blankQuestion, questionIssues } from "@/components/teacher/question-builder";
+import { TeacherQuestionBuilder, blankQuestion, cloneQuestion, questionIssues } from "@/components/teacher/question-builder";
 import type { Question } from "@/lib/types/domain";
 
 const option = (id: string, label: string, isCorrect = false) => ({ id, label, value: id, isCorrect });
@@ -266,5 +266,79 @@ describe("optional sections stay out of the way", () => {
     const media = screen.getByRole("button", { name: /پاسخ رسانه‌ای دانش‌آموز/ });
     expect(media.getAttribute("aria-expanded")).toBe("true");
     expect(media.textContent).toContain("صدا");
+  });
+});
+
+/**
+ * Duplicating a question, and copying one in from the bank, both go through `cloneQuestion`: option ids are
+ * namespaced under the new question id, so the answer key has to be re-expressed against them.
+ *
+ * It used to hard-code the first option instead. `toApiQuestionPayload` writes `is_correct` from
+ * `correctOptionId`, so every copy was silently re-keyed to «گزینهٔ الف» — a teacher who duplicated a
+ * question in order to reword it got a paper whose key no longer matched the answer they had set, and
+ * nothing on screen hinted at it.
+ */
+describe("cloneQuestion keeps the answer key", () => {
+  const single = {
+    id: "q1", order: 1, stem: "کدام‌یک واحد قدرت است؟", type: "single_choice", points: 2, required: true,
+    options: [option("o1", "وات"), option("o2", "ژول", true), option("o3", "نیوتن")], correctOptionId: "o2",
+  } as Extract<Question, { type: "single_choice" }>;
+  const multi = {
+    id: "q2", order: 2, stem: "کدام‌ها صحیح‌اند؟", type: "multiple_choice", points: 3, required: true,
+    options: [option("a", "یک", true), option("b", "دو"), option("c", "سه", true)], correctOptionIds: ["a", "c"],
+  } as Extract<Question, { type: "multiple_choice" }>;
+
+  it("keeps a single-choice key that is not the first option", () => {
+    const copy = cloneQuestion(single, "q1-copy") as Extract<Question, { type: "single_choice" }>;
+
+    expect(copy.options.map((item) => item.id)).toEqual(["q1-copy-option-0", "q1-copy-option-1", "q1-copy-option-2"]);
+    expect(copy.correctOptionId).toBe("q1-copy-option-1");
+    // The per-option flags and the id have to agree, or the editor and the payload disagree about the key.
+    expect(copy.options.map((item) => item.label === "ژول" ? item.isCorrect : !item.isCorrect)).toEqual([true, true, true]);
+  });
+
+  it("keeps every correct answer of a multi-answer question, not just the first", () => {
+    const copy = cloneQuestion(multi, "q2-copy") as Extract<Question, { type: "multiple_choice" }>;
+
+    expect(copy.correctOptionIds).toEqual(["q2-copy-option-0", "q2-copy-option-2"]);
+    expect(copy.options.filter((item) => item.isCorrect).map((item) => item.label)).toEqual(["یک", "سه"]);
+  });
+
+  it("leaves an unanswered question unanswered instead of inventing a key", () => {
+    const blank = cloneQuestion(
+      { ...single, correctOptionId: "", options: single.options.map((item) => ({ ...item, isCorrect: false })) },
+      "q3",
+    ) as Extract<Question, { type: "single_choice" }>;
+
+    expect(blank.correctOptionId).toBe("");
+    expect(blank.options.some((item) => item.isCorrect)).toBe(false);
+    // And the publish gate still has something to say about it.
+    expect(questionIssues(blank).length).toBeGreaterThan(0);
+  });
+
+  it("gives the copy its own ids so it cannot collide with the original", () => {
+    const copy = cloneQuestion(single, "q1-copy") as Extract<Question, { type: "single_choice" }>;
+
+    expect(copy.id).toBe("q1-copy");
+    expect(new Set([...single.options.map((item) => item.id), ...copy.options.map((item) => item.id)]).size).toBe(6);
+  });
+});
+
+describe("duplicating a question from the editor", () => {
+  it("copies the answer key across, not just the text", () => {
+    let emitted: Question[] = [];
+    const secondIsCorrect = {
+      ...singleChoice(),
+      options: [option("o1", "وات"), option("o2", "ژول", true)],
+      correctOptionId: "o2",
+    } as Question;
+    render(<Harness initial={[secondIsCorrect]} onEmit={(next) => { emitted = next; }}/>);
+
+    fireEvent.click(screen.getByRole("button", { name: "تکثیر سؤال" }));
+
+    expect(emitted).toHaveLength(2);
+    const copy = emitted[1] as Extract<Question, { type: "single_choice" }>;
+    const keyOption = copy.options.find((item) => item.id === copy.correctOptionId);
+    expect(keyOption?.label).toBe("ژول");
   });
 });

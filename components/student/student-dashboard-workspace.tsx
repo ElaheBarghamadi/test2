@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowLeft, Award, BookOpenCheck, CalendarDays, Gauge, GraduationCap, ListChecks, RefreshCw, School, Timer } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Award, BookOpenCheck, CalendarDays, Gauge, GraduationCap, Hourglass, Layers, ListChecks, RefreshCw, School, Timer } from "lucide-react";
 import { attemptsApi } from "@/lib/api/attempts";
 import { apiErrorMessage } from "@/lib/api/client";
 import { toStudentDashboardExam } from "@/lib/api/mappers";
@@ -137,12 +137,55 @@ export function StudentDashboardWorkspace() {
       action={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className={cn("h-4 w-4", loading && "animate-spin")}/>تازه‌سازی</Button>}
     />
 
-    {identity.length > 0 && (
-      <div className="-mt-3 mb-6 flex flex-wrap items-center gap-2 sm:-mt-5">
-        {user?.schoolName && <IdentityChip icon={School}>{user.schoolName}</IdentityChip>}
-        {user?.grade && <IdentityChip icon={GraduationCap}>{user.grade}</IdentityChip>}
-        {user?.className && <IdentityChip icon={ListChecks}>کلاس {user.className}</IdentityChip>}
-      </div>
+    {(identity.length > 0 || nextUp || summary.pendingCount > 0) && (
+      <section
+        aria-label="وضعیت شما"
+        className="relative -mt-3 isolate mb-6 overflow-hidden rounded-3xl border border-primary/20 bg-gradient-to-bl from-primary/[.09] via-card to-teal-500/[.05] p-4 shadow-soft sm:-mt-5 sm:p-5"
+      >
+        <span aria-hidden="true" className="demo-orb pointer-events-none absolute -left-16 -top-20 -z-10 h-56 w-56 rounded-full bg-primary/10 blur-3xl"/>
+        <div className="relative flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <p className="section-label">وضعیت شما</p>
+            {identity.length > 0 && (
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                {user?.schoolName && <IdentityChip icon={School}>{user.schoolName}</IdentityChip>}
+                {user?.grade && <IdentityChip icon={GraduationCap}>{user.grade}</IdentityChip>}
+                {user?.className && <IdentityChip icon={ListChecks}>کلاس {user.className}</IdentityChip>}
+              </div>
+            )}
+            {summary.pendingCount > 0 && (
+              <p className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] font-bold text-muted-foreground">
+                <Hourglass className="h-3.5 w-3.5 shrink-0 text-warning" aria-hidden="true"/>
+                {toPersianNumber(summary.pendingCount)} آزمون منتظر نمرهٔ آموزگار است
+                <a href="#results" className="font-black text-primary underline-offset-2 hover:underline">کارنامه</a>
+              </p>
+            )}
+          </div>
+
+          {nextUp && (
+            <div className="min-w-0 shrink-0 rounded-2xl border border-border/70 bg-card/85 p-3.5 backdrop-blur-sm lg:max-w-xs lg:flex-1">
+              <p className="text-[10px] font-black text-muted-foreground">
+                {nextUp.availability === "upcoming" ? "نزدیک‌ترین آزمون پیش‌رو" : "آمادهٔ شروع"}
+              </p>
+              {/* Not a heading and not `role="timer"`: the exam's own card owns the `<h2>`, and the resume
+                  banner owns the page's single timer. Duplicating either makes them unaddressable. */}
+              <p className="mt-1 truncate text-sm font-black tracking-tight">{nextUp.title}</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {nextUp.subject}
+                {" · "}
+                {nextUp.availability === "upcoming"
+                  ? `شروع تا ${humanRemaining(Math.max(0, new Date(nextUp.startAt).getTime() - now))}`
+                  : `مهلت تا ${humanRemaining(Math.max(0, new Date(nextUp.endAt).getTime() - now))}`}
+              </p>
+              <Button asChild size="sm" className="mt-3 w-full lg:w-auto">
+                {nextUp.availability === "upcoming"
+                  ? <Link href="#exams">دیدن در فهرست<ArrowLeft className="h-3.5 w-3.5"/></Link>
+                  : <Link href={`/student/exam/${nextUp.id}`}>رفتن به آزمون<ArrowLeft className="h-3.5 w-3.5"/></Link>}
+              </Button>
+            </div>
+          )}
+        </div>
+      </section>
     )}
 
     {error && <Card className="mb-6 border-destructive/30"><CardContent className="flex flex-wrap items-center gap-3 p-4 text-sm text-destructive"><AlertTriangle className="h-4 w-4"/><span className="flex-1">{error}</span><Button variant="outline" size="sm" onClick={() => void load()}>تلاش دوباره</Button></CardContent></Card>}
@@ -150,14 +193,17 @@ export function StudentDashboardWorkspace() {
     {loading && !hasAnything && <DashboardSkeleton/>}
 
     {!loading && !hasAnything && (
-      <Card><CardContent className="p-8 text-center">
-        <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-primary/10 text-primary"><BookOpenCheck className="h-6 w-6"/></span>
-        <h2 className="mt-4 text-base font-black">فعلاً آزمونی ندارید</h2>
-        <p className="mx-auto mt-1.5 max-w-sm text-sm leading-6 text-muted-foreground">
-          آزمون‌های در دسترس همین‌جا نمایش داده می‌شوند. اگر منتظر آزمون خاصی هستید، کمی بعد دوباره سر بزنید.
-        </p>
-        <Button className="mt-5" variant="outline" onClick={() => void load()}><RefreshCw className="h-4 w-4"/>تازه‌سازی</Button>
-      </CardContent></Card>
+      <Card className="overflow-hidden">
+        <CardContent className="relative isolate p-8 text-center sm:p-12">
+          <span aria-hidden="true" className="pointer-events-none absolute -top-24 left-1/2 -z-10 h-56 w-56 -translate-x-1/2 rounded-full bg-primary/[.07] blur-3xl"/>
+          <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-primary/10 text-primary"><BookOpenCheck className="h-6 w-6" aria-hidden="true"/></span>
+          <h2 className="mt-4 text-base font-black">فعلاً آزمونی ندارید</h2>
+          <p className="mx-auto mt-1.5 max-w-sm text-sm leading-6 text-muted-foreground">
+            آزمون‌های در دسترس همین‌جا نمایش داده می‌شوند. اگر منتظر آزمون خاصی هستید، کمی بعد دوباره سر بزنید.
+          </p>
+          <Button className="mt-5" variant="outline" onClick={() => void load()}><RefreshCw className="h-4 w-4"/>تازه‌سازی</Button>
+        </CardContent>
+      </Card>
     )}
 
     {hasAnything && <>
@@ -199,8 +245,11 @@ export function StudentDashboardWorkspace() {
     <section id="exams" aria-labelledby="student-exams-heading" className="mt-8 scroll-mt-24">
       <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div className="min-w-0">
-          <h2 id="student-exams-heading" className="text-lg font-black tracking-tight">آزمون‌های من</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
+          <h2 id="student-exams-heading" className="flex items-center gap-2 text-lg font-black tracking-tight">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary" aria-hidden="true"><ListChecks className="h-4 w-4"/></span>
+            آزمون‌های من
+          </h2>
+          <p className="mt-1.5 text-xs text-muted-foreground">
             {hasAnything
               ? `${toPersianNumber(exams.length)} آزمون · به ترتیب اولویت زمانی`
               : "هر آزمونی که آموزگار برای شما منتشر کند این‌جا ظاهر می‌شود."}
@@ -232,17 +281,33 @@ export function StudentDashboardWorkspace() {
     {hasAnything && <>
       <section id="results" aria-labelledby="student-results-heading" className="mt-10 scroll-mt-24">
         <div className="mb-4">
-          <h2 id="student-results-heading" className="text-lg font-black tracking-tight">نتایج و عملکرد</h2>
-          <p className="mt-1 text-xs text-muted-foreground">کارنامه، روند نمرات و فهرست آزمون‌هایی که تحویل داده‌اید.</p>
+          <h2 id="student-results-heading" className="flex items-center gap-2 text-lg font-black tracking-tight">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary" aria-hidden="true"><Gauge className="h-4 w-4"/></span>
+            نتایج و عملکرد
+          </h2>
+          <p className="mt-1.5 text-xs text-muted-foreground">کارنامه، روند نمرات و فهرست آزمون‌هایی که تحویل داده‌اید.</p>
         </div>
         <StudentPerformancePanel exams={exams}/>
+        <SubjectBreakdown exams={exams}/>
       </section>
 
-      <section aria-labelledby="student-calendar-heading" className="mt-6 scroll-mt-24">
-        <h2 id="student-calendar-heading" className="sr-only">تقویم آزمون‌ها</h2>
+      <section aria-labelledby="student-calendar-heading" className="mt-10 scroll-mt-24">
+        {/* Visible, like the two sections above it: a screen-reader-only heading here made the calendar read
+            as an orphan block that had fallen out of the page. */}
+        <div className="mb-4">
+          <h2 id="student-calendar-heading" className="flex items-center gap-2 text-lg font-black tracking-tight">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary" aria-hidden="true"><CalendarDays className="h-4 w-4"/></span>
+            تقویم آزمون‌ها
+          </h2>
+          <p className="mt-1.5 text-xs text-muted-foreground">برنامهٔ پیش‌رو به ماه شمسی، با ساعت تهران.</p>
+        </div>
         {calendarExams.length > 0
           ? <ExamCalendar exams={calendarExams} role="student"/>
-          : <Card><CardContent className="p-6 text-center text-sm text-muted-foreground">آزمون زمان‌بندی‌شده‌ای برای نمایش در تقویم نیست. {nextUp ? "" : "به محض انتشار، همین‌جا می‌آید."}</CardContent></Card>}
+          : <Card><CardContent className="p-8 text-center">
+              <span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-muted text-muted-foreground"><CalendarDays className="h-5 w-5" aria-hidden="true"/></span>
+              <p className="mt-3 text-sm font-black">آزمون زمان‌بندی‌شده‌ای برای نمایش نیست</p>
+              <p className="mx-auto mt-1.5 max-w-sm text-xs leading-6 text-muted-foreground">به محض انتشار آزمون بعدی، همین‌جا در تقویم شمسی می‌آید.</p>
+            </CardContent></Card>}
       </section>
     </>}
   </PageContainer></PageTransition>;
@@ -274,6 +339,111 @@ export function summarise(exams: Exam[]) {
     passRate: verdicts.length ? Math.round((passedCount / verdicts.length) * 100) : 0,
     trend: scored.length >= 2 ? scored[scored.length - 1].percentage - scored[scored.length - 2].percentage : null,
   };
+}
+
+export interface SubjectAverage { subject: string; sat: number; graded: number; average: number | null; }
+
+/**
+ * Mean published percentage per subject, plus how many papers that mean rests on.
+ *
+ * Derived from the same `GET /student/exams/` payload as everything else on this page, for the same reason:
+ * a per-subject figure that came from a second endpoint could disagree with the card next to it. An
+ * unmarked paper is counted in `sat` and left out of `average`, so «one exam, no result yet» reads as
+ * «نشسته‌اید، نمره‌ای منتشر نشده» rather than as a zero.
+ */
+export function subjectAverages(exams: Exam[]): SubjectAverage[] {
+  const buckets = new Map<string, { total: number; graded: number; sat: number }>();
+  for (const exam of exams) {
+    const key = exam.subject?.trim() || "بدون درس";
+    const entry = buckets.get(key) ?? { total: 0, graded: 0, sat: 0 };
+    entry.sat += 1;
+    const percentage = exam.resultSummary?.percentage;
+    if (percentage !== null && percentage !== undefined) {
+      entry.total += percentage;
+      entry.graded += 1;
+    }
+    buckets.set(key, entry);
+  }
+  return [...buckets.entries()]
+    .map(([subject, value]) => ({
+      subject,
+      sat: value.sat,
+      graded: value.graded,
+      average: value.graded ? Math.max(0, Math.min(100, Math.round(value.total / value.graded))) : null,
+    }))
+    // Subjects with a result first, best first; a subject with nothing published yet sits below them by how
+    // much work is actually in it.
+    .sort((a, b) => (b.average ?? -1) - (a.average ?? -1) || b.sat - a.sat || a.subject.localeCompare(b.subject, "fa"));
+}
+
+/**
+ * Where the average is weak, one subject at a time.
+ *
+ * The overall mean on the stat strip answers "how am I doing"; this answers "what do I revise", which is the
+ * question a student actually has the night before an exam.
+ */
+function SubjectBreakdown({ exams }: { exams: Exam[] }) {
+  const rows = useMemo(() => subjectAverages(exams), [exams]);
+  // One subject is not a breakdown; the stat strip already said everything there is to say.
+  if (rows.length < 2) return null;
+  const weakest = rows.filter((row) => row.average !== null).at(-1);
+
+  return (
+    <Card className="mt-6">
+      <CardContent className="p-5 sm:p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="flex items-center gap-2 text-sm font-black">
+              <Layers className="h-4 w-4 text-primary" aria-hidden="true"/>
+              میانگین به تفکیک درس
+            </h3>
+            <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+              فقط نتایج منتشرشده شمارش می‌شوند؛ آزمونی که هنوز نمره ندارد در میانگین نمی‌آید.
+            </p>
+          </div>
+          {weakest && weakest.average !== null && weakest.average < 70 && (
+            <span className="rounded-xl bg-warning/10 px-2.5 py-1.5 text-[10px] font-black leading-4 text-warning">
+              نیازمند مرور: {weakest.subject}
+            </span>
+          )}
+        </div>
+
+        <ul className="mt-4 space-y-3">
+          {rows.map((row) => (
+            <li key={row.subject} className="min-w-0">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="truncate text-xs font-black">{row.subject}</span>
+                <span className="shrink-0 text-[11px] font-bold text-muted-foreground">
+                  {row.average === null
+                    ? `${toPersianNumber(row.sat)} آزمون · بدون نتیجهٔ منتشرشده`
+                    : `${toPersianNumber(row.average)}٪ · از ${toPersianNumber(row.graded)} نتیجه`}
+                </span>
+              </div>
+              <div
+                className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={row.average ?? 0}
+                aria-label={`میانگین درس ${row.subject}`}
+              >
+                <div
+                  className={cn(
+                    "h-full rounded-full transition-[width] duration-500",
+                    row.average === null ? "bg-border"
+                      : row.average >= 75 ? "bg-success"
+                        : row.average >= 50 ? "bg-primary"
+                          : "bg-warning",
+                  )}
+                  style={{ width: `${row.average ?? 0}%` }}
+                />
+              </div>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
+  );
 }
 
 function IdentityChip({ icon: Icon, children }: { icon: typeof School; children: React.ReactNode }) {

@@ -221,6 +221,23 @@
 /* The finishing beat: stop sweeping, fill the line, then let the container fade out. */
 .nav-progress[data-state="done"] .nav-progress-bar { width: 100%; transform: none; transition: width .18s ease-out; }
 
+/*
+ * ── The modal's dim ─────────────────────────────────────────────────────────────────────────────────
+ *
+ * Theme-aware on purpose: one fixed `slate-950/35` wash is fine on a light page and far too weak in dark
+ * mode, where the page behind is already nearly black and the dialog stops reading as being *above*
+ * anything. The blur is what actually separates the two layers.
+ */
+.dialog-overlay {
+  background: hsl(229 40% 8% / .46);
+  backdrop-filter: blur(6px) saturate(.85);
+  -webkit-backdrop-filter: blur(6px) saturate(.85);
+}
+.dark .dialog-overlay { background: hsl(225 45% 3% / .7); }
+/* A touch that starts on the sheet must not scroll the page behind it; the panel re-enables its own. */
+.dialog-sheet { touch-action: none; }
+.dialog-panel { box-shadow: 0 44px 96px -52px hsl(var(--foreground) / .6), 0 0 0 1px hsl(var(--border) / .45); }
+
 /* Right-to-left: the highlight travels from the start of the line to its end, like the Persian reading order. */
 @keyframes skeleton-sweep { from { background-position: 0% 0; } to { background-position: -300% 0; } }
 

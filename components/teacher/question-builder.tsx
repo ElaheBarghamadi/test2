@@ -23,7 +23,7 @@ const questionTypes: Array<{ type: QuestionType; label: string; description: str
   { type: "short_answer", label: "پاسخ کوتاه", description: "پاسخ متنی کوتاه" },
   { type: "essay", label: "تشریحی", description: "پاسخ نوشتاری" },
 ];
-const questionTypeLabel = Object.fromEntries(questionTypes.map((item) => [item.type, item.label])) as Record<QuestionType, string>;
+export const questionTypeLabel = Object.fromEntries(questionTypes.map((item) => [item.type, item.label])) as Record<QuestionType, string>;
 
 /**
  * What each type actually asks the teacher for.
@@ -48,9 +48,37 @@ const MAX_OPTIONS = 10;
 const newOptionId = () => `option-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 const optionIds = (options: QuestionOption[], correctIds: string[]) => options.map((option) => ({ ...option, isCorrect: correctIds.includes(option.id) }));
 
-function cloneQuestion(question: Question, id = question.id): Question {
-  if (question.type === "single_choice") return { ...question, id, options: question.options.map((option, index) => ({ ...option, id: `${id}-option-${index}`, value: `${id}-option-${index}` })), correctOptionId: question.options[0] ? `${id}-option-0` : undefined };
-  if (question.type === "multiple_choice") return { ...question, id, options: question.options.map((option, index) => ({ ...option, id: `${id}-option-${index}`, value: `${id}-option-${index}` })), correctOptionIds: question.options.map((_, index) => `${id}-option-${index}`).slice(0, 1) };
+/**
+ * A copy of a question under a fresh id, with its answer key carried across.
+ *
+ * Option ids are namespaced under the new question id, so the *index* of the correct option is what has to
+ * travel — and this used to hard-code index 0 for single-choice and `[option-0]` for multi-answer. Since
+ * `toApiQuestionPayload` writes `is_correct` from `correctOptionId`, every duplicated question was quietly
+ * re-keyed to «گزینهٔ الف»: a teacher who copied a question to reword it got a paper whose key no longer
+ * matched the answer they had set, with nothing on screen to suggest it.
+ */
+export function cloneQuestion(question: Question, id = question.id): Question {
+  // Option ids are namespaced under the question id, so the copy cannot collide with the original.
+  const renameOptions = (options: QuestionOption[]) =>
+    options.map((option, index) => ({ ...option, id: `${id}-option-${index}`, value: `${id}-option-${index}` }));
+  // What travels is the *index* of each correct option, re-expressed against the new ids.
+  const keepIndices = (options: QuestionOption[], correct: string[]) =>
+    correct
+      .map((correctId) => options.findIndex((option) => option.id === correctId))
+      .filter((index) => index >= 0)
+      .map((index) => `${id}-option-${index}`);
+
+  if (question.type === "single_choice") {
+    const options = renameOptions(question.options);
+    // An unanswered question stays unanswered: defaulting to the first option here would invent a key.
+    const kept = keepIndices(question.options, question.correctOptionId ? [question.correctOptionId] : []);
+    return { ...question, id, options: optionIds(options, kept), correctOptionId: kept[0] ?? "" };
+  }
+  if (question.type === "multiple_choice") {
+    const options = renameOptions(question.options);
+    const kept = keepIndices(question.options, question.correctOptionIds ?? []);
+    return { ...question, id, options: optionIds(options, kept), correctOptionIds: kept };
+  }
   if (question.type === "matching") return {
     ...question,
     id,
@@ -260,7 +288,36 @@ function QuestionComposerDialog({ open, nextOrder, onClose, onAdd }: { open: boo
       description={draft
         ? "فقط فیلدهای همین نوع سؤال نمایش داده می‌شود. بخش‌های اختیاری بسته‌اند و با یک کلیک باز می‌شوند."
         : "اول نوع سؤال را انتخاب کنید؛ فرم بر اساس همان نوع ساخته می‌شود."}
+      // The action row is the dialog's own footer, not the end of its content: on a laptop the composer is
+      // taller than the viewport, and a button you have to scroll past your own work to find is a button
+      // people stop using.
+      footer={draft ? (
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <Button type="button" variant="ghost" size="sm" onClick={back}>
+            <ArrowRight className="h-3.5 w-3.5"/>بازگشت به انتخاب نوع
+          </Button>
+          <div className="flex items-center gap-3">
+            {issues.length > 0 && (
+              <span className="flex items-center gap-1 text-[11px] font-bold text-warning">
+                <TriangleAlert className="h-3.5 w-3.5" aria-hidden="true"/>
+                {toPersianNumber(issues.length)} مورد مانده
+              </span>
+            )}
+            <Button type="button" onClick={() => { onAdd(draft); onClose(); }}>
+              <Plus className="h-4 w-4"/>{issues.length ? "افزودن و تکمیل در فهرست" : "افزودن سؤال"}
+            </Button>
+          </div>
+        </div>
+      ) : undefined}
     >
+      {/* Two steps, and the step you are on is always visible: a dialog that swaps its whole contents can
+          otherwise feel like it navigated away from what you clicked. */}
+      <ol className="mb-4 flex items-center gap-2 text-[11px] font-black" aria-label="گام‌های افزودن سؤال">
+        <StepPill index={1} label="انتخاب نوع" current={!draft} done={Boolean(draft)}/>
+        <span aria-hidden="true" className="h-px w-6 bg-border"/>
+        <StepPill index={2} label="نوشتن سؤال" current={Boolean(draft)} done={false}/>
+      </ol>
+
       {!draft ? (
         <>
           <QuestionTypeGrid onPick={pick}/>
@@ -271,19 +328,23 @@ function QuestionComposerDialog({ open, nextOrder, onClose, onAdd }: { open: boo
           </p>
         </>
       ) : (
-        <>
-          <QuestionFields question={draft} onChange={setDraft}/>
-          <div className="mt-5 flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
-            <Button type="button" variant="ghost" size="sm" onClick={back}>
-              <ArrowRight className="h-3.5 w-3.5"/>بازگشت به انتخاب نوع
-            </Button>
-            <Button type="button" onClick={() => { onAdd(draft); onClose(); }}>
-              <Plus className="h-4 w-4"/>{issues.length ? "افزودن و تکمیل در فهرست" : "افزودن سؤال"}
-            </Button>
-          </div>
-        </>
+        <QuestionFields question={draft} onChange={setDraft}/>
       )}
     </Dialog>
+  );
+}
+
+function StepPill({ index, label, current, done }: { index: number; label: string; current: boolean; done: boolean }) {
+  return (
+    <li className={cn(
+      "flex items-center gap-1.5 rounded-full border px-2.5 py-1 transition-colors",
+      current ? "border-primary/50 bg-primary/10 text-primary" : done ? "border-success/35 text-success" : "border-border text-muted-foreground",
+    )} aria-current={current ? "step" : undefined}>
+      <span className={cn("grid h-4 w-4 place-items-center rounded-full text-[9px]", current ? "bg-primary text-primary-foreground" : done ? "bg-success text-success-foreground" : "bg-muted")}>
+        {done ? <Check className="h-2.5 w-2.5" aria-hidden="true"/> : toPersianNumber(index)}
+      </span>
+      {label}
+    </li>
   );
 }
 
