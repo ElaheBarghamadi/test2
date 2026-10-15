@@ -53,9 +53,20 @@ export interface User {
   role: Role;
   avatar?: string;
   schoolName?: string;
+  /**
+   * The pupil's own grade and class, straight from their profile.
+   *
+   * `/auth/me/` already sends both; the dashboard greeting reads them so a student sees their own class
+   * rather than a guess derived from whichever exams happen to be listed. Optional because a teacher or an
+   * administrator has neither.
+   */
+  grade?: string;
+  className?: string;
 }
 
-export interface Student extends User { role: "student"; grade: string; className: string; }
+/** `Omit` rather than a plain `extends`: `User` carries both as optional, and narrowing an optional
+ *  property to required in an `extends` clause is a type error. */
+export interface Student extends Omit<User, "grade" | "className"> { role: "student"; grade: string; className: string; }
 export interface Teacher extends User { role: "teacher"; department: string; }
 
 export interface QuestionOption { id: string; label: string; value: string; isCorrect?: boolean; }
@@ -220,6 +231,9 @@ export interface StudentResultSummary {
   passingPercentage: number;
   passed: boolean | null;
   isFinal: boolean;
+  /** When this attempt was handed in. The transcript orders itself by it, so a score trend is a real
+   *  sequence of submissions rather than exams re-sorted by their scheduled window. */
+  submittedAt: string | null;
 }
 
 export interface Exam {

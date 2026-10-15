@@ -299,7 +299,7 @@ describe("toStudentDashboardExam", () => {
     }));
     expect(exam.status).toBe("completed");
     expect(exam.remainingSeconds).toBe(0);
-    expect(exam.resultSummary).toEqual({ score: 8, percentage: 66.66, maximumScore: 12, passingPercentage: 50, passed: true, isFinal: true });
+    expect(exam.resultSummary).toEqual({ score: 8, percentage: 66.66, maximumScore: 12, passingPercentage: 50, passed: true, isFinal: true, submittedAt: "2026-03-20T06:10:00Z" });
   });
 
   it("keeps an unpublished result invisible instead of inventing a zero", () => {

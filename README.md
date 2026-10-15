@@ -101,16 +101,26 @@ manager unless `node_modules/` or `backend/.venv/` is missing.
 ### Demo data
 
 `backend/apps/core/management/commands/seed_demo.py` builds a self-contained school for local testing —
-one admin, one teacher, twelve students with Persian names, and two overlapping student groups:
+one admin, one teacher, twelve students with Persian names, two overlapping student groups, and a term of
+six exams:
 
 ```bash
 cd backend && ./.venv/bin/python manage.py seed_demo
+cd backend && ./.venv/bin/python manage.py seed_demo --no-exams   # accounts and groups only
 ```
 
 Every account uses the password `Examora1234!` (`teacher@examora.test`, `student1@examora.test`, …). The
 command is idempotent and refuses to run unless `DEBUG` is true, so it cannot seed a production database.
-The two groups deliberately share a student: picking both must count that student once, which is the union
-rule the exam audience screen implements.
+
+The exam set is shaped so every state a screen can show is on it at once: one attempt left half-finished
+(`student1` and `student3`, with ~50 minutes on the clock), one exam open now, one scheduled three days out,
+two with published results at different percentages so the score trend has a direction, one handed in but
+not yet marked, and one still a draft that only the teacher can see. Seeding accounts alone leaves every
+dashboard empty, which tells you nothing about whether it works.
+
+Two deliberate details: the groups share a student, so picking both must count that student once — the union
+rule the exam audience screen implements; and the exams reach students both through group membership and
+through the direct `students` list, so one dataset exercises both halves of the audience rule.
 
 ## Frontend
 
@@ -350,6 +360,33 @@ content type the browser claims: JPEG/PNG/WebP for images (SVG is rejected outri
 otherwise be unable to answer. Declared size, dimension bombs, path traversal in the file name and empty
 uploads are all refused, and stored media is served through an authenticated private route with
 `no-store` and `nosniff`.
+
+### Student dashboard
+
+`/student/dashboard` answers three questions in order and then stops: *is anything running right now*,
+*where do I stand*, and *what is next*.
+
+- **Resume band.** A half-finished attempt is the only state where doing nothing costs marks, so it gets a
+  full-width band above everything else with a clock that ticks every second. The clock is derived locally
+  from the server's own `remaining_seconds` — the exam page re-reads the deadline from the server, so a
+  drifting device clock cannot cost anyone time.
+- **Four summary cards.** Actionable count, upcoming count with the nearest start, average percentage, and
+  pass rate. All four are derived from the same `GET /student/exams/` payload the list renders, so the
+  summary and the list cannot disagree, and an unmarked paper is never counted as a zero.
+- **`#exams`** — the filter rail and one card per exam. A colour rail down the start edge means a student
+  scanning twelve rows finds the urgent one without reading a label.
+- **`#results`** — کارنامه (average ring, pass-rate bar, best/worst/pending), a روند نمرات chart ordered by
+  submission time, and a transcript of every paper handed in.
+- **تقویم** — the Persian-calendar month view, no longer folded inside a `<details>`.
+
+The two sidebar links «آزمون‌های من» and «نتایج و عملکرد» point at `#exams` and `#results`; `Sidebar`
+therefore tracks `window.location.hash`, because `usePathname()` excludes it and three links to one page
+would otherwise all light up together — or, with the old exact-match rule, none of the fragment links would
+ever light up at all.
+
+There is deliberately **no** student overview endpoint. Everything above is computed client-side from data
+the student is already allowed to see, which means the panel cannot leak a figure the teacher has not
+published.
 
 ## Student exam workflow
 

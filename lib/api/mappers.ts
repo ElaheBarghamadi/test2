@@ -37,7 +37,11 @@ export function toNotificationPage(dto: ApiNotificationPageDto): { unreadCount: 
 
 export function toUser(dto: ApiUserDto): User {
   const fullName = dto.full_name?.trim() || `${dto.first_name} ${dto.last_name}`.trim() || dto.email;
-  return { id: dto.id, fullName, email: dto.email, role: dto.role as Role, avatar: dto.profile?.avatar ?? undefined, schoolName: dto.school?.name };
+  return {
+    id: dto.id, fullName, email: dto.email, role: dto.role as Role,
+    avatar: dto.profile?.avatar ?? undefined, schoolName: dto.school?.name,
+    grade: dto.profile?.grade || undefined, className: dto.profile?.class_name || undefined,
+  };
 }
 
 export function toStudentAudienceItem(dto: ApiStudentDirectoryItemDto): StudentAudienceItem {
@@ -361,7 +365,7 @@ export function toStudentDashboardExam(dto: ApiAvailableExamDto): Exam {
     resultSummary: result ? {
       score: number(result.score), percentage: result.percentage === null ? null : number(result.percentage),
       maximumScore: number(result.maximum_score), passingPercentage: number(result.passing_percentage),
-      passed: result.passed, isFinal: result.is_final,
+      passed: result.passed, isFinal: result.is_final, submittedAt: dto.attempt?.submitted_at ?? null,
     } : null,
   };
 }

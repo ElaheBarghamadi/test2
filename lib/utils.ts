@@ -41,3 +41,24 @@ export function formatTime(seconds: number) {
   const parts = hours > 0 ? [hours, minutes, remainder] : [minutes, remainder];
   return parts.map((part) => toPersianNumber(String(part).padStart(2, "0"))).join(":");
 }
+
+/**
+ * A time gap in words a student can act on.
+ *
+ * Coarse on purpose. The authoritative countdown lives on the exam page, driven by the server clock; a
+ * dashboard that claims «۴۲ دقیقه و ۱۷ ثانیه» from a snapshot taken thirty seconds ago is a number that
+ * looks precise and is not, which is worse than «۴۲ دقیقه».
+ */
+export function humanRemaining(ms: number): string {
+  const minutes = Math.max(0, Math.floor(ms / 60_000));
+  if (minutes < 1) return "کمتر از یک دقیقه";
+  if (minutes < 60) return `${toPersianNumber(minutes)} دقیقه`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    const rest = minutes % 60;
+    return rest >= 30 ? `${toPersianNumber(hours)} ساعت و نیم` : `${toPersianNumber(hours)} ساعت`;
+  }
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours >= 12 ? `${toPersianNumber(days)} روز و ${toPersianNumber(restHours)} ساعت` : `${toPersianNumber(days)} روز`;
+}

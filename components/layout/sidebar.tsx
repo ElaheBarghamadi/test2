@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { LogOut, Settings2, X } from "lucide-react";
@@ -26,6 +27,19 @@ export function Sidebar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  /**
+   * The current URL fragment, tracked because three of the student's links point at one page and differ
+   * only by it (`#exams`, `#results`). `usePathname()` deliberately excludes the hash, so without this the
+   * fragment links could never light up — and if they were matched by path alone, all three would light up
+   * at once.
+   */
+  const [fragment, setFragment] = useState("");
+  useEffect(() => {
+    const read = () => setFragment(window.location.hash);
+    read();
+    window.addEventListener("hashchange", read);
+    return () => window.removeEventListener("hashchange", read);
+  }, [pathname]);
   const logout = useAuthStore((state) => state.logout);
   const nav = roleNavigation[role];
   const RoleIcon = roleIcon[role];
@@ -66,7 +80,12 @@ export function Sidebar({
 
       <nav className="mt-5 space-y-1" aria-label="ناوبری اصلی">
         {nav.map((item) => {
-          const active = pathname === item.href || (item.href !== dashboardForRole(role) && pathname.startsWith(item.href));
+          const [itemPath, itemFragment] = item.href.split("#");
+          const pathMatches = pathname === itemPath || (itemPath !== dashboardForRole(role) && pathname.startsWith(itemPath));
+          const fragmentSiblings = nav.some((other) => other.href !== item.href && other.href.split("#")[0] === itemPath && other.href.includes("#"));
+          const active = pathMatches && (itemFragment
+            ? `#${itemFragment}` === fragment
+            : fragmentSiblings ? fragment === "" : true);
           const Icon = item.icon;
           return (
             <Link
