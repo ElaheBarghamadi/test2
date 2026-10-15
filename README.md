@@ -392,6 +392,73 @@ There is deliberately **no** student overview endpoint. Everything above is comp
 the student is already allowed to see, which means the panel cannot leak a figure the teacher has not
 published.
 
+## Pre-login surfaces (landing, sign-in, sign-up, recovery)
+
+Everything a visitor sees before they have an account: `/`, `/login`, `/register`, `/forgot-password`,
+`/reset-password`.
+
+**The landing page claims only what is in this repository.** The earlier version opened with a strip of
+invented statistics — «۹۸٪ رضایت مدارس», «+۴۵هزار آزمون موفق», «۲۴/۷ پایداری سرویس» — for a product with no
+deployed customers. School administrators are exactly the audience that checks such numbers, and a figure
+that cannot be substantiated costs more trust than a modest one. What replaced it counts things that exist
+in the source and can be verified there: 6 question types (`questionTypeMeta` / `apps/exams/models.py`),
+3 ways to set an exam's audience, 4 result-detail levels, and 0 external network dependencies. Mock UI in a
+screenshot is labelled «نمای نمونه»; the footer's `href="#"` links now point at real anchors and routes.
+
+**A running exam, in CSS.** `components/shared/exam-demo-card.tsx` plays a 15-second, three-phase loop —
+the timer counts down, the progress bar fills, the question crossfades, a «پاسخ‌ها خودکار ذخیره شد» chip
+appears — and it does all of that with no state, no timers and no re-renders. The keyframes live in
+`globals.css` (`demo-phase-a|b|c`, `demo-progress-fill`, `demo-saved`, `demo-orb`, `button-sheen`,
+`field-shell`). Two rules matter if you touch them:
+
+- `animation-delay` only applies **before the first iteration**, so staggering three infinite loops by 5 s
+  each drifts apart after one cycle. The phases are percentages of one shared duration instead.
+- The global `prefers-reduced-motion` rule collapses every animation onto its final keyframe, which for a
+  crossfading stack means *all three phases invisible at once*. That media query therefore pins phase A
+  visible and phases B and C hidden, so reduced-motion visitors get a still frame of the same scene rather
+  than an empty panel.
+
+**The password meter mirrors Django, and is never a gate.** `lib/auth/password-strength.ts` re-implements
+the four validators `backend/apps/users/passwords.py` maps to Persian — minimum length 8, not entirely
+numeric, not similar to the account, not common — so a sign-up is not refused after a round trip. Two of
+the four cannot be reproduced exactly offline, and both are deliberately biased so the client can never
+say «strong» about something the server will refuse:
+
+| Rule | Server | Client |
+| --- | --- | --- |
+| length | `len(password)` (code points) | `[...password].length`, not `.length` (UTF-16 units) |
+| all-numeric | `str.isdigit()`, Unicode-aware | `/^[\p{Nd}]+$/u`, **not** `/^\d+$/` — «۲۴۶۸» is digits to Django |
+| similar to the account | `SequenceMatcher` ratio 0.7 over every attribute | containment against the name and address on the form, which is stricter |
+| common | a ~1M-entry list | ~60 entries; the server holds the real list |
+
+The meter advises; it does not block. Because "similar" and "common" are approximations, letting them
+disable the submit button would mean the client refusing a password the server would have accepted — a
+dead end the visitor cannot talk their way out of. `components/forms/auth-form.test.tsx` pins that decision.
+
+**Shared field furniture.** `components/forms/auth-field.tsx` holds `Field`, `FieldSelect`, `StrengthMeter`,
+`useCapsLock` and `CapsLockNotice`, used by both the sign-in/sign-up form and the reset screen (which
+previously looked like a different product). Two details in `Field` are load-bearing:
+
+- The border lives on a `.field-shell` wrapper so an icon and a trailing button sit *inside* the box. The
+  `!important`s in its CSS rule are what beat Tailwind's own `focus-visible:ring-*`, which would otherwise
+  paint a second ring over the first.
+- The error message renders **outside** the `<label>`. Everything inside a label becomes part of the
+  field's accessible name, so an error there renames «گذرواژه» to «گذرواژه گذرواژه باید دست‌کم ۸ کاراکتر
+  باشد.» the moment it appears — and breaks any test or screen reader addressing the field by name.
+
+Caps Lock is read from `event.getModifierState("CapsLock")` on key events rather than polled: the browser
+only reports modifier state on an event. It is the one invisible reason a correct password gets refused,
+and the server's answer («ایمیل یا گذرواژه نادرست است») points somewhere else entirely.
+
+**The role picker is two cards, not a `<select>`.** Native radios kept visually as cards (`sr-only` input
+inside a styled `<label>`), so keyboard and assistive-tech behaviour stays native while the choice is
+visible — a collapsed default is how a teacher ends up with a pupil's account. Selecting «آموزگار» also
+removes the grade and class fields, which are a pupil's attributes.
+
+**Dev-only shortcut.** Outside production builds, the sign-in form offers one-click fill of the two
+`seed_demo` accounts. The credentials live in `components/forms/auth-form.tsx` next to the seeder that
+produces them; the branch is dead-code-eliminated from a production bundle.
+
 ## Student exam workflow
 
 The student space is driven by server state end to end: the dashboard groups exams into ready/upcoming/in-progress/completed with the real remaining time, the start screen states the marks, the pass mark, the attempt budget, and the release policy before the clock begins, and the session itself autosaves each answer, keeps flags, survives a dropped connection by queueing writes, and re-reads the deadline from the server every minute and on tab focus so a teacher extension cannot be missed. When the countdown reaches zero the session confirms the deadline with the server, flushes queued answers, and submits itself; leaving mid-exam asks for confirmation first. Results show the published score, the pass verdict, and whether any answer still awaits manual grading. A second browser window can read but not write, so a duplicated tab cannot clobber answers, and `ادامه در این پنجره` moves the attempt deliberately. A calendar of the school's own month (Persian calendar via `Intl`, keyed to `Asia/Tehran`) and an in-app notification bell sit on both dashboards.

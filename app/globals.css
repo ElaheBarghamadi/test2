@@ -212,12 +212,95 @@
 /* Right-to-left: the highlight travels from the start of the line to its end, like the Persian reading order. */
 @keyframes skeleton-sweep { from { background-position: 0% 0; } to { background-position: -300% 0; } }
 
+/*
+ * ── The sign-in panel's living demo ─────────────────────────────────────────────────────────────────
+ *
+ * One 15-second CSS loop, three phases, no JavaScript. A self-playing product mock was the single biggest
+ * thing the auth screen was missing, but driving it with `setInterval` would mean a React re-render every
+ * second on the one page where nothing has loaded yet, plus `act()` warnings in every test that mounts the
+ * form. Keyframes cost nothing at runtime, cannot desync, and one media query below turns the whole thing
+ * off for anyone who has asked for reduced motion.
+ *
+ * The three phases share one duration and are separated purely by percentage, because `animation-delay`
+ * applies before the first iteration only — staggering three 15s loops by 5s each drifts apart after the
+ * first cycle and leaves the panel blank.
+ */
+@keyframes demo-phase-a { 0% { opacity: 1; transform: none; } 28% { opacity: 1; transform: none; } 33.33%, 100% { opacity: 0; transform: translateY(-.5rem); } }
+@keyframes demo-phase-b { 0%, 33.33% { opacity: 0; transform: translateY(.5rem); } 38% { opacity: 1; transform: none; } 61% { opacity: 1; transform: none; } 66.66%, 100% { opacity: 0; transform: translateY(-.5rem); } }
+@keyframes demo-phase-c { 0%, 66.66% { opacity: 0; transform: translateY(.5rem); } 71% { opacity: 1; transform: none; } 96% { opacity: 1; transform: none; } 100% { opacity: 0; transform: translateY(-.5rem); } }
+
+.demo-phase-a { animation: demo-phase-a 15s cubic-bezier(.4, 0, .2, 1) infinite both; }
+.demo-phase-b { animation: demo-phase-b 15s cubic-bezier(.4, 0, .2, 1) infinite both; }
+.demo-phase-c { animation: demo-phase-c 15s cubic-bezier(.4, 0, .2, 1) infinite both; }
+/* Later phases sit on top; without this the outgoing card paints over the incoming one mid-crossfade. */
+.demo-phase-b, .demo-phase-c { z-index: 1; }
+
+@keyframes demo-fill { from { width: 8%; } to { width: 94%; } }
+.demo-progress-fill { animation: demo-fill 15s linear infinite both; }
+
+@keyframes demo-saved { 0%, 6% { opacity: 0; transform: translateY(.4rem) scale(.96); } 10%, 26% { opacity: 1; transform: none; } 31%, 100% { opacity: 0; transform: translateY(-.25rem) scale(.98); } }
+.demo-saved { animation: demo-saved 15s ease-out infinite both; }
+
+@keyframes demo-orb {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  33%  { transform: translate3d(1.5rem, -2rem, 0) scale(1.08); }
+  66%  { transform: translate3d(-1.25rem, 1.5rem, 0) scale(.94); }
+  100% { transform: translate3d(0, 0, 0) scale(1); }
+}
+.demo-orb { animation: demo-orb 22s ease-in-out infinite both; }
+.demo-orb-slow { animation-duration: 31s; animation-direction: reverse; }
+
+/* The submit button's sheen. Sweeps right-to-left, matching the reading direction like the nav bar does. */
+@keyframes button-sheen { from { transform: translateX(120%); } to { transform: translateX(-220%); } }
+.button-sheen::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 38%, hsl(0 0% 100% / .28) 50%, transparent 62%);
+  transform: translateX(120%);
+  content: "";
+  pointer-events: none;
+}
+.button-sheen:hover::after { animation: button-sheen .9s ease-out; }
+
+/* A slow halo behind the focused field, so landing on an input feels like the page noticed. */
+@keyframes field-halo { from { opacity: 0; } to { opacity: 1; } }
+/*
+ * The border lives on the shell, not the control, so an icon and a trailing button can sit inside the same
+ * box as the text instead of floating over it. Controls inside are flattened; the `!important`s are what
+ * beat Tailwind's own `focus-visible:ring-*`, which would otherwise paint a second ring on top of this one.
+ */
+.field-shell {
+  display: flex; align-items: center; gap: .5rem;
+  border: 1px solid hsl(var(--input)); border-radius: .75rem; background: hsl(var(--background));
+  padding-inline: .75rem;
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+.field-shell:focus-within { border-color: hsl(var(--ring) / .55); box-shadow: 0 0 0 4px hsl(var(--ring) / .12); }
+.field-shell.has-error { border-color: hsl(var(--destructive) / .6); }
+.field-shell.has-error:focus-within { box-shadow: 0 0 0 4px hsl(var(--destructive) / .14); }
+.field-shell > input, .field-shell > select, .field-shell > textarea {
+  flex: 1 1 auto; min-width: 0; height: 2.75rem;
+  border-color: transparent !important; background: transparent !important;
+  box-shadow: none !important; outline: none !important; padding-inline: 0 !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
   /* A frozen sweep reads as a rendering bug; a flat block reads clearly as "loading". */
   .skeleton { animation: none !important; background-image: none; background-color: hsl(var(--muted)); }
   /* A frozen sweep would leave the bar off-screen and invisible; hold a plain full-width line instead. */
   .nav-progress-bar { animation: none !important; transform: none !important; width: 100%; }
+  /*
+   * The generic rule above collapses every animation to a single .01ms iteration, which for a crossfading
+   * stack means all three phases land on their final keyframe at once — a blank panel. Phase one is pinned
+   * visible and the other two hidden, so the demo reads as a still frame of the same scene.
+   */
+  .demo-phase-a { opacity: 1 !important; transform: none !important; }
+  .demo-phase-b, .demo-phase-c { opacity: 0 !important; }
+  .demo-progress-fill { width: 42% !important; }
+  .demo-saved { opacity: 1 !important; transform: none !important; }
+  .demo-orb { animation: none !important; transform: none !important; }
+  .button-sheen:hover::after { animation: none !important; transform: translateX(120%); }
 }
 
 /* Small screens get calmer spacing and full-width primary actions without enlarging every data table. */

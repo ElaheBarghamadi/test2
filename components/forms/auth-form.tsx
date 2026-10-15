@@ -1,23 +1,29 @@
 "use client";
 
 import Link from "next/link";
-import { Eye, EyeOff, LoaderCircle, Mail, LockKeyhole, UserRound, UsersRound } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  ArrowLeft, Check, Eye, EyeOff, GraduationCap, LockKeyhole, LoaderCircle, Mail,
+  ShieldCheck, UserRound, UsersRound, Wand2,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { CapsLockNotice, Field, FieldSelect, StrengthMeter, useCapsLock } from "@/components/forms/auth-field";
+import { ExamDemoCard } from "@/components/shared/exam-demo-card";
 import { authErrorMessage, dashboardForRole, useAuthStore } from "@/lib/state/auth-store";
 import { authApi } from "@/lib/api/auth";
 import { useOnlineStatus } from "@/hooks/use-online-status";
 import { useToastStore } from "@/lib/state/toast-store";
 import { safeNextPath } from "@/lib/auth/page-access";
+import { passwordStrength } from "@/lib/auth/password-strength";
+import { cn } from "@/lib/utils";
 
 type Mode = "login" | "register" | "forgot";
-const content: Record<Mode, { title: string; subtitle: string; submit: string }> = {
-  login: { title: "خوش آمدید", subtitle: "برای ادامه به فضای Examora وارد شوید.", submit: "ورود به حساب" },
-  register: { title: "ساخت فضای جدید", subtitle: "در کمتر از چند دقیقه حساب آموزگار یا دانش‌آموز بسازید.", submit: "ساخت حساب" },
-  forgot: { title: "بازیابی گذرواژه", subtitle: "ایمیل حساب را وارد کنید تا پیوند امن ساخت گذرواژهٔ جدید برایتان ارسال شود.", submit: "ارسال پیوند بازیابی" },
+const content: Record<Mode, { title: string; subtitle: string; submit: string; eyebrow: string }> = {
+  login: { eyebrow: "ورود", title: "خوش آمدید", subtitle: "برای ادامه به فضای Examora وارد شوید.", submit: "ورود به حساب" },
+  register: { eyebrow: "شروع کار", title: "ساخت فضای جدید", subtitle: "در کمتر از چند دقیقه حساب آموزگار یا دانش‌آموز بسازید.", submit: "ساخت حساب" },
+  forgot: { eyebrow: "دسترسی مجدد", title: "بازیابی گذرواژه", subtitle: "ایمیل حساب را وارد کنید تا پیوند امن ساخت گذرواژهٔ جدید برایتان ارسال شود.", submit: "ارسال پیوند بازیابی" },
 };
 
 // The same rule the page gate uses, so `?next=` can never become a way to hand a session to another site.
@@ -28,6 +34,17 @@ const offlineCopy = "اتصال اینترنت برقرار نیست؛ پس از
 // capitalises the first letter or turns "name@school.edu" into a suggestion produces a sign-in that
 // "does not work" for reasons the user cannot see.
 const addressInput = { type: "email" as const, dir: "ltr" as const, autoCapitalize: "none" as const, autoCorrect: "off" as const, spellCheck: false, inputMode: "email" as const };
+
+/** Filled by the «حساب نمونه» shortcut. Kept next to `seed_demo`'s own output, which is the source. */
+const DEMO_ACCOUNTS = [
+  { role: "دانش‌آموز", email: "student1@examora.test", password: "Examora1234!" },
+  { role: "آموزگار", email: "teacher@examora.test", password: "Examora1234!" },
+] as const;
+
+const ROLES = [
+  { value: "student", label: "دانش‌آموز", hint: "پایه و کلاس خود را انتخاب می‌کنید", icon: GraduationCap },
+  { value: "teacher", label: "آموزگار", hint: "آزمون می‌سازید و نمره می‌دهید", icon: UsersRound },
+] as const;
 
 export function AuthForm({ mode }: { mode: Mode }) {
   const [showPassword, setShowPassword] = useState(false);
@@ -73,6 +90,14 @@ export function AuthForm({ mode }: { mode: Mode }) {
   const passwordError = submitted && passwordInvalid;
   const nameError = submitted && nameInvalid;
   const confirmationError = submitted && confirmationInvalid;
+
+  // The meter mirrors what the server will check, so it reads the same two fields the server compares
+  // against; a strength bar that ignores the name typed above it would green-light a refusal.
+  const strength = useMemo(
+    () => passwordStrength(password, { name, email }),
+    [password, name, email],
+  );
+  const capsLock = useCapsLock();
 
   useEffect(() => {
     if (authStatus !== "authenticated" || !currentUser) return;
@@ -133,21 +158,178 @@ export function AuthForm({ mode }: { mode: Mode }) {
     } finally { submitting.current = false; setLoading(false); }
   }
 
-  return <div className="auth-panel mx-auto grid w-full max-w-5xl overflow-hidden rounded-3xl border bg-card shadow-lift md:grid-cols-[.9fr_1.1fr]">
-    <aside className="relative hidden min-h-[580px] overflow-hidden bg-gradient-to-br from-indigo-600 via-indigo-600 to-violet-700 p-9 text-white md:flex md:flex-col"><div className="absolute -left-28 -top-20 h-72 w-72 rounded-full bg-white/10 blur-2xl"/><div className="absolute -bottom-20 -right-16 h-64 w-64 rounded-full bg-teal-300/20 blur-2xl"/><div className="relative"><p className="text-sm font-bold text-indigo-200 dark:text-indigo-300">Examora for education</p><h2 className="mt-4 text-3xl font-black leading-tight">ارزیابی مدرن، برای آموزش معنادار.</h2><p className="mt-5 text-sm leading-7 text-indigo-100 dark:text-indigo-300">با محیطی آرام برای دانش‌آموز و ابزارهای روشن برای آموزگار، مسیر آزمون را بهتر کنید.</p></div><div className="relative mt-auto space-y-3">{["تجربهٔ فارسی و راست‌چین", "گزارش‌های روشن و قابل فهم", "برای مدرسه، نه صرفاً یک آزمون"].map((item) => <div key={item} className="rounded-xl border border-white/15 bg-white/10 px-3 py-2.5 text-xs font-bold">{item}</div>)}</div></aside>
-    <div className="flex items-center justify-center p-5 sm:p-10"><Card className="w-full max-w-md border-0 shadow-none"><div><p className="section-label">{mode === "login" ? "ورود" : mode === "register" ? "شروع کار" : "دسترسی مجدد"}</p><h1 className="mt-2 text-2xl font-black">{copy.title}</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">{copy.subtitle}</p></div>
-      <form className="mt-7 space-y-4" noValidate onSubmit={handleSubmit}>
-        {mode === "register" && <><Field label="نام و نام خانوادگی" icon={UserRound} error={nameError ? "نام خود را وارد کنید." : undefined}><Input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" placeholder="مثلاً سارا محمدی" aria-invalid={nameError}/></Field><Field label="نقش شما" icon={UsersRound}><select value={role} onChange={(event) => setRole(event.target.value as "student" | "teacher")} className="flex h-11 w-full rounded-xl border border-input bg-background px-3 text-base font-medium outline-none focus:ring-2 focus:ring-ring sm:text-sm"><option value="student">دانش‌آموز</option><option value="teacher">آموزگار</option></select></Field><Field label="کد عضویت مدرسه (اختیاری)" icon={UsersRound}><Input value={schoolCode} onChange={(event) => setSchoolCode(event.target.value.toUpperCase())} autoComplete="off" maxLength={16} placeholder="مثلاً AB12CD34" dir="ltr" autoCapitalize="characters" autoCorrect="off" spellCheck={false}/></Field>{role === "student" && <div className="grid gap-4 sm:grid-cols-2"><Field label="پایه" icon={UserRound}><select value={grade} onChange={(event) => setGrade(event.target.value)} className="flex h-11 w-full rounded-xl border border-input bg-background px-3 text-base font-medium outline-none focus:ring-2 focus:ring-ring sm:text-sm"><option>پایه دهم</option><option>پایه یازدهم</option><option>پایه دوازدهم</option></select></Field><Field label="کلاس" icon={UserRound}><select value={className} onChange={(event) => setClassName(event.target.value)} className="flex h-11 w-full rounded-xl border border-input bg-background px-3 text-base font-medium outline-none focus:ring-2 focus:ring-ring sm:text-sm"><option>تجربی ۲</option><option>تجربی ۱</option><option>ریاضی ۱</option><option>انسانی ۱</option></select></Field></div>}</>}
-        <Field label="ایمیل" icon={Mail} error={emailError ? "یک ایمیل معتبر وارد کنید." : undefined}><Input value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@school.edu" aria-invalid={emailError} {...addressInput}/></Field>{mode !== "forgot" && <Field label="گذرواژه" icon={LockKeyhole} error={passwordError ? "گذرواژه باید دست‌کم ۸ کاراکتر باشد." : undefined}><div className="relative"><Input value={password} onChange={(event) => setPassword(event.target.value)} type={showPassword ? "text" : "password"} autoComplete={mode === "login" ? "current-password" : "new-password"} className="pl-10" placeholder="••••••••" aria-invalid={passwordError} dir="ltr"/><button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute left-2 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-muted-foreground hover:bg-muted" aria-label={showPassword ? "پنهان کردن گذرواژه" : "نمایش گذرواژه"}>{showPassword ? <EyeOff className="h-4 w-4"/> : <Eye className="h-4 w-4"/>}</button></div></Field>}
-        {mode === "register" && <Field label="تکرار گذرواژه" icon={LockKeyhole} error={confirmationError ? "تکرار گذرواژه با گذرواژهٔ بالا یکسان نیست." : undefined}><Input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} type={showPassword ? "text" : "password"} autoComplete="new-password" placeholder="••••••••" aria-invalid={confirmationError} dir="ltr"/></Field>}
-        {mode === "login" && <div className="text-left"><Link href="/forgot-password" className="text-xs font-bold text-primary hover:underline">گذرواژه را فراموش کرده‌اید؟</Link></div>}
-        {!online && <p role="status" className="rounded-xl bg-amber-500/10 px-3 py-2 text-xs font-bold leading-6 text-amber-800 dark:text-amber-300">اتصال اینترنت برقرار نیست. همین که وصل شد، دکمه فعال می‌شود.</p>}
-        {serverError && <p role="alert" className="rounded-xl bg-destructive/10 px-3 py-2 text-xs font-bold text-destructive">{serverError}</p>}
-        {recoverySent && <p role="status" className="rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-bold leading-6 text-emerald-800 dark:text-emerald-300">اگر این ایمیل برای یک حساب فعال باشد، پیوند بازیابی ارسال شده است. پوشهٔ هرزنامه را هم بررسی کنید.</p>}
-        <Button type="submit" size="lg" className="mt-2 w-full" disabled={loading || recoverySent || !online}>{loading && <LoaderCircle className="h-4 w-4 animate-spin"/>}{recoverySent ? "پیوند ارسال شد" : copy.submit}</Button>
-      </form>
-      <div className="mt-6 text-center text-xs text-muted-foreground">{mode === "login" ? <>حساب ندارید؟ <Link href="/register" className="font-bold text-primary hover:underline">ساخت حساب</Link></> : mode === "register" ? <>از قبل حساب دارید؟ <Link href="/login" className="font-bold text-primary hover:underline">وارد شوید</Link></> : <Link href="/login" className="font-bold text-primary hover:underline">بازگشت به ورود</Link>}</div>
-    </Card></div>
-  </div>;
+  /** Typing the demo credentials is the slowest part of a demo; this removes it without inventing data. */
+  function fillDemo(account: { email: string; password: string }) {
+    setEmail(account.email);
+    setPassword(account.password);
+    setConfirmation(account.password);
+    setSubmitted(false);
+    setServerError(null);
+  }
+
+  return (
+    <div className="auth-panel mx-auto grid w-full max-w-6xl overflow-hidden rounded-[1.75rem] border bg-card shadow-lift lg:grid-cols-[1.02fr_.98fr]">
+      <BrandPanel mode={mode}/>
+
+      <div className="flex items-center justify-center p-5 sm:p-8 lg:p-11">
+        <div className="w-full max-w-md">
+          <p className="section-label">{copy.eyebrow}</p>
+          <h1 className="mt-3 text-2xl font-black tracking-tight sm:text-[1.75rem]">{copy.title}</h1>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">{copy.subtitle}</p>
+
+          <form className="mt-7 space-y-4" noValidate onSubmit={handleSubmit}>
+            {mode === "register" && <>
+              <Field label="نام و نام خانوادگی" icon={UserRound} error={nameError ? "نام خود را وارد کنید." : undefined}>
+                <Input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" placeholder="مثلاً سارا محمدی" aria-invalid={nameError || undefined}/>
+              </Field>
+
+              <fieldset>
+                <legend className="mb-1.5 flex items-center gap-1.5 text-xs font-bold"><UsersRound className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true"/>نقش شما</legend>
+                <div className="grid grid-cols-2 gap-2.5">
+                  {ROLES.map((item) => {
+                    const Icon = item.icon;
+                    const active = role === item.value;
+                    return (
+                      <label
+                        key={item.value}
+                        className={cn(
+                          "relative cursor-pointer rounded-2xl border p-3 text-right transition-all duration-200",
+                          active
+                            ? "border-primary/55 bg-primary/[.07] shadow-[0_0_0_3px_hsl(var(--ring)/.10)]"
+                            : "hover:border-primary/35 hover:bg-muted/50",
+                        )}
+                      >
+                        <input type="radio" name="role" value={item.value} checked={active} onChange={() => setRole(item.value)} className="sr-only"/>
+                        <span className={cn("grid h-8 w-8 place-items-center rounded-xl transition-colors", active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+                          <Icon className="h-4 w-4" aria-hidden="true"/>
+                        </span>
+                        <span className={cn("mt-2 block text-xs font-black", active && "text-primary")}>{item.label}</span>
+                        <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{item.hint}</span>
+                        {active && <Check className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-primary" aria-hidden="true"/>}
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
+
+              <Field label="کد عضویت مدرسه (اختیاری)" icon={ShieldCheck} hint="اگر مدرسهٔ شما کد داده، اینجا وارد کنید">
+                <Input value={schoolCode} onChange={(event) => setSchoolCode(event.target.value.toUpperCase())} autoComplete="off" maxLength={16} placeholder="مثلاً AB12CD34" dir="ltr" autoCapitalize="characters" autoCorrect="off" spellCheck={false} className="text-center tracking-[.18em]"/>
+              </Field>
+
+              {role === "student" && (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="پایه" icon={GraduationCap}>
+                    <FieldSelect value={grade} onChange={setGrade} options={["پایه دهم", "پایه یازدهم", "پایه دوازدهم"]}/>
+                  </Field>
+                  <Field label="کلاس" icon={UsersRound}>
+                    <FieldSelect value={className} onChange={setClassName} options={["تجربی ۲", "تجربی ۱", "ریاضی ۱", "انسانی ۱"]}/>
+                  </Field>
+                </div>
+              )}
+            </>}
+
+            <Field label="ایمیل" icon={Mail} error={emailError ? "یک ایمیل معتبر وارد کنید." : undefined}>
+              <Input value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="name@school.edu" aria-invalid={emailError || undefined} className="text-left" {...addressInput}/>
+            </Field>
+
+            {mode !== "forgot" && <>
+              <Field
+                label="گذرواژه"
+                icon={LockKeyhole}
+                error={passwordError ? "گذرواژه باید دست‌کم ۸ کاراکتر باشد." : undefined}
+                trailing={
+                  <button type="button" onClick={() => setShowPassword(!showPassword)} className="-me-1 shrink-0 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" aria-label={showPassword ? "پنهان کردن گذرواژه" : "نمایش گذرواژه"} aria-pressed={showPassword}>
+                    {showPassword ? <EyeOff className="h-4 w-4"/> : <Eye className="h-4 w-4"/>}
+                  </button>
+                }
+              >
+                <Input value={password} onChange={(event) => setPassword(event.target.value)} type={showPassword ? "text" : "password"} autoComplete={mode === "login" ? "current-password" : "new-password"} placeholder="••••••••" aria-invalid={passwordError || undefined} dir="ltr" className="text-left" {...capsLock.handlers}/>
+              </Field>
+
+              {/* Outside the `<label>`: a strength meter inside it would become part of the field's
+                  accessible name, and «گذرواژه» would stop being «گذرواژه». */}
+              {capsLock.on && <CapsLockNotice/>}
+              {mode === "register" && <StrengthMeter strength={strength}/>}
+            </>}
+
+            {mode === "register" && (
+              <Field label="تکرار گذرواژه" icon={LockKeyhole} error={confirmationError ? "تکرار گذرواژه با گذرواژهٔ بالا یکسان نیست." : undefined}>
+                <Input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} type={showPassword ? "text" : "password"} autoComplete="new-password" placeholder="••••••••" aria-invalid={confirmationError || undefined} dir="ltr" className="text-left"/>
+              </Field>
+            )}
+
+            {mode === "login" && (
+              <div className="flex items-center justify-between gap-3 pt-0.5">
+                <Link href="/forgot-password" className="text-xs font-bold text-primary transition-colors hover:underline">گذرواژه را فراموش کرده‌اید؟</Link>
+                {process.env.NODE_ENV !== "production" && (
+                  <div className="flex items-center gap-1.5" title="حساب‌های نمونهٔ seed_demo">
+                    <Wand2 className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true"/>
+                    <span className="text-[10px] font-bold text-muted-foreground">حساب نمونه:</span>
+                    {DEMO_ACCOUNTS.map((account) => (
+                      <button key={account.email} type="button" onClick={() => fillDemo(account)} className="rounded-lg border bg-card px-2 py-1 text-[10px] font-bold text-muted-foreground transition-colors hover:border-primary/45 hover:text-primary">
+                        {account.role}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!online && <p role="status" className="rounded-xl bg-amber-500/10 px-3 py-2 text-xs font-bold leading-6 text-amber-800 dark:text-amber-300">اتصال اینترنت برقرار نیست. همین که وصل شد، دکمه فعال می‌شود.</p>}
+            {serverError && <p role="alert" className="rounded-xl bg-destructive/10 px-3 py-2 text-xs font-bold leading-6 text-destructive">{serverError}</p>}
+            {recoverySent && <p role="status" className="rounded-xl bg-emerald-500/10 px-3 py-2 text-xs font-bold leading-6 text-emerald-800 dark:text-emerald-300">اگر این ایمیل برای یک حساب فعال باشد، پیوند بازیابی ارسال شده است. پوشهٔ هرزنامه را هم بررسی کنید.</p>}
+
+            <Button type="submit" size="lg" className="button-sheen relative mt-2 w-full overflow-hidden bg-gradient-to-l from-primary to-indigo-500 text-base shadow-lift transition-transform hover:-translate-y-0.5 active:translate-y-0" disabled={loading || recoverySent || !online}>
+              {loading && <LoaderCircle className="h-4 w-4 animate-spin"/>}
+              {!loading && <ArrowLeft className="h-4 w-4"/>}
+              {recoverySent ? "پیوند ارسال شد" : copy.submit}
+            </Button>
+          </form>
+
+          <div className="mt-6 text-center text-xs text-muted-foreground">
+            {mode === "login" ? <>حساب ندارید؟ <Link href="/register" className="font-bold text-primary hover:underline">ساخت حساب</Link></>
+              : mode === "register" ? <>از قبل حساب دارید؟ <Link href="/login" className="font-bold text-primary hover:underline">وارد شوید</Link></>
+                : <Link href="/login" className="font-bold text-primary hover:underline">بازگشت به ورود</Link>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
-function Field({ label, icon: Icon, error, children }: { label: string; icon: typeof Mail; error?: string; children: React.ReactNode }) { return <label className="block"><span className="mb-1.5 flex items-center gap-1.5 text-xs font-bold"><Icon className="h-3.5 w-3.5 text-muted-foreground"/>{label}</span>{children}{error && <span className="mt-1.5 block text-xs font-bold text-destructive">{error}</span>}</label>; }
+
+/**
+ * The half of the screen that sells the product while the other half collects an address.
+ *
+ * Everything that moves here is CSS (see the `demo-*` keyframes in `globals.css`): one 15-second loop with
+ * three phases, no timers, no re-renders, and one reduced-motion rule that holds the first phase as a still.
+ */
+const PANEL_POINTS = ["تجربهٔ فارسی و راست‌چین", "گزارش‌های روشن و قابل فهم", "برای مدرسه، نه صرفاً یک آزمون"];
+
+function BrandPanel({ mode }: { mode: Mode }) {
+  const heading = mode === "forgot" ? "بازگشت به حساب، بدون دردسر." : "ارزیابی مدرن، برای آموزش معنادار.";
+  return (
+    <aside className="relative hidden min-h-[600px] overflow-hidden bg-gradient-to-br from-indigo-600 via-indigo-600 to-violet-700 p-8 text-white lg:flex lg:flex-col xl:p-10">
+      <span aria-hidden="true" className="demo-orb absolute -left-28 -top-24 h-72 w-72 rounded-full bg-white/12 blur-3xl"/>
+      <span aria-hidden="true" className="demo-orb demo-orb-slow absolute -bottom-24 -right-20 h-64 w-64 rounded-full bg-teal-300/22 blur-3xl"/>
+      <span aria-hidden="true" className="soft-grid pointer-events-none absolute inset-0 opacity-[.14]"/>
+
+      <div className="relative">
+        <p className="text-xs font-black uppercase tracking-[.18em] text-indigo-200">Examora for education</p>
+        <h2 className="mt-4 text-[1.75rem] font-black leading-snug xl:text-3xl">{heading}</h2>
+        <p className="mt-4 max-w-sm text-sm leading-7 text-indigo-100">
+          محیطی آرام برای دانش‌آموز و ابزارهایی روشن برای آموزگار؛ از ساخت سؤال تا تحلیل نتیجه، در یک فضای منسجم.
+        </p>
+      </div>
+
+      <ExamDemoCard tone="glass" className="relative mt-7"/>
+
+      <ul className="relative mt-auto space-y-2 pt-7">
+        {PANEL_POINTS.map((point) => (
+          <li key={point} className="flex items-center gap-2.5 rounded-xl border border-white/12 bg-white/[.07] px-3 py-2.5 text-xs font-bold">
+            <Check className="h-3.5 w-3.5 shrink-0 text-teal-200" aria-hidden="true"/>{point}
+          </li>
+        ))}
+      </ul>
+    </aside>
+  );
+}

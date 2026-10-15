@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 /**
  * Signing in and signing up, from the form the user actually touches.
@@ -10,6 +10,9 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
  *  - sign-up carries grade and class in the same request that creates the account, so a dropped
  *    connection cannot leave an account without a profile behind a form that says it failed;
  *  - with no network, the form says so instead of spinning, and the button is not a trap.
+ *
+ * Plus two of the new affordances: the password meter has to *advise* without ever refusing a password the
+ * server would accept, and Caps Lock has to be named, because "credentials incorrect" points nowhere.
  */
 const api = vi.hoisted(() => ({
   register: vi.fn(),
@@ -99,7 +102,9 @@ describe("the sign-up form", () => {
   it("creates the account, its role and its grade in a single request", async () => {
     render(<AuthForm mode="register"/>);
     fillRegistration();
-    fireEvent.change(screen.getByLabelText(/نقش شما/), { target: { value: "student" } });
+    // The role is two visible cards, not a collapsed default: a pupil who never noticed the control still
+    // has to be able to see which one is chosen.
+    expect((screen.getByRole("radio", { name: /دانش‌آموز/ }) as HTMLInputElement).checked).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "ساخت حساب" }));
 
     await waitFor(() => expect(api.register).toHaveBeenCalledTimes(1));
@@ -142,6 +147,61 @@ describe("the sign-up form", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("این ایمیل قبلاً ثبت شده است.");
+  });
+});
+
+describe("the sign-up form: role and password guidance", () => {
+  it("drops grade and class when the teacher card is the one chosen", async () => {
+    render(<AuthForm mode="register"/>);
+    fillRegistration();
+    fireEvent.click(screen.getByRole("radio", { name: /آموزگار/ }));
+
+    // They are a pupil's attributes; asking a teacher for them produced empty fields on real accounts.
+    expect(screen.queryByLabelText(/^پایه$/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "ساخت حساب" }));
+
+    await waitFor(() => expect(api.register).toHaveBeenCalledTimes(1));
+    expect(api.register.mock.calls[0][0]).toMatchObject({ role: "teacher", grade: undefined, class_name: undefined });
+  });
+
+  it("advises on a weak password without refusing one the server might accept", async () => {
+    render(<AuthForm mode="register"/>);
+    fillRegistration();
+    fireEvent.change(screen.getByLabelText(/^گذرواژه$/), { target: { value: "24681357" } });
+    fireEvent.change(screen.getByLabelText(/تکرار گذرواژه/), { target: { value: "24681357" } });
+
+    // Eight digits clears the length rule and the two the client can only approximate — and still fails
+    // the server's "not entirely numeric" check, so the meter has to say so in plain words.
+    expect(screen.getByText("ضعیف")).toBeTruthy();
+    expect(screen.getByText("فقط از عدد تشکیل نشده باشد").closest("li")?.className).not.toContain("text-success");
+
+    // Deliberate: the client's "too similar" and "too common" checks are approximations of the server's,
+    // and approximations must not be allowed to lock someone out of their own sign-up. The server decides.
+    fireEvent.click(screen.getByRole("button", { name: "ساخت حساب" }));
+    await waitFor(() => expect(api.register).toHaveBeenCalledTimes(1));
+  });
+
+});
+
+describe("the sign-in form: keyboard and demo shortcuts", () => {
+  it("names Caps Lock instead of letting a correct password fail silently", async () => {
+    render(<AuthForm mode="login"/>);
+    const input = screen.getByLabelText(/^گذرواژه$/);
+    const event = createEvent.keyUp(input, { key: "A" });
+    // jsdom reports no modifier state; the shadowing own property is what the handler will actually read.
+    (event as unknown as { getModifierState: (key: string) => boolean }).getModifierState = (key) => key === "CapsLock";
+    fireEvent(input, event);
+
+    expect(await screen.findByText("Caps Lock روشن است.")).toBeTruthy();
+  });
+
+  it("fills the seeded demo account in one click, outside production", async () => {
+    render(<AuthForm mode="login"/>);
+    fireEvent.click(screen.getByRole("button", { name: "دانش‌آموز" }));
+
+    expect((screen.getByLabelText(/ایمیل/) as HTMLInputElement).value).toBe("student1@examora.test");
+    expect((screen.getByLabelText(/^گذرواژه$/) as HTMLInputElement).value).toBe("Examora1234!");
+    expect(api.login).not.toHaveBeenCalled();
   });
 });
 
