@@ -56,6 +56,27 @@ def governs_nothing(user: Any) -> bool:
     return is_school_admin(user) and school_of(user) is None
 
 
+def may_administer_account(actor: Any, target: Any) -> bool:
+    """Whether this caller may change an account's role, password, active flag or sessions.
+
+    Being *in scope* is not the same as being *governable*. `scope_users` reaches everyone whose membership
+    points at the caller's school, and a platform administrator who happens to hold a membership there is in
+    that set like anyone else. Before this rule existed, that made the seed data's principal able to set the
+    platform administrator's password, demote them to a student, deactivate them and cut their sessions —
+    all answered 200 — which turns supervision of one school into control of the whole network. The earlier
+    guard only refused *granting* an administrative role, so *removing* one sailed through.
+
+    Authority over an administrative account therefore comes from the platform, never from a membership row.
+    Self-service stays allowed: changing your own name or password is not an escalation, and the role, school
+    and deactivation rules around it are enforced separately.
+    """
+    if is_platform_admin(actor):
+        return True
+    if getattr(target, "pk", None) is not None and getattr(target, "pk", None) == getattr(actor, "pk", None):
+        return True
+    return getattr(target, "role", None) not in {User.Role.ADMIN, User.Role.SCHOOL_ADMIN}
+
+
 def exam_school(exam: Any) -> School | None:
     """The school a paper belongs to: its teacher's school, not its own field."""
     return school_of(getattr(exam, "teacher", None))

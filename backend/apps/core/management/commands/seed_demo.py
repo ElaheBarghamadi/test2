@@ -33,6 +33,10 @@ from apps.organizations.models import School, SchoolMembership
 from apps.users.models import StudentGroup, User
 
 SCHOOL_NAME = "دبیرستان نمونهٔ بررسی"
+# A second school, deliberately small: without one, "scoped to your school" and "the whole network" return
+# the same numbers and neither the principal's console nor the platform administrator's school ranking can
+# be seen to work.
+SECOND_SCHOOL_NAME = "دبیرستان دخترانهٔ نور"
 PASSWORD = "Examora1234!"
 
 FIRST_NAMES = ["سارا", "امیرعلی", "نگار", "محمدحسین", "ریحانه", "ابوالفضل", "مریم", "یاسین", "زهرا", "آرش", "هانیه", "سینا"]
@@ -146,8 +150,21 @@ class Command(BaseCommand):
 
         admin = self._account("admin@examora.test", "مدیر", "سامانه", User.Role.ADMIN, is_staff=True)
         teacher = self._account("teacher@examora.test", "الهام", "برقشهر", User.Role.TEACHER)
-        for user in (admin, teacher):
+        # The principal of the seeded school. `/admin/*` is one console serving two roles — the platform
+        # administrator sees the network, the school administrator sees the one school their membership
+        # points at — and before this account existed there was no way to log in and see the second half.
+        principal = self._account("principal@examora.test", "مریم", "کاظمی", User.Role.SCHOOL_ADMIN)
+        for user in (admin, teacher, principal):
             SchoolMembership.objects.get_or_create(user=user, defaults={"school": school})
+
+        # The second school gets a principal and one teacher, and no exams: enough for the platform
+        # administrator's school ranking to have two rows, and for that principal to see a console whose
+        # counts are honestly near zero rather than someone else's data.
+        second_school, _ = School.objects.get_or_create(name=SECOND_SCHOOL_NAME, defaults={"city": "کرج"})
+        second_principal = self._account("principal2@examora.test", "زهرا", "محمدی", User.Role.SCHOOL_ADMIN)
+        second_teacher = self._account("teacher2@examora.test", "فاطمه", "رحمانی", User.Role.TEACHER)
+        for user in (second_principal, second_teacher):
+            SchoolMembership.objects.get_or_create(user=user, defaults={"school": second_school})
 
         students: list[User] = []
         for index in range(count):
@@ -181,9 +198,12 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f"مدرسهٔ «{school.name}» آماده است."))
         self.stdout.write("")
-        self.stdout.write(f"  مدیر:    admin@examora.test    / {PASSWORD}")
-        self.stdout.write(f"  آموزگار: teacher@examora.test  / {PASSWORD}")
-        self.stdout.write(f"  دانش‌آموز: student1@examora.test … student{count}@examora.test / {PASSWORD}")
+        self.stdout.write(f"  مدیر سامانه:  admin@examora.test       / {PASSWORD}")
+        self.stdout.write(f"  مدیر مدرسه:   principal@examora.test   / {PASSWORD}  («{school.name}»)")
+        self.stdout.write(f"  مدیر مدرسه ۲: principal2@examora.test  / {PASSWORD}  («{second_school.name}»، بدون آزمون)")
+        self.stdout.write(f"  آموزگار:      teacher@examora.test     / {PASSWORD}")
+        self.stdout.write(f"  آموزگار ۲:    teacher2@examora.test    / {PASSWORD}  («{second_school.name}»)")
+        self.stdout.write(f"  دانش‌آموز:     student1@examora.test … student{count}@examora.test / {PASSWORD}")
         self.stdout.write("")
         self.stdout.write(f"  {len(groups)} گروه با {sum(len(members) for _, _, members in groups)} عضویت ساخته شد.")
 

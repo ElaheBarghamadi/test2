@@ -13,7 +13,7 @@ from apps.users.models import StudentProfile, TeacherProfile, User
 from apps.users.permissions import IsAdministrator, IsAdministratorOrSchoolAdmin
 
 from .models import School, SchoolMembership
-from .scope import governs_nothing, is_school_admin, managed_school, scope_exams, scope_users
+from .scope import governs_nothing, is_school_admin, managed_school, may_administer_account, scope_exams, scope_users
 from .serializers import AdminExamSerializer, AdminSchoolSerializer, AdminUserCreateSerializer, AdminUserSerializer, AdminUserWriteSerializer, SchoolSummarySerializer
 
 
@@ -184,6 +184,8 @@ class AdminUserDetailView(APIView):
         user = get_object_or_404(scope_users(request.user, users_queryset()), pk=user_id)
         school = managed_school(request.user)
         if school is not None:
+            if not may_administer_account(request.user, user):
+                raise PermissionDenied("حساب مدیر سامانه و مدیر مدرسه فقط با مدیر کل سامانه تغییر می‌کند.")
             if request.data.get("role") in {User.Role.ADMIN, User.Role.SCHOOL_ADMIN}:
                 raise PermissionDenied("مدیر مدرسه نمی‌تواند نقش مدیر بدهد.")
             wanted_school = request.data.get("school_id")

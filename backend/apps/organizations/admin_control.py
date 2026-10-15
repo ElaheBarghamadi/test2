@@ -44,7 +44,7 @@ from apps.users.models import User
 from apps.users.permissions import IsAdministrator, IsAdministratorOrSchoolAdmin
 
 from .models import School
-from .scope import governs_nothing, managed_school, scope_exams, scope_users
+from .scope import governs_nothing, managed_school, may_administer_account, scope_exams, scope_users
 from rest_framework.exceptions import PermissionDenied
 
 ACTIVITY_DAYS = 14
@@ -449,6 +449,10 @@ class AdminUserSessionsView(APIView):
 
         _require_membership(request.user)
         user = get_object_or_404(scope_users(request.user, User.objects.all()), pk=user_id)
+        # Cutting a session is supervision, but only of somebody this caller governs: an administrator who
+        # holds a membership in this school is in the queryset and is still not answerable to its principal.
+        if not may_administer_account(request.user, user):
+            raise PermissionDenied("نشست‌های مدیر سامانه و مدیر مدرسه را فقط مدیر کل سامانه می‌بندد.")
         outstanding = OutstandingToken.objects.filter(user=user)
         already = BlacklistedToken.objects.filter(token__in=outstanding).values_list("token_id", flat=True)
         created = 0

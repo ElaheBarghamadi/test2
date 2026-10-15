@@ -549,6 +549,66 @@ class AdminConsoleApiTests(TestCase):
         self.assertEqual(self.client.post(f"/api/v1/admin/users/{self.teacher_b.id}/revoke-sessions/", format="json").status_code, 404)
         self.assertEqual(self.client.post(f"/api/v1/admin/users/{self.admin.id}/revoke-sessions/", format="json").status_code, 404)
 
+    def test_a_principal_cannot_take_over_an_administrator_who_belongs_to_their_school(self) -> None:
+        """The escalation that membership alone used to grant.
+
+        `scope_users` reaches everyone whose membership points at the caller's school, and a platform
+        administrator who holds one is in that set like anybody else — which is exactly what the demo data
+        does. The queryset said "reachable", the endpoint read "governable", and a principal could set the
+        platform administrator's password, demote them, deactivate them and cut their sessions. Every one of
+        those returned 200. The earlier guard only refused *granting* an administrative role, so removing one
+        sailed straight through.
+        """
+        SchoolMembership.objects.create(user=self.admin, school=self.school_a)
+        self.authenticate(self.school_admin)
+        url = f"/api/v1/admin/users/{self.admin.id}/"
+
+        for payload in (
+            {"password": "Hijacked1234!"},      # account takeover
+            {"role": User.Role.STUDENT},        # demotion: not *granting* a role, so the old guard waved it through
+            {"is_active": False},               # lockout
+            {"role": User.Role.SCHOOL_ADMIN, "is_active": False},
+        ):
+            self.assertEqual(self.client.patch(url, payload, format="json").status_code, 403, payload)
+
+        self.admin.refresh_from_db()
+        self.assertEqual(self.admin.role, User.Role.ADMIN)
+        self.assertTrue(self.admin.is_active)
+        self.assertTrue(self.admin.check_password(self.password), "the password must be untouched")
+
+    def test_a_principal_cannot_cut_an_administrator_s_sessions_even_inside_their_school(self) -> None:
+        SchoolMembership.objects.create(user=self.admin, school=self.school_a)
+        self.authenticate(self.school_admin)
+        self.assertEqual(
+            self.client.post(f"/api/v1/admin/users/{self.admin.id}/revoke-sessions/", format="json").status_code, 403
+        )
+        # Another principal of the same school is an administrative account too.
+        peer = User.objects.create_user(email="peer.admin@example.com", password=self.password, role=User.Role.SCHOOL_ADMIN)
+        SchoolMembership.objects.create(user=peer, school=self.school_a)
+        self.assertEqual(
+            self.client.post(f"/api/v1/admin/users/{peer.id}/revoke-sessions/", format="json").status_code, 403
+        )
+
+    def test_the_rule_leaves_ordinary_supervision_alone(self) -> None:
+        """Refusing administrators must not turn into refusing the school."""
+        self.authenticate(self.school_admin)
+        # A student and a teacher of the school are still governable...
+        self.assertEqual(
+            self.client.patch(f"/api/v1/admin/users/{self.student.id}/", {"first_name": "ستاره"}, format="json").status_code, 200
+        )
+        self.assertEqual(
+            self.client.patch(f"/api/v1/admin/users/{self.teacher_a.id}/", {"first_name": "الهام"}, format="json").status_code, 200
+        )
+        # ...and so is the principal's own name, which is self-service rather than an escalation.
+        self.assertEqual(
+            self.client.patch(f"/api/v1/admin/users/{self.school_admin.id}/", {"first_name": "مریم"}, format="json").status_code, 200
+        )
+        # The platform administrator still governs everyone, principals included.
+        self.authenticate(self.admin)
+        self.assertEqual(
+            self.client.patch(f"/api/v1/admin/users/{self.school_admin.id}/", {"is_active": False}, format="json").status_code, 200
+        )
+
 
 class AdminLiveAttemptsApiTests(AdminConsoleApiTests):
     """Who is writing right now — the invigilation read, scoped like every other number in the console."""
