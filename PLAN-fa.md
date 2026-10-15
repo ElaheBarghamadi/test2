@@ -171,7 +171,22 @@ npm run dev:stack
   محصول در خود layout گفته می‌شود.
 
 ### تست‌ها
-- فرانت: **۴۲۶ تست در ۵۲ فایل — پاس** (پیش‌تر ۳۹۶ در ۵۰)
+- فرانت: **۴۲۶ تست در ۵۲ فایل — پاس** (پیش‌تر ۳۹۶ در ۵۰؛ پس از اصلاحیهٔ نوار ناوبری به ۴۳۳ در ۵۳ رسید)
 - بک‌اند: **۴۵۲ تست — OK** (تغییری در بک‌اند نبود، برای اطمینان دوباره اجرا شد)
 - `npm run lint`: بدون خطا؛ `tsc --noEmit`: تمیز
 - `next build`: موفق؛ `/` = ۱۳٫۲ کیلوبایت / ۱۶۴ کیلوبایت First Load، `/login` = ۱۳۷ کیلوبایت First Load
+
+### اصلاحیه — خطای کنسول در هر جابه‌جایی
+`useInsertionEffect must not schedule updates.` با stack که به `navigation-progress.tsx` اشاره می‌کرد،
+روی **هر** کلیک لاگ می‌شد. علت: `HistoryUpdater` خودِ Next (در `next/dist/client/components/app-router.js`)
+`window.history.pushState` را از داخل یک `useInsertionEffect` صدا می‌زند، و نوار پیشرفت ما آن متد را
+wrap کرده بود و در پاسخ `setPending(true)` می‌زد — یعنی زمان‌بندیِ به‌روزرسانی در فازی که React آن را
+ممنوع کرده.
+
+راه‌حل: نوار دیگر هیچ state ندارد. تنها چیزی که نوشته می‌شود `data-state` روی یک المنتِ همیشه‌حاضر است
+(`idle ← active ← done ← idle`) که React آن را رندر نمی‌کند، پس هیچ‌وقت سرِ آن دعوا نمی‌شود؛ و
+`visibility: hidden` در CSS همان چیزی است که نوارِ بی‌کار را از درخت دسترس‌پذیری بیرون می‌برد.
+`navigation-progress.test.tsx` دقیقاً همان محلِ فراخوانی Next را بازسازی می‌کند (یک `pushState` از داخل
+`useInsertionEffect`) و با پیاده‌سازی قدیمی شکست می‌خورد — بررسی شد.
+
+- فرانت: **۴۳۳ تست در ۵۳ فایل — پاس**

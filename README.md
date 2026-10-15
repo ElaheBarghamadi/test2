@@ -175,6 +175,17 @@ Every screen now paints the moment it is clicked, before any data arrives. Three
    `history.pushState`/`replaceState` rather than listening for clicks, because `usePathname()` alone cannot
    see a navigation start and `useSearchParams()` in the shell would force a Suspense boundary during static
    rendering. It is disabled under `prefers-reduced-motion`.
+
+   **It holds no React state, and must not gain any.** `window.history.pushState` is a global the framework
+   also calls: Next's own `HistoryUpdater`, in `next/dist/client/components/app-router.js`, calls it from
+   inside a `useInsertionEffect` on every App Router navigation. Wrapping it with a `setPending(true)` —
+   which is what this component used to do — schedules an update during the insertion-effect phase, and
+   React answers `useInsertionEffect must not schedule updates.` with a stack pointing at this file, once
+   per click. The bar is therefore driven imperatively: the only thing written is `data-state` on a
+   permanently mounted element (`idle` → `active` → `done` → `idle`), which React never renders and so
+   never fights over, and `visibility: hidden` in `globals.css` is what takes the idle bar out of the
+   accessibility tree. `navigation-progress.test.tsx` reproduces Next's exact call site — a `pushState`
+   from inside a `useInsertionEffect` — and fails if the component goes back to state.
 3. **Prefetching.** Sidebar links carry `prefetch`, so the route chunk is already in the browser by the time
    it is needed.
 
