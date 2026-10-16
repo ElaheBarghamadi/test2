@@ -286,6 +286,62 @@ Two dependency rules carry security weight here and are enforced, not remembered
 
    سپس `http://localhost:3000` را باز کنید. هر دستور npm دیگر نیز از همین مسیر اجرا می‌شود؛ برای نمونه: ` .\scripts\npm-local.cmd run build `. برای به‌روزرسانی یا نصب دوبارهٔ وابستگی‌ها، اسکریپت setup را دوباره اجرا کنید.
 
+### عیب‌یابی روی Windows
+
+**همهٔ صفحه‌ها ۵۰۰ می‌شوند و لاگ پر است از `Cannot find module 'next/dist/compiled/…'`**
+
+```text
+[web] [Error: Cannot find module 'next/dist/compiled/http-proxy']
+[web] [Error: Cannot find module 'next/dist/pages/_error']
+[web] [Error: Cannot find module 'C:\...\node_modules\@swc\helpers\package.json']
+[web] [Error: ENOENT ... next\dist\compiled\source-map08\mappings.wasm']
+[web]  ⨯ ./middleware.ts   Module not found: Can't resolve 'next/server'
+[web]  GET / 500
+```
+
+یعنی `node_modules` ناقص نصب شده است: خودِ Next سر جایش است، ولی بخشی از فایل‌های
+`next/dist/compiled/` و `@swc/helpers` هرگز نوشته نشده‌اند. هیچ ربطی به کد پروژه ندارد و با
+`git pull` یا تغییر صفحه‌ها درست نمی‌شود. علت‌های رایجش روی ویندوز:
+
+| علت | چرا خراب می‌کند |
+| --- | --- |
+| `npm install` وسط کار قطع شده | نصبِ بعدی از کشِ نیمه‌کاره ادامه می‌دهد و همان سوراخ را نگه می‌دارد |
+| پروژه زیر `Desktop` یا OneDrive است | OneDrive فایل‌ها را همگام‌سازی و قفل می‌کند و npm را وسط نوشتن می‌اندازد |
+| Windows Defender روی `.wasm` و `@swc` | فایل قرنطینه یا قفل می‌شود و npm نبودش را گزارش نمی‌کند |
+| مسیر بلندتر از ۲۶۰ کاراکتر | `next/dist/compiled/…` عمیق است و بدون Long Paths بی‌صدا ساخته نمی‌شود |
+
+درمان، در PowerShell:
+
+```powershell
+# ۱. پروژه را از Desktop/OneDrive بیرون ببرید
+Move-Item "$HOME\Desktop\Newfolder\test2" C:\dev\test2
+cd C:\dev\test2
+
+# ۲. نصب نیمه‌کاره را کامل پاک کنید — package-lock.json را پاک نکنید
+Remove-Item -Recurse -Force node_modules
+Remove-Item -Recurse -Force .next -ErrorAction SilentlyContinue
+
+# ۳. نصب تمیز از روی lock (Node پرتابل داخل .tools + npm ci)
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\setup-local-node.ps1
+
+# ۴. اجرا
+.\scripts\dev-local.cmd
+```
+
+`npm ci` به‌جای `npm install` مهم است: اول `node_modules` را کامل پاک می‌کند و دقیقاً همان نسخه‌های
+`package-lock.json` را می‌نویسد، پس سوراخِ نصب قبلی را با خودش نمی‌آورد. اگر `setup-local-node.ps1` را
+قبلاً اجرا کرده‌اید و فقط می‌خواهید دوباره نصب کنید، `.\scripts\npm-local.cmd ci` همان کار را با npm
+محلیِ خود پروژه انجام می‌دهد.
+
+اگر باز هم فایل کم آمد، یک‌بار با PowerShell به‌عنوان Administrator این دو را بزنید — مسیرهای بلند را
+فعال می‌کند و Defender را از پوشهٔ پروژه کنار می‌گذارد:
+
+```powershell
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+Add-MpPreference -ExclusionPath C:\dev\test2
+```
+
 ### Main frontend routes
 
 - `/` — product landing
@@ -436,6 +492,15 @@ One console, two roles. A platform administrator (`admin`) sees the network; a s
 (`school_admin`) sees the single school their `SchoolMembership` points at. The narrowing happens on the
 server — `apps/organizations/scope.py` — so the frontend needs no branch to stay honest, and a principal
 asking for `/admin/users/` receives their own school's roster whatever the query string says.
+
+**There are two unrelated admins, and signing into the wrong one looks like a bug.** `/admin/*` on the
+frontend is Examora's own console and is authorised purely by `role`. Django's `/admin/` on the API port is
+a separate surface authorised by `is_staff` plus per-model permissions. `manage.py seed_demo` creates
+`admin@examora.test` with `role=admin` and `is_staff=True` but deliberately **not** `is_superuser`, so that
+account runs the whole Examora console yet can sign into Django's admin only to be told it has no
+permissions — a known password on a demo account should not also grant raw model-level write access to the
+database. For Django's admin, create a real superuser with `manage.py createsuperuser` (which sets
+`role=admin` as well, so it reaches both surfaces).
 
 **Scope is not authority.** This was a live privilege escalation, found by seeding the principal account
 and then trying things against the running API:
