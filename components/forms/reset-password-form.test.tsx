@@ -111,3 +111,40 @@ describe("with an incomplete link", () => {
     expect(screen.getByText("این پیوند کامل نیست یا اعتبار ندارد")).toBeTruthy();
   });
 });
+
+describe("the full-screen screen", () => {
+  it("is full-bleed, keeps its heading with the form, and offers one way out above it", () => {
+    render(<ResetPasswordForm/>);
+    const panel = document.querySelector(".auth-panel") as HTMLElement;
+
+    expect(panel.className).toContain("flex-1");
+    expect(panel.className).toContain("min-h-0");
+    // A card floating on a background is precisely what this must not be.
+    for (const gone of ["mx-auto", "max-w-md", "rounded-[1.75rem]", "border", "shadow-lift"]) {
+      expect(panel.className, `still has ${gone}`).not.toContain(gone);
+    }
+    /*
+     * The indigo gradient band that used to act as a header is gone; the heading lives with the form
+     * instead. The submit button wears `bg-gradient-to-l` too, so the selector has to name both classes.
+     */
+    expect(panel.querySelector(".bg-gradient-to-l.from-indigo-600")).toBeNull();
+    const heading = screen.getByRole("heading", { name: "ساخت گذرواژهٔ جدید" });
+    expect(heading.tagName).toBe("H1");
+
+    const link = screen.getByRole("link", { name: /بازگشت به صفحه اصلی/ });
+    expect(link.getAttribute("href")).toBe("/");
+    const field = screen.getByLabelText(/^گذرواژهٔ جدید$/);
+    expect(link.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("scrolls inside the viewport instead of growing the page", () => {
+    render(<ResetPasswordForm/>);
+    const column = (document.querySelector(".auth-panel") as HTMLElement).firstElementChild as HTMLElement;
+
+    expect(column.className).toContain("overflow-y-auto");
+    expect(column.className).toContain("min-h-0");
+    expect(column.className).not.toContain("items-center");
+    expect((column.firstElementChild as HTMLElement).className).toContain("my-auto");
+    expect(column.contains(screen.getByLabelText(/تکرار گذرواژهٔ جدید/))).toBe(true);
+  });
+});

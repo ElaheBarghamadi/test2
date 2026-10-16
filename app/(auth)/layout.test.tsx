@@ -3,17 +3,12 @@ import { render, screen } from "@testing-library/react";
 import AuthLayout from "./layout";
 
 /**
- * The frame around login, register, forgot-password and reset-password.
+ * The frame around login, register, forgot-password and reset-password — which is to say, almost nothing.
  *
- * The requirement is that these screens are *full-screen*: one viewport tall, nothing scrolling behind
- * them. That is easy to lose without noticing, because every way of losing it still renders a perfectly
- * good-looking page — it just grows past the fold and the header scrolls away with it. So the invariants
- * are pinned here rather than left to eyeballing:
- *
- *  - the shell has a viewport height and clips, instead of a *minimum* height that content can push open;
- *  - `main` is allowed to shrink (`min-h-0`). A flex child defaults to `min-height: auto`, which refuses
- *    to go below its content and quietly turns `h-dvh` back into "at least a viewport";
- *  - the header and the trust strip are `shrink-0`, so a tall form squeezes the card rather than the chrome.
+ * The requirement is a screen that is *only* the form: one viewport tall, full-bleed, with no site header,
+ * no footer, no logo and no trust strip, and a single «بازگشت به صفحه اصلی» link that the forms render
+ * themselves. Every one of those absences is invisible when it goes wrong — removing `min-h-0`, or letting
+ * a header creep back in, still renders a perfectly good-looking page — so they are pinned here.
  */
 describe("AuthLayout", () => {
   it("is exactly one viewport tall and does not scroll as a page", () => {
@@ -23,39 +18,38 @@ describe("AuthLayout", () => {
     expect(shell.className).toContain("h-dvh");
     expect(shell.className).toContain("overflow-hidden");
     expect(shell.className).toContain("flex-col");
-    // A minimum height is the bug: the page then grows with the form and the shell stops being a screen.
+    // A minimum height is the bug: the page then grows with the form and the screen stops being a screen.
     expect(shell.className).not.toContain("min-h-dvh");
     expect(shell.className).not.toContain("min-h-[calc");
   });
 
-  it("lets main shrink into the leftover height and scroll only below lg", () => {
+  it("lets the screen inside fill the height, and leaves the scrolling to it", () => {
     render(<AuthLayout><div data-testid="child">فرم</div></AuthLayout>);
     const main = screen.getByRole("main");
 
+    /*
+     * `min-h-0` is the one that silently undoes everything else: a flex child defaults to
+     * `min-height: auto`, refuses to shrink below its content, and turns `h-dvh` back into "at least a
+     * viewport" while the class string still looks correct.
+     */
     expect(main.className).toContain("min-h-0");
     expect(main.className).toContain("flex-1");
-    // Phones get one scroll container here; on lg the card fills the space and scrolls inside itself.
-    expect(main.className).toContain("overflow-y-auto");
-    expect(main.className).toContain("lg:overflow-hidden");
-    expect(main.className).not.toContain("justify-center");
-
-    // The narrow reset-password card must be centred, not stretched into a tall thin panel.
-    expect(screen.getByTestId("child").parentElement?.className).toContain("lg:items-center");
+    // The form column owns the only scrollbar; a second one here would fight it.
+    expect(main.className).not.toContain("overflow-y-auto");
+    expect(screen.getByTestId("child").parentElement).toBe(main);
   });
 
-  it("keeps the header and the trust strip from being squeezed away", () => {
-    render(<AuthLayout><div>فرم</div></AuthLayout>);
+  it("carries no site chrome of its own", () => {
+    const { container } = render(<AuthLayout><div>فرم</div></AuthLayout>);
 
-    expect(screen.getByRole("banner").className).toContain("shrink-0");
-    const strip = screen.getByText("اجرا بدون نیاز به اینترنت").closest("ul") as HTMLElement;
-    expect(strip.className).toContain("shrink-0");
-  });
-
-  it("renders the screen it is given, plus the phone-only tagline and a way back", () => {
-    render(<AuthLayout><div data-testid="child">فرم</div></AuthLayout>);
-
-    expect(screen.getByTestId("child")).toBeTruthy();
-    expect(screen.getByText("ارزیابی مدرن، برای آموزش معنادار.")).toBeTruthy();
-    expect(screen.getByRole("link", { name: /بازگشت به سایت/ })).toBeTruthy();
+    expect(screen.queryByRole("banner")).toBeNull();
+    expect(screen.queryByRole("contentinfo")).toBeNull();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    // The old frame's header link and its three-item trust strip.
+    expect(screen.queryByRole("link", { name: /بازگشت به سایت/ })).toBeNull();
+    expect(screen.queryByText("اجرا بدون نیاز به اینترنت")).toBeNull();
+    expect(container.querySelector("header, footer, ul")).toBeNull();
+    // Only the shell, its decoration and `main` — nothing between the visitor and the form.
+    expect(screen.getByRole("main").parentElement?.childElementCount).toBe(2);
   });
 });

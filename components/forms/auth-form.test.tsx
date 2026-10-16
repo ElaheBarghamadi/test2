@@ -221,22 +221,49 @@ describe("with no connection", () => {
   });
 });
 
-describe("the full-screen card", () => {
+describe("the full-screen screen", () => {
   function panel() {
     return document.querySelector(".auth-panel") as HTMLElement;
   }
 
-  it("fills the height the layout leaves it, on every signed-out screen", () => {
-    // `reset-password` renders its own form, but through this same layout.
+  it("is the whole screen — full-bleed and filling the height, on every mode", () => {
+    // `/reset-password` renders its own component; these three all render this one.
     for (const mode of ["login", "register", "forgot"] as const) {
       const { unmount } = render(<AuthForm mode={mode}/>);
-      expect(panel().className, mode).toContain("lg:h-full");
-      expect(panel().className, mode).toContain("lg:min-h-0");
+      const classes = panel().className;
+      expect(classes, mode).toContain("flex-1");
+      expect(classes, mode).toContain("min-h-0");
+      // A card floating on a background is precisely what this must not be.
+      for (const gone of ["mx-auto", "max-w-6xl", "rounded-[1.75rem]", "border", "shadow-lift"]) {
+        expect(classes, `${mode} still has ${gone}`).not.toContain(gone);
+      }
+      // Transparent on a phone, where the shell's decoration shows through behind the form; opaque from
+      // `lg` up, where the split needs its two halves to read as two halves.
+      expect(classes, mode).toContain("bg-transparent");
+      expect(classes, mode).toContain("lg:bg-card");
       unmount();
     }
   });
 
-  it("scrolls the tall register form inside the card rather than centring its top out of reach", () => {
+  it("offers exactly one way out, and puts it above the form", () => {
+    render(<AuthForm mode="login"/>);
+    const exits = screen.getAllByRole("link", { name: /بازگشت به صفحه اصلی/ });
+    expect(exits).toHaveLength(1);
+
+    const link = exits[0];
+    /*
+     * A real link to `/`, not `router.back()`: plenty of visitors land on /login from a shared link or a
+     * redirected protected route, where there is no history to go back to.
+     */
+    expect(link.getAttribute("href")).toBe("/");
+    // Above the form, not below it or floating over it.
+    const field = screen.getByLabelText(/ایمیل/);
+    expect(link.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // And inside the scrolling column, so it belongs to the form rather than to a chrome that no longer exists.
+    expect((panel().children[1] as HTMLElement).contains(link)).toBe(true);
+  });
+
+  it("scrolls the tall register form inside the screen rather than centring its top out of reach", () => {
     render(<AuthForm mode="register"/>);
     const column = panel().children[1] as HTMLElement;
 
@@ -250,11 +277,10 @@ describe("the full-screen card", () => {
      */
     expect(column.className).not.toContain("items-center");
     expect((column.firstElementChild as HTMLElement).className).toContain("my-auto");
-    // The first field has to stay reachable: it lives inside the scrolling column, not above it.
     expect(column.contains(screen.getByLabelText(/نام و نام خانوادگی/))).toBe(true);
   });
 
-  it("keeps the brand side from pushing the card open on a short viewport", () => {
+  it("keeps the brand side from pushing the screen open on a short viewport", () => {
     render(<AuthForm mode="login"/>);
     const aside = panel().querySelector("aside") as HTMLElement;
 
@@ -262,7 +288,7 @@ describe("the full-screen card", () => {
     expect(aside.className).not.toContain("min-h-[600px]");
     const scroll = aside.querySelector(".auth-brand-scroll") as HTMLElement;
     expect(scroll.className).toContain("overflow-y-auto");
-    // The decorative blocks are the ones a short screen gives up, so they have to be hookable from CSS.
+    // The decorative blocks are what a short screen gives up, so they have to be hookable from CSS.
     expect(aside.querySelector(".auth-panel-demo")).toBeTruthy();
     expect(aside.querySelector(".auth-panel-points")).toBeTruthy();
   });

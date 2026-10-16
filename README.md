@@ -500,32 +500,43 @@ behind it. A refused read renders one sentence, not nine zeros.
 Everything a visitor sees before they have an account: `/`, `/login`, `/register`, `/forgot-password`,
 `/reset-password`.
 
-**The four auth screens are exactly one viewport tall.** `app/(auth)/layout.tsx` builds a `h-dvh` flex
-column that clips — `header` (`shrink-0`) → `main` (`min-h-0 flex-1`) → trust strip (`shrink-0`) — with the
-card in between filling whatever height is left. Nothing scrolls as a page, so the header and the strip
-stay put while the visitor works through the form, and the register form (the tall one) scrolls inside the
-card instead of pushing the screen open.
+**The four auth screens are the whole screen.** `app/(auth)/layout.tsx` is a `h-dvh` flex column that
+clips, and it holds nothing but `main` — no site header, no logo, no footer, no trust strip. The visitor
+came here to do one thing, and every row of chrome is a row the form does not have. The screens inside are
+full-bleed (`.auth-panel` carries no `max-w-*`, rounding, border or shadow: it *is* the screen rather than
+a card floating on one) and own their own scrolling, so nothing can push the page past the fold.
 
-Three details are easy to undo without noticing, because every way of losing them still renders a
-good-looking page. All three are pinned by `app/(auth)/layout.test.tsx` and by the «full-screen card»
-block in `components/forms/auth-form.test.tsx`:
+The only way off is «بازگشت به صفحه اصلی», which each form renders above itself
+(`components/shared/back-home-link.tsx`). It lives in the forms rather than in the layout because on `lg`
+the screen is split in two and the link belongs over the form half, not over the showcase half. It is a
+link to `/` and not `router.back()`: a visitor who arrives from a shared link or a redirected protected
+route has no history to go back to, and a button that does nothing reads as a broken page.
+
+Four details are easy to undo without noticing, because every way of losing them still renders a
+good-looking page. All four are pinned by `app/(auth)/layout.test.tsx` and by the «full-screen screen»
+blocks in `components/forms/auth-form.test.tsx` and `components/forms/reset-password-form.test.tsx`:
 
 - `min-h-dvh` instead of `h-dvh` *is* the bug: a minimum height lets a tall form grow the page, and the
   screen stops being a screen.
-- `min-h-0` on `main`. A flex child defaults to `min-height: auto` and refuses to shrink below its
-  content, which quietly turns `h-dvh` back into "at least a viewport" even though the class looks right.
-- The form column centres its child with `my-auto`, **not** `items-center` on the column. Centring a
-  flex child that overflows clips its top, which is exactly the part of a form a visitor needs first;
-  auto margins collapse to zero when there is no room, so the column scrolls from the first field.
+- `min-h-0` on `main` **and** on the panel. A flex child defaults to `min-height: auto` and refuses to
+  shrink below its content, which quietly turns `h-dvh` back into "at least a viewport" while the class
+  string still looks right.
+- The form column centres its child with `my-auto`, **not** `items-center` on the column. Centring a flex
+  child that overflows clips its top, which is exactly the part of a form a visitor needs first; auto
+  margins collapse to zero when there is no room, so the column scrolls from the first field.
+- `main` must not grow a scrollbar of its own. The column inside the panel has the only one.
 
-Below `lg` the brand side is hidden and `main` owns the only scrollbar, because a phone has no room for a
-nested one. On `lg` the card is exactly the height the viewport leaves, so the brand side gives content up
-rather than scrolling a marketing panel: `globals.css` hides `.auth-panel-points` under 900 px of viewport
-height and `.auth-panel-demo` under 720 px, with `.auth-brand-scroll` as the scrollbar-free fallback
-behind both. `/reset-password` is a single narrow column rather than a two-column card, so its wrapper
-adds `lg:items-center`; without it a flex child stretches and the card becomes a tall thin panel.
-`@supports not (height: 100dvh)` falls back to `100vh`, so a browser without `dvh` still gets a
-full-height screen instead of one collapsed onto its content.
+Below `lg` there is no showcase half, and the panel is transparent so the shell's grid and radial washes
+show through behind the form; from `lg` up it is `bg-card`, so the split reads as two halves. Because the
+brand half is now exactly the height of the viewport, it gives content up on a short screen instead of
+scrolling a marketing panel: `globals.css` hides `.auth-panel-points` under 760px of viewport height and
+`.auth-panel-demo` under 600px, with `.auth-brand-scroll` as the scrollbar-free fallback behind both.
+`@supports not (height: 100dvh)` falls back to `100vh`, so a browser without `dvh` still gets a full-height
+screen rather than one collapsed onto its content.
+
+`/reset-password` used to be a narrow card under an indigo gradient band. That band was a header in
+everything but name, so the heading now sits with the form and the screen is full-bleed like the other
+three.
 
 **The landing page claims only what is in this repository.** The earlier version opened with a strip of
 invented statistics — «۹۸٪ رضایت مدارس», «+۴۵هزار آزمون موفق», «۲۴/۷ پایداری سرویس» — for a product with no

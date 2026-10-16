@@ -10,6 +10,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CapsLockNotice, Field, FieldSelect, StrengthMeter, useCapsLock } from "@/components/forms/auth-field";
+import { BackHomeLink } from "@/components/shared/back-home-link";
 import { ExamDemoCard } from "@/components/shared/exam-demo-card";
 import { authErrorMessage, dashboardForRole, useAuthStore } from "@/lib/state/auth-store";
 import { authApi } from "@/lib/api/auth";
@@ -174,7 +175,17 @@ export function AuthForm({ mode }: { mode: Mode }) {
   }
 
   return (
-    <div className="auth-panel mx-auto grid w-full max-w-6xl overflow-hidden rounded-[1.75rem] border bg-card shadow-lift lg:h-full lg:min-h-0 lg:grid-cols-[1.02fr_.98fr]">
+    /*
+     * Full-bleed: no `max-w-*`, no rounding, no border, no shadow. This element *is* the screen now, so
+     * decorating it as a card floating on a background would just inset the thing the visitor came for.
+     * `flex-1` + `min-h-0` make it take exactly the height the shell has, which is what lets the form
+     * column below scroll inside the viewport instead of growing the page.
+     *
+     * Transparent below `lg` so the shell's grid and radial washes show through behind the form — on a
+     * phone there is no brand half to carry the colour. Opaque from `lg` up, where the split needs the two
+     * halves to read as two halves.
+     */
+    <div className="auth-panel grid w-full min-h-0 flex-1 overflow-hidden bg-transparent lg:grid-cols-[1.02fr_.98fr] lg:bg-card">
       <BrandPanel mode={mode}/>
 
       {/*
@@ -185,6 +196,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
        */}
       <div className="flex min-h-0 flex-col overflow-y-auto overscroll-contain p-5 sm:p-8 lg:p-11">
         <div className="my-auto w-full max-w-md">
+          <BackHomeLink className="mb-5"/>
           <p className="section-label">{copy.eyebrow}</p>
           <h1 className="mt-3 text-2xl font-black tracking-tight sm:text-[1.75rem]">{copy.title}</h1>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">{copy.subtitle}</p>
